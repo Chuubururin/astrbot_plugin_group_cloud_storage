@@ -1,0 +1,19 @@
+# AstrBot 插件元数据（官方规范：docs.astrbot.app/dev/star/plugin-new.html）
+name: astrbot_plugin_group_cloud_storage
+desc: QQ 群三类原生云存储空间（群文件 / 群相册 / 群精华）的统一管理：同步索引、文件增删改查、长文本与长视频入库、HTTP/FTP/SMB 中转与本机下载服务。
+author: Chuubururin
+version: v0.0.3
+repo: https://github.com/Chuubururin/astrbot_plugin_group_cloud_storage
+display_name: 群云存储管理器
+short_desc: 群文件 / 群相册 / 群精华统一云存储管理
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.16,<5"
+category: 工具
+tags:
+  - 群管理
+  - 文件管理
+  - 云存储
+  - QQ群
+  - 文件同步
+  - 管理工具

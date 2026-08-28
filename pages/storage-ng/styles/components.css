@@ -1,0 +1,708 @@
+/*
+ * Component styles - one section per component/view.
+ *
+ * Layout order mirrors the module tree: shell chrome (header/tabs/status),
+ * shared widgets (toolbar/chips/tables/pager/modal/toast), then the
+ * per-tab views (files, albums, essence, netdisk, tasks, groups, config,
+ * debug). All colors come from tokens.css (FE-5).
+ */
+
+/* ===================== Shell chrome ===================== */
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: var(--header-height);
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.header-left, .header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.header-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.queue-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--text-md);
+}
+
+.queue-bar:hover { background: var(--surface2); }
+.sse-offline { color: var(--danger); cursor: help; }
+
+.auto-hint {
+  font-size: 9px;
+  color: var(--text-lo);
+  cursor: help;
+}
+
+.layout-toggle-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-md);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.layout-toggle-btn:hover { color: var(--text-hi); border-color: var(--border-strong); }
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-md);
+  cursor: pointer;
+}
+
+.icon-btn:hover { background: var(--surface2); color: var(--text-hi); }
+
+/* Tabs (8-tab IA, order fixed by ADR-0007) */
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-md);
+  cursor: pointer;
+  font: inherit;
+}
+
+.tab-btn:hover { background: var(--surface2); color: var(--text-hi); }
+.tab-btn.active { background: var(--accent-soft); color: var(--accent-hi); }
+
+/* Status bar */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--status-bar-height);
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 9px;
+  color: var(--text-lo);
+}
+
+.status-error { color: var(--danger); }
+.status-offline { color: var(--danger); }
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Stat strip (aggregate stats card under the tabs) */
+.stat-bar {
+  display: flex;
+  gap: var(--space-4);
+  padding: 6px var(--space-4);
+  font-size: 12px;
+  color: var(--text-md);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ===================== Shared widgets ===================== */
+
+/* Toolbar row (files / netdisk / albums / essence / tasks / config) */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  flex-wrap: wrap;
+}
+
+.toolbar-left, .toolbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.toolbar-menu { position: relative; }
+
+.menu-box {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  min-width: 160px;
+  padding: var(--space-1) 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  color: var(--text-hi);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover { background: var(--surface2); }
+
+/* Context menu (right-click on table rows) */
+.ctx-menu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 160px;
+  max-width: 260px;
+  padding: var(--space-1) 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 5px var(--space-3);
+  border: none;
+  background: transparent;
+  color: var(--text-hi);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ctx-item:hover { background: var(--surface2); }
+.ctx-item.danger { color: var(--danger); }
+.ctx-item.danger:hover { background: rgba(248, 113, 113, .1); }
+.ctx-item[data-disabled] { opacity: 0.4; cursor: not-allowed; }
+.ctx-item[data-disabled]:hover { background: transparent; }
+.ctx-icon { display: inline-flex; flex-shrink: 0; color: var(--text-md); }
+.ctx-item.danger .ctx-icon { color: var(--danger); }
+.ctx-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.ctx-shortcut { margin-left: auto; color: var(--text-lo); font-size: 10px; }
+.ctx-sep { height: 1px; margin: 3px 0; background: var(--border); }
+
+/* Type / status filter chips (13-class classification + derived status) */
+.type-chips {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface2);
+  border-radius: var(--radius-sm);
+  flex-wrap: wrap;
+}
+
+.type-chip {
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-lo);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.type-chip:hover { color: var(--text-hi); }
+.type-chip.active { background: var(--accent-soft); color: var(--accent-hi); }
+
+/* Breadcrumb (file-manager paradigm: ../ up-level + folder chain) */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space-1) 0;
+  font-size: 11px;
+}
+
+.crumb {
+  padding: 2px var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent-hi);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.crumb:hover { background: var(--accent-soft); }
+.crumb.active { color: var(--text-hi); cursor: default; }
+.crumb-sep { color: var(--text-lo); margin: 0 2px; }
+
+/* Tag cloud (custom-tag classification for files/albums/essence) */
+.tagcloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: var(--space-2) 0;
+}
+
+/* Tables shared bits */
+.table-wrap { overflow-x: auto; margin-top: var(--space-2); }
+
+.col-chk { width: 26px; text-align: center; }
+.col-name { min-width: 160px; }
+.col-name .fname { font-weight: 500; }
+.col-size, .col-time, .col-files, .col-taskid, .col-kind, .col-target { white-space: nowrap; }
+
+/* Dual-pane list layout (single pane is the default, N-07 rule 3) */
+.table-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+.table-grid.single { grid-template-columns: 1fr; }
+.table-grid.single .table-b { display: none !important; }
+
+/* Action bar (selection-driven command strip under a list) */
+.file-action-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+  padding: var(--space-1) var(--space-3);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin: var(--space-2) 0;
+  font-size: 10px;
+  flex-wrap: wrap;
+}
+
+.bar-hint { color: var(--text-lo); }
+.bar-info { color: var(--accent-hi); font-weight: 500; }
+.bar-sep { width: 1px; height: 16px; background: var(--border); margin: 0 var(--space-1); }
+
+.bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-hi);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bar-btn:hover { background: var(--surface2); border-color: var(--border-strong); }
+.bar-btn.danger { color: var(--danger); }
+.bar-btn.danger:hover { background: rgba(248, 113, 113, .1); }
+
+/* Pager */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+}
+
+.pager-label {
+  font-size: 10px;
+  color: var(--text-md);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.count-badge { color: var(--text-md); font-size: 11px; }
+
+/* Modal (sandbox-safe: the iframe host blocks native dialogs) */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .5);
+  backdrop-filter: blur(4px);
+}
+
+.modal-box {
+  width: 90%;
+  max-width: 420px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+}
+
+.modal-wide { width: min(760px, 92vw); }
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+
+.modal-body {
+  font-size: 12px;
+  color: var(--text-md);
+  white-space: pre-wrap;
+  margin-bottom: var(--space-4);
+}
+
+.modal-form { margin-bottom: var(--space-4); }
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: var(--space-3);
+}
+
+.form-row > span {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-md);
+}
+
+.form-row input, .form-row textarea, .form-row select { width: 100%; }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* Detail dialog (key/value grid) */
+.detail-grid { display: flex; flex-direction: column; gap: 6px; min-width: 320px; }
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.detail-label { color: var(--text-md); }
+.detail-value { color: var(--text-hi); word-break: break-all; white-space: pre-wrap; }
+
+/* Toast notifications */
+.toast-container {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
+.toast {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  font-size: 11px;
+  color: var(--text-hi);
+  pointer-events: auto;
+  transform: translateX(120%);
+  transition: transform 0.2s ease;
+}
+
+.toast-show { transform: translateX(0); }
+.toast-hide { transform: translateX(120%); }
+.toast-icon { display: inline-flex; }
+.toast-success .toast-icon { color: var(--ok); }
+.toast-error .toast-icon { color: var(--danger); }
+.toast-warn .toast-icon { color: var(--warn); }
+.toast-info .toast-icon { color: var(--accent-hi); }
+
+/* Task panel (floating log behind the header queue indicator) */
+.task-panel {
+  position: fixed;
+  top: 52px;
+  right: 12px;
+  width: 380px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  z-index: 900;
+}
+
+.task-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.task-panel-count { color: var(--text-md); font-weight: 400; font-size: 12px; }
+
+.task-panel-toggle {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  cursor: pointer;
+  color: var(--text-hi);
+}
+
+.task-panel-list { overflow-y: auto; padding: 4px 0; }
+
+.task-row {
+  display: grid;
+  grid-template-columns: 84px 90px 56px 1fr;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  align-items: baseline;
+}
+
+.task-time { color: var(--text-md); }
+.task-kind { color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-state.st-pending { color: var(--warn); }
+.task-state.st-running { color: var(--accent); }
+.task-state.st-done { color: var(--ok); }
+.task-state.st-failed { color: var(--danger); }
+.task-detail { color: var(--text-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Marquee rectangle selection */
+.marquee-box {
+  position: fixed;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  pointer-events: none;
+  z-index: 999;
+}
+
+body.marquee-active { user-select: none; }
+body.marquee-active tr { cursor: crosshair; }
+
+/* Folder tree picker (move-target dialog) */
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.tree-row:hover { background: var(--surface2); }
+.tree-row.active { background: var(--accent-soft); }
+
+.tree-toggle {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-md);
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+/* Essence full-text viewer */
+.essence-text {
+  max-height: 55vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-hi);
+  background: var(--surface2);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+}
+
+/* Album media gallery (lazy-mounted grid) */
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-2);
+  max-height: 55vh;
+  overflow: auto;
+}
+
+.gallery-item {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface2);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--text-md);
+  text-align: center;
+  padding: 4px;
+}
+
+.gallery-img { width: 100%; height: 100%; object-fit: cover; }
+.gallery-hint { word-break: break-all; }
+
+.gallery-vid-btn {
+  margin-top: 4px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text-hi);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.gallery-vid-btn:disabled { opacity: 0.6; cursor: wait; }
+
+/* Task state badges (tasks / bridge tables) */
+.st-pending { background: rgba(251, 191, 36, .12); color: var(--warn); }
+.st-running { background: var(--accent-soft); color: var(--accent-hi); }
+.st-paused { background: rgba(148, 163, 184, .12); color: var(--text-md); }
+.st-done { background: rgba(52, 211, 153, .12); color: var(--ok); }
+.st-failed { background: rgba(248, 113, 113, .12); color: var(--danger); }
+
+.btn-act {
+  display: inline-flex; align-items: center; padding: 1px 8px;
+  margin: 0 2px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text-hi); font-size: 10px; cursor: pointer;
+}
+
+.btn-act:hover { background: var(--surface2); }
+.btn-act.danger { color: var(--danger); }
+
+/* ===================== Per-tab views ===================== */
+
+/* Netdisk bridge status strip (dual-transfer tasks live under the netdisk tab) */
+.bridge-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-4);
+}
+
+.bridge-header h2 { margin: 0; font-size: 16px; }
+
+.bridge-status {
+  display: flex;
+  gap: var(--space-4);
+  font-size: 11px;
+  color: var(--text-md);
+}
+
+.bridge-toolbar, .bridge-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.btn-retry {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #000;
+  font-size: 10px;
+  padding: 2px var(--space-2);
+}
+
+.btn-cancel {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  padding: 2px var(--space-2);
+}
+
+.detail-hint {
+  display: inline-flex;
+  margin-left: 4px;
+  color: var(--text-lo);
+  cursor: help;
+}
+
+/* Operation-stream panel (tasks tab) */
+.ops-panel {
+  margin-top: var(--space-3); padding: var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface2);
+}
+
+.ops-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+.ops-body { margin-top: var(--space-2); max-height: 300px; overflow: auto; }
+.ops-row { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; font-size: 10px; font-family: var(--font-mono); }
+.ops-idx { color: var(--text-lo); }
+.ops-act { color: var(--accent-hi); white-space: nowrap; }
+.ops-before, .ops-after { color: var(--text-md); overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.ops-arrow { color: var(--text-lo); }
+
+/* Config center */
+.config-groups { display: flex; flex-direction: column; gap: var(--space-4); }
+
+.config-group-title {
+  margin: 0 0 var(--space-2); padding-bottom: var(--space-1);
+  font-size: 12px; font-weight: 600; color: var(--text-hi);
+  border-bottom: 1px solid var(--border);
+}
+
+.config-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: var(--space-3); }
+
+.config-item {
+  padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.config-item.dirty { border-color: var(--accent); }
+.config-item.masked { opacity: .85; }
+.config-item-head { display: flex; align-items: center; gap: var(--space-2); }
+.config-key { font-weight: 600; font-family: var(--font-mono); font-size: 11px; }
+.config-item-desc { color: var(--text-md); font-size: 10px; margin: var(--space-1) 0; line-height: 1.4; }
+.config-input { width: 100%; }
+.config-textarea { min-height: 64px; font-family: var(--font-mono); font-size: 10px; }
+.config-status { margin-top: var(--space-2); }

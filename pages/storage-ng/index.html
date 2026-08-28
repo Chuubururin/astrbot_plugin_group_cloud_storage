@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>群云存储管理</title>
+  <!--
+    Entry page for the group cloud storage plugin (AstrBot Page).
+
+    Zero-build contract (HL-18): native ES modules only, no bundler.
+    The AstrBot host injects the postMessage bridge SDK
+    (window.AstrBotPluginPage) before this module graph executes; every
+    backend call must go through api.js which wraps that SDK.
+
+    Element ids below are part of the E2E DOM contract (TE-1) - the
+    playwright probes locate header/tabs/stat-bar/content/status-bar by id.
+  -->
+  <link rel="stylesheet" href="./styles/tokens.css">
+  <link rel="stylesheet" href="./styles/base.css">
+  <link rel="stylesheet" href="./styles/components.css">
+  <script type="module" src="./main.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header id="header"></header>
+    <nav id="tabs"></nav>
+    <div id="stat-bar"></div>
+    <main id="content"></main>
+    <footer id="status-bar"></footer>
+  </div>
+</body>
+</html>

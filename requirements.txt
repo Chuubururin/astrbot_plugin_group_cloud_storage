@@ -1,0 +1,6 @@
+# AstrBot plugin dependency declaration
+# Host AstrBot dependencies are not listed here.
+# V1.0: no third-party dependencies (stdlib sqlite3 + AstrBot built-in).
+# V2.0: httpx for OpenList bridge (control plane async HTTP client).
+httpx>=0.27
+# aiosqlite>=0.20     # optional: async SQLite

@@ -1,0 +1,200 @@
+{
+  "managed_groups": {
+    "type": "list",
+    "default": [],
+    "description": "受管群白名单（群号列表）：仅这些群允许管理操作；留空 = 全部已发现群可管理",
+    "group": "权限与发布"
+  },
+  "global_admin_qqs": {
+    "type": "list",
+    "default": [],
+    "description": "跨群管理授权 QQ 号（全局管理员，可操作任意受管群）",
+    "group": "权限与发布"
+  },
+  "request_interval_ms": {
+    "type": "int",
+    "default": 1000,
+    "description": "OneBot API 请求最小间隔（毫秒），防风控；扫描等批量任务自动放大间隔（默认 1000，建议 ≥500）",
+    "group": "同步与凋零"
+  },
+  "auto_index_upload_event": {
+    "type": "bool",
+    "default": true,
+    "description": "监听群文件上传事件（group_upload）并实时写入本地索引",
+    "group": "同步与凋零"
+  },
+  "auto_scan_interval_hours": {
+    "type": "float",
+    "default": 6,
+    "description": "凋零差分对账周期（小时）（2026-09-01 D-4 语义重定义：目录级差分替代定时全量；云端消失条目差分即剔除；缺席群冻结不误删；全量扫描降级为手动例外）；0 = 关闭定时，仅事件与手动触发",
+    "group": "同步与凋零"
+  },
+  "auto_label": {
+    "type": "bool",
+    "default": true,
+    "description": "同步后自动为未编号群续填编号（字母/数字自动编号，辅助排序）",
+    "group": "同步与凋零"
+  },
+  "page_size": {
+    "type": "int",
+    "default": 10,
+    "description": "文件列表默认每页条数（1-100；页面内可临时切换）",
+    "group": "页面与预览"
+  },
+  "essence_chunk_size": {
+    "type": "int",
+    "default": 4000,
+    "description": "群精华单条消息字符上限（硬限制 4000）；长文本保存为精华时按此分段（每段 ≤ 该值，末尾语义化标记整合）；实限 4500 预留标记预算",
+    "group": "入库与组合存储"
+  },
+  "video_segment_seconds": {
+    "type": "int",
+    "default": 599,
+    "description": "群相册视频时长上限（秒，硬限制 <599）；超过该时长的视频入库时无损切分为多个 <599s 分片",
+    "group": "入库与组合存储"
+  },
+  "fetch_max_bytes": {
+    "type": "int",
+    "default": 2147483648,
+    "description": "外部文件入库（/csfetch）单文件大小上限（字节，默认 2GB）",
+    "group": "入库与组合存储"
+  },
+  "fetch_timeout_sec": {
+    "type": "int",
+    "default": 180,
+    "description": "外部文件入库下载超时（秒）",
+    "group": "入库与组合存储"
+  },
+  "volume_compress_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "C-4 分卷压缩开关（文件侧）：大文件分卷上传前启用 zip 可逆压缩（下载重组自动解压）；默认关闭",
+    "group": "入库与组合存储"
+  },
+  "volume_checksum_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "C-5 校验卷开关：分卷上传后附加 SHA-256 校验卷，确保上传前/重组后数据一致；默认关闭",
+    "group": "入库与组合存储"
+  },
+  "download_server_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "开启本机下载服务（HTTP + FTP）：外部客户端直接访问本机接口拉取群文件（单文件 302 至 QQ CDN，分卷/视频流式重组）",
+    "group": "下载服务"
+  },
+  "download_server_host": {
+    "type": "string",
+    "default": "127.0.0.1",
+    "description": "本机下载服务的对外地址（IP/域名）；局域网访问请填本机内网 IP",
+    "group": "下载服务"
+  },
+  "download_http_port": {
+    "type": "int",
+    "default": 6186,
+    "description": "本机 HTTP 下载服务端口（0 = 关闭 HTTP）",
+    "group": "下载服务"
+  },
+  "download_ftp_port": {
+    "type": "int",
+    "default": 0,
+    "description": "本机 FTP 下载服务端口（0 = 关闭 FTP；虚拟目录 /<群号>/<文件名>）",
+    "group": "下载服务"
+  },
+  "download_token": {
+    "type": "string",
+    "default": "",
+    "description": "下载服务访问令牌（留空 = 不校验；生成的下载地址会附带此令牌）",
+    "group": "下载服务"
+  },
+  "op_high_priority_kinds": {
+    "type": "list",
+    "default": [],
+    "description": "操作队列优先级覆盖（操作类型列表）；留空 = 内置默认；填写后完全替换内置高优集合，例如 [\"rename\",\"upload\"]",
+    "group": "任务与队列"
+  },
+  "openlist_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "Enable OpenList bridge (archive group files to OpenList netdisk)",
+    "group": "桥接与网盘"
+  },
+  "openlist_base_url": {
+    "type": "string",
+    "default": "",
+    "description": "OpenList server URL (e.g. http://192.168.1.10:5244)",
+    "group": "桥接与网盘"
+  },
+  "openlist_username": {
+    "type": "string",
+    "default": "",
+    "description": "OpenList login username",
+    "group": "桥接与网盘"
+  },
+  "openlist_password": {
+    "type": "string",
+    "default": "",
+    "description": "OpenList login password",
+    "group": "桥接与网盘"
+  },
+  "openlist_token": {
+    "type": "string",
+    "default": "",
+    "description": "OpenList direct token injection (bypass username/password login)",
+    "group": "桥接与网盘"
+  },
+  "openlist_dst_dir": {
+    "type": "string",
+    "default": "/",
+    "description": "OpenList target root directory for archived files",
+    "group": "桥接与网盘"
+  },
+  "openlist_dst_dir_template": {
+    "type": "string",
+    "default": "{group_id}/{filename}",
+    "description": "Path template for archived files (literal replace: {group_id}, {filename})",
+    "group": "桥接与网盘"
+  },
+  "openlist_timeout_sec": {
+    "type": "float",
+    "default": 30.0,
+    "description": "OpenList API request timeout (seconds)",
+    "group": "桥接与网盘"
+  },
+  "openlist_allow_private_address": {
+    "type": "bool",
+    "default": false,
+    "description": "Allow private/reserved IP addresses for OpenList (SSRF protection toggle)",
+    "group": "桥接与网盘"
+  },
+  "openlist_poll_interval_sec": {
+    "type": "int",
+    "default": 0,
+    "description": "Bridge task polling interval (seconds); 0 = manual mode (query via /csbridge status); >0 = auto polling (stops when no pending tasks)",
+    "group": "桥接与网盘"
+  },
+  "bridge_min_bytes": {
+    "type": "int",
+    "default": 0,
+    "description": "Minimum file size for bridge archive (bytes); 0 = no limit",
+    "group": "桥接与网盘"
+  },
+  "bridge_max_bytes": {
+    "type": "int",
+    "default": 0,
+    "description": "Maximum file size for bridge archive (bytes); 0 = no limit",
+    "group": "桥接与网盘"
+  },
+  "type_ext_overrides": {
+    "type": "dict",
+    "default": {},
+    "description": "CT-9 type classification overrides: {\".xyz\": \"pdf\"} (extension with dot -> 13-class group: document/pdf/spreadsheet/slide/online_doc/image/video/audio/archive/installer/flash/folder/other; program->installer, data->other legacy aliases); suffix editing = 13-class reclassification; applies to file listing, netdisk indexing and preview routing (2026-09-01 ADR-0008 N-01)",
+    "group": "页面与预览"
+  },
+  "preview_policy": {
+    "type": "dict",
+    "default": {},
+    "description": "CT-9 preview policy overrides: {\"key\": {\"types\": \"document,data\", \"mode\": \"external|builtin|download\", \"template\": \"https://viewer.example/?url={src}\"}}; merged over the built-in default table",
+    "group": "页面与预览"
+  }
+}

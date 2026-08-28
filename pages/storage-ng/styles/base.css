@@ -1,0 +1,221 @@
+/*
+ * Base styles - resets, form controls, shared primitives.
+ *
+ * Only rules used by every view live here; anything view- or component-
+ * specific belongs in components.css. All colors come from tokens.css.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+/* Native form controls should follow the active theme */
+html { color-scheme: dark; }
+html[data-theme="light"] { color-scheme: light; }
+
+body {
+  margin: 0;
+  padding: var(--space-2);
+  background: var(--bg);
+  color: var(--text-hi);
+  /* S6：字体栈对齐宿主 AstrBot dashboard（tokens.css --font-sans） */
+  font: 10.5px/1.35 var(--font-sans, -apple-system, "Segoe UI", sans-serif);
+  max-width: 1560px;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* App shell: header / tabs / stat strip / view / status bar */
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+header {
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+nav {
+  height: var(--tab-height);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  gap: var(--space-2);
+}
+
+main {
+  flex: 1;
+  padding: var(--space-4);
+  overflow: auto;
+}
+
+footer {
+  height: var(--status-bar-height);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 9px;
+  color: var(--text-lo);
+}
+
+/* ---- Buttons ---- */
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-hi);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--surface2);
+  border-color: var(--border-strong);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+/* ---- Inputs ---- */
+input, select, textarea {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-hi);
+  font: inherit;
+  font-size: 11px;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+select, input[type="text"], input[type="search"] { min-width: 120px; }
+
+/* ---- Tables (shared by files / groups / tasks / bridge tables) ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+th {
+  background: var(--surface2);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+th[data-sort] { cursor: pointer; }
+th[data-sort]:hover { color: var(--accent-hi); }
+
+tr.selected { background: var(--accent-soft); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: var(--surface2); }
+
+.compact th, .compact td { padding: var(--space-1) var(--space-2); font-size: 10px; }
+
+/* ---- Badges and tags (machine values rendered via dictionaries, FE-8) ---- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  border-radius: 99px;
+  font-size: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-hi);
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
+.badge.ok, .badge.done { color: var(--ok); background: rgba(52, 211, 153, .12); }
+.badge.warn, .badge.pending { color: var(--warn); background: rgba(251, 191, 36, .12); }
+.badge.danger, .badge.failed { color: var(--danger); background: rgba(248, 113, 113, .12); }
+.badge.running { color: var(--accent-hi); background: var(--accent-soft); }
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-radius: 99px;
+  font-size: 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-md);
+  margin-left: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tag:hover { border-color: var(--border-strong); }
+.tag.hit { color: var(--accent-hi); border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---- Scrollbars ---- */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-lo); }
+
+/* ---- Utilities ---- */
+.hidden { display: none !important; }
+.spacer { flex: 1; }
+.empty-hint {
+  text-align: center;
+  color: var(--text-lo);
+  padding: var(--space-6) 0;
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); border: 0;
+}

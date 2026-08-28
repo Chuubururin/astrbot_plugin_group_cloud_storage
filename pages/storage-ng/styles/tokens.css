@@ -1,0 +1,81 @@
+/*
+ * Design tokens - the single source of truth for theming (FE-5).
+ *
+ * The plugin page runs inside the AstrBot dashboard and must follow its
+ * host theme: main.js resolves the effective theme (host context first,
+ * system preference fallback) and writes data-theme on <html>. No bare
+ * color values are allowed anywhere else in the codebase - every style
+ * references one of these variables.
+ *
+ * Palette: AstrBot dashboard-compatible dark (default) + light variant.
+ */
+
+:root,
+html[data-theme="dark"] {
+  /* S6 修正（2026-09-03）：AstrBot 默认主题 PurpleThemeDark 官方全套
+   * （bundle 定义 + 运行时 --v-theme-* 双重实证：primary #5ba4d4 /
+   * background #1a1a1a / surface #242424 / on-surface #ffffff） */
+  --bg: #1a1a1a;
+  --surface: #242424;
+  --surface2: #2d2e30;
+  --border: rgba(51, 51, 51, 0.93);
+  --border-strong: #787878;
+
+  --text-hi: #e8eaed;
+  --text-md: #d5d9df;
+  --text-lo: #9aa0aa;
+
+  --accent: #5ba4d4;
+  --accent-hi: #84c9ea;
+  --accent-soft: rgba(91, 164, 212, 0.16);
+
+  --ok: #52c41a;
+  --warn: #faad14;
+  --danger: #ff4d4f;
+
+  /* Geometry */
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
+  --shadow-md: 0 6px 24px rgba(0, 0, 0, .4);
+
+  /* Typography - 2026-09-03 S6：对齐宿主字体栈
+   * （dashboard computed fontFamily：Outfit, Noto Sans, PingFang SC, ...） */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: Outfit, "Noto Sans", "PingFang SC", "Hiragino Sans GB",
+    "Noto Sans CJK SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+
+  /* Spacing scale (4px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* Fixed chrome heights (header / tab strip / status bar) */
+  --header-height: 48px;
+  --tab-height: 40px;
+  --status-bar-height: 32px;
+}
+
+html[data-theme="light"] {
+  /* S6 修正：AstrBot 浅色主题 PurpleTheme 官方（primary #3c96ca / secondary
+   * #2f86bd / lightprimary #eef2f6；background/surface #ffffff） */
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --surface2: #eef2f6;
+  --border: #d8dee6;
+  --border-strong: #b8c2cf;
+  --text-hi: #101828;
+  --text-md: #57607a;
+  --text-lo: #8a93a9;
+  --accent: #3c96ca;
+  --accent-hi: #2f86bd;
+  --accent-soft: rgba(60, 150, 202, .12);
+  --ok: #00c853;
+  --warn: #ffc107;
+  --danger: #f44336;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
+  --shadow-md: 0 8px 28px rgba(16, 24, 40, .12);
+}

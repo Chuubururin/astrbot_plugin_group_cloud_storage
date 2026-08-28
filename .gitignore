@@ -1,0 +1,31 @@
+# 非运行态文件（测试、工具脚本、文档）
+tests/
+docs/
+tools/
+scripts/
+pages/storage-ng/testing/
+pages/storage-ng/README.md
+*.pyc
+__pycache__/
+.pytest_cache/
+*.bak
+
+# 运行时数据（插件运行时生成）
+data/
+*.db
+*.db-shm
+*.db-wal
+*.zip
+
+# 开发配置
+pytest.ini
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
