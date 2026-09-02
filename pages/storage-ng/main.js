@@ -17,7 +17,6 @@ import { initTabs } from './components/tabs.js';
 import { initStatusBar } from './components/status-bar.js';
 import { initTaskPanel } from './components/task-panel.js';
 import { initStatBar } from './components/stat-bar.js';
-import { isE2EMode, initE2EHooks, disableBridge } from './testing/e2e-hooks.js';
 import { EVENT_TYPES, DATA_CHANGED_TOPICS, EVENT_KINDS } from './constants.js';
 import { createResilientSSE } from './utils/sse.js';
 import { toast } from './components/toast.js';
@@ -173,11 +172,18 @@ function initKeyboard() {
 
 // ---------- Init ----------
 
-function init() {
+/** E2E mode detection inline（testing/ 目录不入库——GitHub 安装无此文件，
+ * 任何对它的顶层 import 都会让整个模块图 404、页面白屏） */
+function isE2EMode() {
+  return new URLSearchParams(window.location.search).get('e2e') === '1';
+}
+
+async function init() {
   if (isE2EMode()) {
     console.log('[main] E2E mode detected');
-    disableBridge();
-    initE2EHooks();
+    const hooks = await import('./testing/e2e-hooks.js');
+    hooks.disableBridge();
+    hooks.initE2EHooks();
   }
 
   initTheme();

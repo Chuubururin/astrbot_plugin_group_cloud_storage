@@ -17,6 +17,12 @@
     "description": "OneBot API 请求最小间隔（毫秒），防风控；扫描等批量任务自动放大间隔（默认 1000，建议 ≥500）",
     "group": "同步与凋零"
   },
+  "max_concurrent_scans": {
+    "type": "int",
+    "default": 8,
+    "description": "最大并行扫描账号数（多账号水平扩展）；1=串行，建议 ≤ 账号数，上限 20",
+    "group": "同步与凋零"
+  },
   "auto_index_upload_event": {
     "type": "bool",
     "default": true,

@@ -3,19 +3,51 @@
 Main 只保留薄壳 _op_handler 委托；scan/file_scan/sync/文件操作/精华/传输/批量
 等 12 类分发与容量联动、扫描进度节流全部收敛于此，可脱离 Star 宿主独立测试。
 
-v2.12：多账号并行扫描 —— 每 bot 独立 adapter + 信号量控制并发，
-替代旧版串行轮转（300群×3账号=串行900次 API）。
+v2.12：多账号并行扫描 —— 每 bot 独立 adapter + 信号量控制并发。
+v2.13：可配置硬顶 + 随机抖动 + 账号级熔断器 + 群哈希分片去重。
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import random
 import time
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from adapters.limiter.interval import IntervalLimiter
 from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.log import logger
+
+
+@dataclass
+class BotHealth:
+    """账号级健康状态（熔断器核心）。"""
+    consecutive_failures: int = 0
+    total_failures: int = 0
+    total_successes: int = 0
+    cooldown_until: float = 0.0  # monotonic time; now < cooldown_until → 暂停
+
+    @property
+    def is_cooling(self) -> bool:
+        return time.monotonic() < self.cooldown_until
+
+    def record_success(self) -> None:
+        self.consecutive_failures = 0
+        self.cooldown_until = 0.0  # 成功即解除冷却
+        self.total_successes += 1
+
+    def record_failure(self, cooldown_seconds: float = 30.0) -> None:
+        self.consecutive_failures += 1
+        self.total_failures += 1
+        # ≥3 次连续失败 → 进入冷却
+        if self.consecutive_failures >= 3:
+            self.cooldown_until = time.monotonic() + cooldown_seconds
+            logger.warning(
+                f"[circuit-breaker] bot entering cooldown "
+                f"{cooldown_seconds}s (consecutive={self.consecutive_failures})"
+            )
 
 
 class OpDispatcher:
@@ -46,32 +78,113 @@ class OpDispatcher:
         self.config = config
         self.bridge = bridge
         self._bots_getter = bots_getter
-        # v2.12：并行扫描信号量（最多同时 2 个账号扫描，防 QQ 风控）
-        self._scan_semaphore = asyncio.Semaphore(2)
+        # 并行扫描信号量（可配置硬顶，默认 8，防风控叠加）
+        max_concurrent = int(config.get("max_concurrent_scans", 8))
+        max_concurrent = max(1, min(max_concurrent, 20))
+        self._scan_semaphore = asyncio.Semaphore(max_concurrent)
+        # 账号级熔断器（每 bot 独立健康分）
+        self._bot_health: dict[str, BotHealth] = {}
+        # 全局熔断：过半账号同时冷却 → 全局暂停 10 分钟
+        self._global_cooldown_until: float = 0.0
+        logger.info(f"[op-queue] scan concurrency: {max_concurrent}")
 
-    async def _run_scan_for_bot(self, bot, mode: str) -> None:
+    # ── 群哈希分片 ──────────────────────────────────────────────
+    def _assign_groups(
+        self, all_groups: list[dict], bots: list
+    ) -> dict[int, list[str]]:
+        """将群列表按 hash(group_id) % len(bots) 稳定分片到各账号。
+
+        返回 {bot_index: [group_id, ...]}。账号下线时其分片自然迁移
+        （hash 重算，无需显式迁移表）。
+        """
+        if not bots:
+            return {}
+        n = len(bots)
+        assignment: dict[int, list[str]] = {i: [] for i in range(n)}
+        for g in all_groups:
+            gid = str(g.get("group_id") or "")
+            if not gid:
+                continue
+            shard = int(hashlib.md5(gid.encode()).hexdigest(), 16) % n
+            assignment[shard].append(gid)
+        return assignment
+
+    def _bot_id(self, bot) -> str:
+        """提取 bot 稳定标识（用于 health map key）。"""
+        return str(getattr(bot, "_uin", None) or id(bot))
+
+    def _check_global_circuit_breaker(self, bots: list) -> bool:
+        """检查全局熔断：过半账号同时冷却 → 返回 True（应暂停全部）。"""
+        now = time.monotonic()
+        if now < self._global_cooldown_until:
+            return True
+        if not bots:
+            return False
+        cooling_count = sum(
+            1 for b in bots
+            if self._bot_health.get(self._bot_id(b), BotHealth()).is_cooling
+        )
+        if cooling_count > len(bots) / 2:
+            pause = 600  # 10 分钟
+            self._global_cooldown_until = now + pause
+            logger.warning(
+                f"[circuit-breaker] GLOBAL PAUSE {pause}s — "
+                f"{cooling_count}/{len(bots)} bots in cooldown (IP-level throttle?)"
+            )
+            return True
+        return False
+
+    async def _run_scan_for_bot(
+        self, bot, mode: str, group_filter: list[str] | None = None
+    ) -> None:
         """为单个 bot 创建独立 adapter 执行扫描（无全局状态竞争）。"""
         from adapters.onebot.napcat import NapCatApiAdapter
+
+        bot_id = self._bot_id(bot)
+        health = self._bot_health.setdefault(bot_id, BotHealth())
+
+        # 熔断检查：该账号在冷却中则跳过
+        if health.is_cooling:
+            logger.debug(f"[circuit-breaker] skipping bot {bot_id} (cooling)")
+            return
 
         try:
             interval = float(self.config.get("request_interval_ms", 1000)) / 1000.0
         except (TypeError, ValueError):
             interval = 1.0
+        # ±20% 随机抖动，防多账号同相位触发服务端聚合风控
+        jitter = interval * random.uniform(0.8, 1.2)
         bot_api = NapCatApiAdapter(
             lambda action, params: bot.call_action(action, **params),
-            interval=interval,
+            interval=jitter,
         )
         async with self._scan_semaphore:
             try:
                 if mode == "incremental":
-                    await self.scan.scan_owned_incremental(
-                        account_bot=bot, api_override=bot_api
+                    result = await self.scan.scan_owned_incremental(
+                        account_bot=bot, api_override=bot_api,
+                        group_filter=group_filter,
                     )
                 else:
-                    await self.scan.scan_owned(account_bot=bot, api_override=bot_api)
+                    result = await self.scan.scan_owned(
+                        account_bot=bot, api_override=bot_api,
+                        group_filter=group_filter,
+                    )
+                # 熔断信号：失败占比 >50% 视为该 bot 本次失败
+                total = getattr(result, "total", 0) or 0
+                failed = getattr(result, "failed", 0) or 0
+                if total > 0 and failed > total / 2:
+                    health.record_failure()
+                    logger.warning(
+                        f"[circuit-breaker] bot {bot_id}: "
+                        f"{failed}/{total} groups failed (>50%)"
+                    )
+                else:
+                    health.record_success()
             except Exception as e:
+                health.record_failure()
                 logger.warning(
-                    f"[op-queue] scan bot {getattr(bot, '_uin', '?')} failed: {e}"
+                    f"[op-queue] scan bot {bot_id} failed: {e}"
                 )
 
     async def handle(self, op) -> None:
@@ -86,13 +199,37 @@ class OpDispatcher:
                 else:
                     await self.scan.scan_owned(account_bot=b)
             else:
-                # v2.12：多 bot 并行（每 bot 独立 adapter，信号量控制并发）
+                # 全局熔断检查
+                if self._check_global_circuit_breaker(bots):
+                    logger.warning("[op-queue] scan skipped: global circuit breaker")
+                    return
+                # 稳定分片：按 bot id 排序，消除 getiter 顺序抖动
+                bots_sorted = sorted(bots, key=lambda b: self._bot_id(b))
+                # 群哈希分片：从各 bot API 拉群列表取并集（发现新群的关键路径）
+                all_group_ids: set[str] = set()
+                for b in bots_sorted:
+                    try:
+                        from adapters.onebot.napcat import NapCatApiAdapter
+                        _api = NapCatApiAdapter(
+                            lambda action, params, _b=b: _b.call_action(action, **params),
+                            interval=0.1,
+                        )
+                        raw = await _api.list_groups()
+                        for g in raw:
+                            gid = str(g.get("group_id") or "")
+                            if gid:
+                                all_group_ids.add(gid)
+                    except Exception as e:
+                        logger.debug(f"[op-queue] pre-scan list_groups failed for {self._bot_id(b)}: {e}")
+                all_groups = [{"group_id": gid} for gid in all_group_ids]
+                assignment = self._assign_groups(all_groups, bots_sorted)
+                # 多 bot 并行（每 bot 独立 adapter + 分片群列表）
                 tasks = [
                     asyncio.create_task(
-                        self._run_scan_for_bot(b, mode),
-                        name=f"scan-{getattr(b, '_uin', id(b))}",
+                        self._run_scan_for_bot(b, mode, assignment.get(i, [])),
+                        name=f"scan-{self._bot_id(b)}",
                     )
-                    for b in bots
+                    for i, b in enumerate(bots_sorted)
                 ]
                 await asyncio.gather(*tasks, return_exceptions=True)
         elif op.kind == "file_scan":
@@ -360,14 +497,16 @@ class OpDispatcher:
         )
 
     async def refresh_capacity(self, group_id: str) -> None:
-        """容量统一口径并持久化到 groups 表（所有通道共用，不再被 fs 恒 0 覆盖）：
-        - fs.used_space 可信（>0）→ 用之
-        - 否则 → 本地文件索引 SUM(active size)（资产管理口径）
-        - file_count 同样兜底索引计数
+        """容量统一口径并持久化到 groups 表。
+
+        fs API 失败时返回 None → 跳过写入，保留上次真值，杜绝 0 值覆盖震荡。
         """
         try:
             await self.queue.acquire()
-            used, total, count, limit = await self.capacity_of(group_id)
+            result = await self.capacity_of(group_id)
+            if result is None:
+                return
+            used, total, count, limit = result
             await self.store.update_group_fields(
                 group_id,
                 used_space=used,
@@ -378,18 +517,18 @@ class OpDispatcher:
         except Exception as e:
             logger.debug(f"[group-scan] capacity refresh failed for {group_id}: {e}")
 
-    async def capacity_of(self, group_id: str) -> tuple[int, int, int, int]:
-        """统一容量口径（2026-09-03 对齐 group_scan._capacity_of 四元组）：
-        fs 优先 → 字段级本地索引兜底；整体异常 → 本地索引统计兜底（total/limit=0）。"""
+    async def capacity_of(self, group_id: str) -> tuple[int, int, int, int] | None:
+        """统一容量口径。
+
+        fs 成功 → 返回四元组（字段级本地索引兜底 used/count）。
+        fs 失败或返回 total=0 → 返回 None（调用方跳过写入，保留上次值）。
+        """
         try:
             fs = await self.api.get_group_fs_info(group_id)
         except Exception:
-            return (
-                await self.store.sum_resource_sizes(group_id),
-                0,
-                await self.store.count_active(group_id),
-                0,
-            )
+            return None
+        if not fs.total_space:
+            return None
         used = fs.used_space or await self.store.sum_resource_sizes(group_id)
         count = fs.file_count or await self.store.count_active(group_id)
         return used, fs.total_space, count, fs.limit_count

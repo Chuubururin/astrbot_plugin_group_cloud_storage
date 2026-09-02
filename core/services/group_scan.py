@@ -24,12 +24,14 @@ class ScanResult:
     total: int = 0
     owned: int = 0
     scanned_at: int = 0
+    failed: int = 0  # 本次扫描中 API 失败的群数
 
     def as_dict(self) -> dict:
         return {
             "total": self.total,
             "owned": self.owned,
             "scanned_at": self.scanned_at,
+            "failed": self.failed,
         }
 
 
@@ -57,27 +59,19 @@ class GroupScanService:
         except asyncio.TimeoutError:
             raise TimeoutError(f"call timeout after {timeout}s")
 
-    async def _capacity_of(self, group_id: str, api=None) -> tuple[int, int, int, int]:
-        """统一容量口径（2026-09-03 所有者口径核对：云端优先 → 本地索引兜底）。
+    async def _capacity_of(self, group_id: str, api=None) -> tuple[int, int, int, int] | None:
+        """统一容量口径（云端优先 → 本地索引兜底）。
 
-        返回 (used, total_space, count, limit_count) 四元组。
-
-        - 云端：get_group_fs_info → FileSystemInfo（used/total/count/limit）；
-        - 字段级兜底：used/count 为零时用本地索引 SUM(active size)/COUNT(active)；
-        - **整体异常兜底**：返回 (本地 SUM, 0, 本地 COUNT, 0)——绝不静默默认为 0
-          （此前返回 0,0,0 丢失本地索引统计）。
-        与 OpDispatcher.capacity_of 语义一致（四元组）。
+        fs 成功且 total>0 → 返回四元组。
+        fs 失败或 total=0 → 返回 None（调用方跳过容量写入，保留上次值）。
         """
         _api = api or self.api
         try:
             fs = await _api.get_group_fs_info(group_id)
         except Exception:
-            return (
-                await self.store.sum_resource_sizes(group_id),
-                0,
-                await self.store.count_active(group_id),
-                0,
-            )
+            return None
+        if not fs.total_space:
+            return None
         used = fs.used_space or await self.store.sum_resource_sizes(group_id)
         count = fs.file_count or await self.store.count_active(group_id)
         return used, fs.total_space, count, fs.limit_count
@@ -88,8 +82,11 @@ class GroupScanService:
         force_role_scan: bool = False,
         account_bot=None,
         api_override=None,
+        group_filter: list[str] | None = None,
     ) -> ScanResult:
         """扫描群信息（调用方负责放入 OpQueue；逐群调用自行限速）。
+
+        group_filter: 哈希分片后每 bot 只扫自己分片的群（None=全部）。
 
         效率策略（300 群场景，docs/09 §13.3）：
         - owned 判定 = 群列表 diff 增量：仅对**新群**调用 `get_group_member_info(self)`
@@ -111,10 +108,20 @@ class GroupScanService:
             except Exception as e:
                 logger.debug(f"[group-scan] on_account_resolved callback failed: {e}")
         groups = await api.list_groups()
+        # 哈希分片过滤：分片内的群 + DB 未知的新群（发现关键路径）一律放行
+        if group_filter is not None:
+            filter_set = set(group_filter)
+            known_ids = {g.group_id for g in await self.store.list_groups()}
+            groups = [
+                g for g in groups
+                if str(g.get("group_id") or "") in filter_set
+                or str(g.get("group_id") or "") not in known_ids
+            ]
         group_total = len(groups)
         # 增量判定：读取已有 role 缓存
         known = {g.group_id: g for g in await self.store.list_groups()}
         owned = 0
+        failed = 0  # API 失败群数（熔断器信号）
         now = int(time.time())
         judged = 0  # 本次实际判定的新群数
         last_pub = 0.0
@@ -134,18 +141,28 @@ class GroupScanService:
                 except Exception as e:
                     logger.warning(f"[group-scan] role judge failed for {gid}: {e}")
                     role = prev.role if prev else "unknown"
-            # 容量采集（跨群统计；扩展 API 不支持时降级为 0）
+            # 容量采集：fs 失败返回 None → 保留 prev 值，不写 0 覆盖
             cap_used = cap_total = cap_count = cap_limit = 0
+            cap_ok = False
             album_c = essence_c = 0
             if include_capacity:
                 try:
                     await self.queue.acquire()
-                    cap_used, cap_total, cap_count, cap_limit = await self._with_timeout(
+                    _cap = await self._with_timeout(
                         self._capacity_of(gid, api)
                     )
+                    if _cap is not None:
+                        cap_used, cap_total, cap_count, cap_limit = _cap
+                        cap_ok = True
                 except Exception as e:
                     logger.debug(f"[group-scan] fs_info unavailable for {gid}: {e}")
-                # v8/v9：相册/精华采集 + 资源化入库（全量节奏）
+            if not cap_ok and prev:
+                cap_used = prev.used_space
+                cap_total = prev.total_space
+                cap_count = prev.file_count
+                cap_limit = prev.limit_count
+            # v8/v9：相册/精华采集 + 资源化入库（全量节奏，每群都采集）
+            if include_capacity:
                 try:
                     await self.queue.acquire()
                     albums_raw = await self._with_timeout(api.get_qun_album_list(gid))
@@ -200,10 +217,10 @@ class GroupScanService:
                     }
                 )
                 last_pub = time.monotonic()
-        self.last_result = ScanResult(total=group_total, owned=owned, scanned_at=now)
+        self.last_result = ScanResult(total=group_total, owned=owned, scanned_at=now, failed=failed)
         logger.info(
             f"[group-scan] done: total={group_total} owned={owned} "
-            f"judged_new={judged} (ts={now})"
+            f"failed={failed} judged_new={judged} (ts={now})"
         )
         if self.auto_label:
             await self.auto_fill_labels()
@@ -232,13 +249,22 @@ class GroupScanService:
                     logger.warning(f"[group-scan] role judge failed for {gid}: {e}")
                     role = prev.role if prev else "unknown"
             cap_used = cap_total = cap_count = cap_limit = 0
+            cap_ok = False
             try:
                 await self.queue.acquire(mult=2.0)
-                cap_used, cap_total, cap_count, cap_limit = await self._with_timeout(
+                _cap = await self._with_timeout(
                     self._capacity_of(gid)
                 )
+                if _cap is not None:
+                    cap_used, cap_total, cap_count, cap_limit = _cap
+                    cap_ok = True
             except Exception as e:
                 logger.debug(f"[group-scan] fs_info unavailable for {gid}: {e}")
+            if not cap_ok and prev:
+                cap_used = prev.used_space
+                cap_total = prev.total_space
+                cap_count = prev.file_count
+                cap_limit = prev.limit_count
             if role == "owned":
                 owned += 1
             # 边扫边落库：大数量下列表随扫描即时可见
@@ -360,14 +386,14 @@ class GroupScanService:
         logger.info(f"[group-scan] batch {action} done: {total} groups")
 
     async def scan_owned_incremental(
-        self, account_bot=None, api_override=None
+        self, account_bot=None, api_override=None,
+        group_filter: list[str] | None = None,
     ) -> ScanResult:
-        """增量群信息同步（默认节奏，docs/00 §3.5）：
+        """增量群信息同步（默认节奏）：
         - 仅对「新群/容量未知群」采集容量 + 判定 owned
         - 存量已知群：仅更新 group_name/last_scan_at（不拉容量）
-        - 尽可能少用全量拉取维护本地数据
 
-        api_override: v2.12 并行扫描——传入独立 adapter 实例，避免全局状态竞争。
+        group_filter: 哈希分片后每 bot 只扫自己分片的群（None=全部）。
         """
         api = api_override or self.api
         if account_bot is not None and hasattr(api, "with_bot"):
@@ -381,10 +407,20 @@ class GroupScanService:
             except Exception as e:
                 logger.debug(f"[group-scan] on_account_resolved callback failed: {e}")
         groups = await api.list_groups()
-        group_total = len(groups)
         known = {g.group_id: g for g in await self.store.list_groups()}
+        # 哈希分片过滤：分片内的群 + DB 未知的新群（发现关键路径）一律放行
+        if group_filter is not None:
+            filter_set = set(group_filter)
+            known_ids = set(known.keys())
+            groups = [
+                g for g in groups
+                if str(g.get("group_id") or "") in filter_set
+                or str(g.get("group_id") or "") not in known_ids
+            ]
+        group_total = len(groups)
         now = int(time.time())
         owned = 0
+        failed = 0  # API 失败群数（熔断器信号）
         judged = 0
         last_pub = 0.0
         for i, g in enumerate(groups, 1):
@@ -396,7 +432,8 @@ class GroupScanService:
             need = prev is None or prev.total_space <= 0 or not prev.last_scan_at
             role = prev.role if prev else "unknown"
             album_c = essence_c = 0
-            cap_used = cap_total = cap_count = 0
+            cap_used = cap_total = cap_count = cap_limit = 0
+            cap_ok = False
             if need:
                 if role in ("unknown",):
                     try:
@@ -409,13 +446,22 @@ class GroupScanService:
                     except Exception as e:
                         logger.warning(f"[group-scan] role judge failed for {gid}: {e}")
                         role = prev.role if prev else "unknown"
+                        failed += 1
                 try:
                     await self.queue.acquire(mult=2.0)
-                    cap_used, cap_total, cap_count, cap_limit = await self._with_timeout(
+                    _cap = await self._with_timeout(
                         self._capacity_of(gid, api)
                     )
+                    if _cap is not None:
+                        cap_used, cap_total, cap_count, cap_limit = _cap
+                        cap_ok = True
                 except Exception as e:
                     logger.debug(f"[group-scan] fs_info unavailable for {gid}: {e}")
+                if not cap_ok and prev:
+                    cap_used = prev.used_space
+                    cap_total = prev.total_space
+                    cap_count = prev.file_count
+                    cap_limit = prev.limit_count
                 # v8/v9 资源统计：相册/精华（仅新群/未知群采集 + 资源化入库）
                 try:
                     await self.queue.acquire(mult=2.0)
@@ -430,15 +476,11 @@ class GroupScanService:
                         f"[group-scan] album/essence unavailable for {gid}: {e}"
                     )
             else:
-                # 存量已知群不拉云端容量；本地索引兜底修正（prev 为 0 时用索引 SUM）
-                cap_used, cap_total, cap_count = (
-                    prev.used_space,
-                    prev.total_space,
-                    prev.file_count,
-                )
-                if prev.used_space <= 0:
-                    idx_used = await self.store.sum_resource_sizes(gid)
-                    cap_used = idx_used or prev.used_space
+                # 存量已知群不拉云端容量；保留 prev 值
+                cap_used = prev.used_space
+                cap_total = prev.total_space
+                cap_count = prev.file_count
+                cap_limit = prev.limit_count
             if role == "owned":
                 owned += 1
             # 边扫边落库：大数量下列表随扫描即时可见
@@ -479,10 +521,10 @@ class GroupScanService:
                     }
                 )
                 last_pub = time.monotonic()
-        self.last_result = ScanResult(total=group_total, owned=owned, scanned_at=now)
+        self.last_result = ScanResult(total=group_total, owned=owned, scanned_at=now, failed=failed)
         logger.info(
             f"[group-scan] incremental done: total={group_total} "
-            f"owned={owned} touched={judged}"
+            f"owned={owned} failed={failed} touched={judged}"
         )
         return self.last_result
 

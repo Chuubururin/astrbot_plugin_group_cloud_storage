@@ -2,7 +2,7 @@ name: astrbot_plugin_group_cloud_storage
 display_name: 群云存储管理器
 short_desc: QQ 群文件/相册/精华统一管理，支持网盘转存与 WebUI 面板
 desc: QQ 群原生云存储（群文件 / 群相册 / 群精华）的统一管理插件。支持文件浏览搜索上传下载、相册画廊、精华长文本保存与分段、OpenList 网盘双向转存、任务台账、多群批量管理，提供 WebUI 管理面板。
-version: 0.0.4
+version: 0.0.5
 author: Chuubururin
 repo: https://github.com/Chuubururin/astrbot_plugin_group_cloud_storage
 astrbot_version: ">=4.16,<5"
