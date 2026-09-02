@@ -33,7 +33,7 @@ from core.domain.sync import (
 )
 from ports.meta_store import MetaStorePort
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 
 # 版本化迁移：{版本号: [SQL 列表]}。启动时仅执行 当前版本 < 目标 的迁移（增量、幂等）。
 _MIGRATIONS: dict[int, list[str]] = {
@@ -227,7 +227,36 @@ _MIGRATIONS: dict[int, list[str]] = {
         "(SELECT COALESCE(NULLIF(g.display_name, ''), g.group_name, '') FROM groups g "
         "WHERE g.group_id = new.group_id)); END;",
     ],
-    # v12: archive_map for bridge operations (REQ-03)
+    # v17：扩展全文检索投影（路径、文件夹、MIME、上传者、哈希、群号）
+    17: [
+        "DROP TRIGGER IF EXISTS resources_fts_ai;",
+        "DROP TRIGGER IF EXISTS resources_fts_ad;",
+        "DROP TRIGGER IF EXISTS resources_fts_au;",
+        "DROP TABLE IF EXISTS resources_fts;",
+        "CREATE VIRTUAL TABLE resources_fts USING fts5("
+        "name, summary, tags, groupname, path, folder, mime, uploader, hash, groupid, "
+        "tokenize='trigram');",
+        "INSERT INTO resources_fts(rowid, name, summary, tags, groupname, path, folder, mime, uploader, hash, groupid) "
+        "SELECT r.id, COALESCE(r.name, ''), COALESCE(json_extract(r.meta, '$.summary'), ''), "
+        "COALESCE(r.tags, ''), COALESCE(NULLIF(g.display_name, ''), g.group_name, ''), "
+        "COALESCE(r.path, ''), COALESCE(r.folder_name, ''), COALESCE(r.mime, ''), "
+        "COALESCE(r.uploader_name, '') || ' ' || COALESCE(r.uploader_id, ''), "
+        "COALESCE(r.sha256, '') || ' ' || COALESCE(r.source_ref, ''), COALESCE(r.group_id, '') "
+        "FROM resources r LEFT JOIN groups g ON g.group_id = r.group_id;",
+        "CREATE TRIGGER resources_fts_ai AFTER INSERT ON resources BEGIN "
+        "INSERT INTO resources_fts(rowid, name, summary, tags, groupname, path, folder, mime, uploader, hash, groupid) VALUES ("
+        "new.id, COALESCE(new.name, ''), COALESCE(json_extract(new.meta, '$.summary'), ''), COALESCE(new.tags, ''), "
+        "COALESCE((SELECT COALESCE(NULLIF(g.display_name, ''), g.group_name, '') FROM groups g WHERE g.group_id = new.group_id), ''), "
+        "COALESCE(new.path, ''), COALESCE(new.folder_name, ''), COALESCE(new.mime, ''), COALESCE(new.uploader_name, '') || ' ' || COALESCE(new.uploader_id, ''), "
+        "COALESCE(new.sha256, '') || ' ' || COALESCE(new.source_ref, ''), COALESCE(new.group_id, '')); END;",
+        "CREATE TRIGGER resources_fts_ad AFTER DELETE ON resources BEGIN DELETE FROM resources_fts WHERE rowid = old.id; END;",
+        "CREATE TRIGGER resources_fts_au AFTER UPDATE OF name, path, folder_name, mime, uploader_name, uploader_id, sha256, source_ref, meta, tags, group_id ON resources BEGIN "
+        "DELETE FROM resources_fts WHERE rowid = old.id; INSERT INTO resources_fts(rowid, name, summary, tags, groupname, path, folder, mime, uploader, hash, groupid) VALUES ("
+        "new.id, COALESCE(new.name, ''), COALESCE(json_extract(new.meta, '$.summary'), ''), COALESCE(new.tags, ''), "
+        "COALESCE((SELECT COALESCE(NULLIF(g.display_name, ''), g.group_name, '') FROM groups g WHERE g.group_id = new.group_id), ''), COALESCE(new.path, ''), "
+        "COALESCE(new.folder_name, ''), COALESCE(new.mime, ''), COALESCE(new.uploader_name, '') || ' ' || COALESCE(new.uploader_id, ''), "
+        "COALESCE(new.sha256, '') || ' ' || COALESCE(new.source_ref, ''), COALESCE(new.group_id, '')); END;",
+    ],
     # v13: PRIMARY KEY 改为 (resource_id, group_id, direction) —— remote_path 不再是主键
     #      因为完成后重命名会改变 remote_path，旧主键导致新行而非更新
     12: [
@@ -546,8 +575,14 @@ class SqliteMetaStore(MetaStorePort):
                 where.append("group_id = ?")
                 params.append(q.group_id)
             if q.keyword:
-                where.append("name LIKE ?")
-                params.append(f"%{q.keyword}%")
+                where.append(
+                    "(name LIKE ? OR path LIKE ? OR folder_name LIKE ? "
+                    "OR mime LIKE ? OR uploader_name LIKE ? OR uploader_id LIKE ? "
+                    "OR sha256 LIKE ? OR source_ref LIKE ? "
+                    "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) LIKE ? )"
+                )
+                keyword_like = f"%{q.keyword}%"
+                params.extend([keyword_like] * 9)
             if q.uploader_id:
                 where.append("uploader_id = ?")
                 params.append(q.uploader_id)
@@ -900,8 +935,8 @@ class SqliteMetaStore(MetaStorePort):
                         for r in conn.execute(
                             "SELECT rowid FROM resources_fts "
                             "WHERE resources_fts MATCH ? "
-                            "ORDER BY rank LIMIT 500",
-                            (expr,),
+                            "ORDER BY rank LIMIT ?",
+                            (expr, max(int(limit), 2000)),
                         )
                     ]
                 except sqlite3.OperationalError:
@@ -909,8 +944,8 @@ class SqliteMetaStore(MetaStorePort):
                         r[0]
                         for r in conn.execute(
                             "SELECT rowid FROM resources_fts "
-                            "WHERE resources_fts MATCH ? LIMIT 500",
-                            (expr,),
+                            "WHERE resources_fts MATCH ? LIMIT ?",
+                            (expr, max(int(limit), 2000)),
                         )
                     ]
                 ids = set(ids)
@@ -922,14 +957,21 @@ class SqliteMetaStore(MetaStorePort):
                     esc = (
                         t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                     )
-                    # 短词元（1-2 字符，trigram 无法索引）：名称/摘要/标签 三列 LIKE
+                    # 短词回退：名称、摘要、标签及扩展投影字段
                     conds.append(
                         "(lower(name) LIKE ? ESCAPE '\\' "
-                        "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) "
-                        "LIKE ? ESCAPE '\\' "
-                        "OR lower(COALESCE(tags, '')) LIKE ? ESCAPE '\\')"
+                        "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(tags, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(path, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(folder_name, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(mime, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(uploader_name, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(uploader_id, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(sha256, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(source_ref, '')) LIKE ? ESCAPE '\\' "
+                        "OR lower(COALESCE(group_id, '')) LIKE ? ESCAPE '\\')"
                     )
-                    like_params.extend([f"%{esc}%"] * 3)
+                    like_params.extend([f"%{esc}%"] * 11)
                 like_sql = " AND " + " AND ".join(conds)
             if ids is not None:
                 if not ids:
@@ -1007,6 +1049,18 @@ class SqliteMetaStore(MetaStorePort):
                 f"UPDATE resources SET {sets}, updated_at=? WHERE id=?",
                 [*fields.values(), int(time.time()), id],
             )
+            if "name" in fields:
+                # name 是逻辑路径的末段；改名必须同步 path，避免旧名称继续被路径搜索召回。
+                conn.execute(
+                    "UPDATE resources SET path = CASE "
+                    "WHEN type = 'file' AND folder_name IS NOT NULL AND folder_name != '' "
+                    "THEN '/' || group_id || '/' || folder_name || '/' || name "
+                    "WHEN type = 'file' THEN '/' || group_id || '/' || name "
+                    "WHEN type = 'album' THEN '/' || group_id || '/__album__/' || name "
+                    "WHEN type = 'essence' THEN '/' || group_id || '/__essence__/' || name "
+                    "ELSE path END WHERE id=?",
+                    (id,),
+                )
             conn.commit()
             return cur.rowcount
 
