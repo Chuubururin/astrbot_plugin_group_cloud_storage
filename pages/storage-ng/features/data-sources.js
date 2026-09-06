@@ -38,7 +38,7 @@ export const GROUP_SOURCE = {
   rowKey: (f) => String(f.id),
   serverSort: true,
   capabilities: [
-    'files-distribute', 'move', 'rename',
+    'files-distribute', 'move', 'rename', 'convert',
     'tags', 'detail', 'delete', 'clear',
   ],
   async list(state, params) {

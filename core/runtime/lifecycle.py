@@ -43,6 +43,19 @@ class LifecycleManager:
         self._periodic_resolve_task: asyncio.Task | None = None
         self._platform_bot = None
         self._platform_bots: list = platform_bots_ref if platform_bots_ref is not None else []
+        # Accounts auto-hidden by offline detection during this runtime; their
+        # groups are restored when liveness is re-verified (never touches
+        # user-removed groups).
+        self._hidden_accounts: set[str] = set()
+        # Consecutive sweeps an account was known (managed=1 groups in the DB)
+        # without any live bot connection; hidden after 3 so a slow reconnect
+        # at boot is not misread as offline.
+        self._offline_misses: dict[str, int] = {}
+        # Accounts ever seen online this runtime. Bot objects are unstable
+        # (resolve_once may recreate wrappers; purge_stale_bots may drop a
+        # flaky bot that re-registers seconds later), so new-account discovery
+        # must compare against this monotonic set, not per-cycle snapshots.
+        self._known_accounts: set[str] = set()
 
     def _create_runtime_task(self, coro, *, name: str):
         task = asyncio.create_task(coro, name=name)
@@ -58,6 +71,19 @@ class LifecycleManager:
         async with self._init_lock:
             if not self._inited:
                 await self.store.init()
+                # Startup self-heal: repair rows left managed=0 by historical
+                # offline-detection poisoning (user-removed groups keep
+                # removed=1 and stay hidden). The periodic liveness sweep
+                # re-hides genuinely offline accounts afterwards.
+                try:
+                    healed = await self.store.restore_all_groups()
+                    if healed:
+                        logger.info(
+                            f"[group_cloud_storage] startup heal: "
+                            f"{healed} groups restored to managed=1"
+                        )
+                except Exception as e:
+                    logger.debug(f"[group_cloud_storage] startup heal failed: {e}")
                 await self.store.upsert_resources([])
                 await self.kernel.services.task_control.reconcile()
                 await self.queue.start()
@@ -65,6 +91,9 @@ class LifecycleManager:
                 await self.dlserver.start()
                 await self.resolve_platform_bot()
                 await self.maybe_submit_scan()
+                self._known_accounts = {
+                    str(a) for a in self._resolver.get_online_account_ids()
+                }
                 if (
                     self._periodic_resolve_task is None
                     or self._periodic_resolve_task.done()
@@ -106,6 +135,16 @@ class LifecycleManager:
         """Lazily start the incremental scan once a platform or event bot is ready."""
         if self._scan_submitted:
             return
+        if not self._inited:
+            # Boot race: queued ops would run against a DB whose migration and
+            # startup heal have not finished (and their writes can starve the
+            # migration of the write lock). init() submits the scan itself once
+            # ready; bots appearing later are covered by the periodic sweep's
+            # discovery path.
+            logger.debug(
+                "[group_cloud_storage] initial scan deferred: runtime init in progress"
+            )
+            return
         if not self._resolver.bots:
             logger.debug(
                 "[group_cloud_storage] initial scan deferred: no bot available"
@@ -113,7 +152,9 @@ class LifecycleManager:
             return
         self._scan_submitted = True
         await self.queue.start()
-        await self.queue.submit("scan", target="*", payload={"mode": "incremental"})
+        await self.queue.submit(
+            "scan", target="*", payload={"mode": "incremental", "initial": True}
+        )
         logger.info("[group_cloud_storage] initial group scan queued")
         if self.auto_scan_hours > 0 and (
             self._auto_scan_task is None or self._auto_scan_task.done()
@@ -134,32 +175,83 @@ class LifecycleManager:
         while True:
             await asyncio.sleep(60)
             try:
-                # 1. Detect offline bots and clean up their data
-                stale_account_ids = await self._resolver.purge_stale_bots()
+                # 1. Liveness sweep: offline bots' groups hidden (managed=0),
+                #    verified-alive accounts' auto-hidden groups restored.
+                stale_account_ids, alive_accounts = (
+                    await self._resolver.purge_stale_bots()
+                )
                 for account_id in stale_account_ids:
                     n = await self.store.mark_account_groups_managed(account_id, 0)
                     if n:
+                        self._hidden_accounts.add(account_id)
                         logger.info(
                             f"[group_cloud_storage] account {account_id} "
                             f"offline: {n} groups hidden (managed=0)"
                         )
+                for account_id, _bot in alive_accounts:
+                    if account_id not in self._hidden_accounts:
+                        continue
+                    n = await self.store.restore_account_groups(account_id)
+                    self._hidden_accounts.discard(account_id)
+                    if n:
+                        logger.info(
+                            f"[group_cloud_storage] account {account_id} "
+                            f"alive again: {n} groups restored (managed=1)"
+                        )
+                # 1b. Accounts known in the DB but with no live bot connection
+                #     (bot never registered): hide their groups after three
+                #     consecutive sweeps so permanently offline accounts stop
+                #     feeding file lists and storage aggregation. The alive
+                #     branch above restores them the moment they connect.
+                alive_ids = {aid for aid, _ in alive_accounts}
+                for row in await self.store.list_accounts():
+                    aid = str(row.get("account_id") or "")
+                    if not aid:
+                        continue
+                    if aid in alive_ids:
+                        self._offline_misses.pop(aid, None)
+                        continue
+                    misses = self._offline_misses.get(aid, 0) + 1
+                    self._offline_misses[aid] = misses
+                    if misses < 3:
+                        continue
+                    self._offline_misses.pop(aid, None)
+                    n = await self.store.mark_account_groups_managed(aid, 0)
+                    if n:
+                        self._hidden_accounts.add(aid)
+                        logger.info(
+                            f"[group_cloud_storage] account {aid} offline "
+                            f"(no bot connection): {n} groups hidden (managed=0)"
+                        )
                 self._platform_bots.clear()
                 self._platform_bots.extend(self._resolver.bots)
 
-                # 2. Detect new bots
-                old_bots = set(id(b) for b in self._resolver.bots)
+                # 2. Detect new accounts. Compare by account against the
+                #    monotonic known-set: a flaky bot dropped by the purge and
+                #    re-registered here must not read as "new" (that caused a
+                #    full initial file scan every sweep minute).
                 await self._resolver.resolve_once()
                 self._platform_bots.clear()
                 self._platform_bots.extend(self._resolver.bots)
-                new_bots = [b for b in self._resolver.bots if id(b) not in old_bots]
-                if new_bots:
+                now_online = {str(a) for a in self._resolver.get_online_account_ids()}
+                new_accounts = now_online - self._known_accounts
+                self._known_accounts |= now_online
+                if new_accounts:
                     logger.info(
-                        f"[group_cloud_storage] dynamic bot discovery: "
-                        f"{len(new_bots)} new bot(s), total {len(self._resolver.bots)}"
+                        f"[group_cloud_storage] new online account(s) "
+                        f"{sorted(new_accounts)}, total bots {len(self._resolver.bots)}"
                     )
-                    # Trigger a scan for the new bots
+                    # Trigger a scan for the new bots; the accounts filter keeps
+                    # the chained file scan limited to the newly online accounts
+                    # (the boot-time initial scan covered the earlier ones).
                     await self.queue.submit(
-                        "scan", target="*", payload={"mode": "incremental"}
+                        "scan",
+                        target="*",
+                        payload={
+                            "mode": "incremental",
+                            "initial": True,
+                            "accounts": sorted(new_accounts),
+                        },
                     )
 
                 # 3. Group-info TTL rescan: every 10 minutes, claim groups whose

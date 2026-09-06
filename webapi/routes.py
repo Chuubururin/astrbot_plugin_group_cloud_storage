@@ -45,6 +45,7 @@ ROUTES = [
     ("files/upload/<token>", ["POST"], "api_file_upload", "上传文件", "page"),
     ("files/delete", ["POST"], "api_file_delete", "删除文件", "page"),
     ("files/replace_name", ["POST"], "api_file_replace_name", "改名重传", "page"),
+    ("files/convert-volumes", ["POST"], "api_file_convert_volumes", "手动分卷", "page"),
     ("albums/media", ["GET"], "api_album_media", "相册媒体", "page"),
     ("albums/detail", ["GET"], "api_album_detail", "相册详情", "page"),
     ("albums/media/delete", ["POST"], "api_album_media_delete", "删除相册媒体", "page"),

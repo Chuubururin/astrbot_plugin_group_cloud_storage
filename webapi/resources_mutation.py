@@ -81,6 +81,30 @@ async def api_file_delete(s: Services) -> dict:
     return json_response({"task_id": task_id})
 
 
+async def api_file_convert_volumes(s: Services) -> dict:
+    """Manual volume conversion of an existing cloud file.
+
+    Strictly user-initiated: the automatic post-sync sweep was removed on
+    purpose (converting re-uploads and deletes a cloud file, so it must
+    never happen as a side effect of scanning). Uploads of over-threshold
+    files keep their own mandatory built-in volume pipeline.
+    """
+    group = await _param("group", "")
+    if not group or not await s.scan.is_page_managed(
+        group, s.config.get("managed_groups", [])
+    ):
+        return error_response("group not managed", status_code=403)
+    payload = await json_body()
+    fid = payload.get("id")
+    if not isinstance(fid, int):
+        return error_response("id(int) required", status_code=400)
+    try:
+        task_id = await s.ops.submit_convert_volumes(group, fid)
+    except ValueError as e:
+        return error_response(str(e), status_code=400)
+    return json_response({"task_id": task_id})
+
+
 async def api_file_replace_name(s: Services) -> dict:
     """Rename (download-reupload): fetch original -> reupload under the new name -> delete old."""
     group = await _param("group", "")

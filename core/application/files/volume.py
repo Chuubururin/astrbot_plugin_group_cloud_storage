@@ -264,6 +264,24 @@ class VolumeMixin:
     def _is_volume_resource(self, detail: dict) -> bool:
         return bool((detail.get("meta") or {}).get("volumes"))
 
+    @staticmethod
+    def _is_current_account_upload(detail: dict, account_id: str | None) -> bool:
+        """Return whether the stored file uploader matches the group account.
+
+        Existing cloud files are re-uploaded and then their originals are
+        deleted during conversion. Missing identity is therefore unsafe and
+        must be treated the same as another account's upload.
+        """
+        uploader_id = str(detail.get("uploader_id") or "")
+        current_id = str(account_id or "")
+        return bool(uploader_id and current_id and uploader_id == current_id)
+
+    async def _group_account_id(self, group_id: str) -> str:
+        """Return the account bound to a group, or an empty identity."""
+        groups = await self.store.list_groups()
+        group = next((g for g in groups if str(g.group_id) == str(group_id)), None)
+        return str(getattr(group, "account_id", "") or "") if group else ""
+
     async def submit_convert_volumes(self, group_id: str, id: int) -> str:
         """Split an existing cloud file into volumes: download -> split into
         volumes (each zipped individually, reversible) -> upload part by part
@@ -276,6 +294,9 @@ class VolumeMixin:
             raise ValueError(f"resource {id} not found in group {group_id}")
         if is_composite(detail.get("meta")):
             raise ValueError("该资源已是组合形态（分卷/分片），无需转换")
+        account_id = await self._group_account_id(group_id)
+        if not self._is_current_account_upload(detail, account_id):
+            raise ValueError("仅支持当前群归属账号上传的文件进行分卷")
         # The threshold is read via the module attribute at call time so tests
         # can patch files.consts uniformly.
         threshold = consts.CHUNK_THRESHOLD_BYTES
@@ -300,14 +321,17 @@ class VolumeMixin:
     async def sweep_convert_volumes(self, group_id: str, limit: int = 5) -> int:
         """Built-in sweep after a sync: cloud files over the volume threshold
         are converted to volumes automatically (built-in operation; no user
-        action). Composite resources and files with a queued conversion are
-        skipped; the per-sweep limit keeps the first run after deployment from
-        flooding the queue (remaining files are picked up by later sweeps).
-        Returns the number of conversions submitted.
+        action). Only files uploaded by the group-bound account qualify —
+        the original must be deletable by that account. Composite resources
+        and files with a queued conversion are skipped; the per-sweep limit
+        keeps the first run after deployment from flooding the queue
+        (remaining files are picked up by later sweeps). Returns the number
+        of conversions submitted.
         """
         from core.application.composition.spec import is_composite
 
         submitted = 0
+        account_id = await self._group_account_id(group_id)
         page_num = 1
         while submitted < limit:
             page = await self.store.query_resources(
@@ -321,10 +345,16 @@ class VolumeMixin:
             for it in items:
                 if submitted >= limit:
                     break
+                detail = await self.store.get_resource_detail(group_id, it.id)
+                if not detail or not self._is_current_account_upload(detail, account_id):
+                    logger.debug(
+                        f"[file-ops] volume sweep skip (not owner upload): "
+                        f"{group_id}/{it.name}"
+                    )
+                    continue
                 if int(it.size or 0) <= consts.CHUNK_THRESHOLD_BYTES:
                     continue
-                detail = await self.store.get_resource_detail(group_id, it.id)
-                if not detail or is_composite(detail.get("meta")):
+                if is_composite(detail.get("meta")):
                     continue
                 if self.queue.has_pending("convert_volumes", "id", it.id):
                     continue

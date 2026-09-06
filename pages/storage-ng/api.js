@@ -45,6 +45,7 @@ export const API = {
     MOVE: 'files/move',
     BATCH_MOVE: 'files/batch-move',
     REPLACE_NAME: 'files/replace_name',       // rename = re-upload (OneBot limit)
+    CONVERT_VOLUMES: 'files/convert-volumes', // manual volume split of an existing file
     TAGS: 'files/tags',
     TAGCLOUD: 'files/tagcloud',
     BATCH_TAGS: 'files/batch-tags',

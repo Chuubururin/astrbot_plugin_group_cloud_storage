@@ -121,7 +121,16 @@ class MetaStorePort(Protocol):
         """Batch-set the managed flag on all groups (0 at startup, restored after scan)."""
 
     async def mark_account_groups_managed(self, account_id: str, managed: int) -> int:
-        """Set group managed flags by account (0=hidden after account offline, 1=restore)."""
+        """Set group managed flags by account (0=hidden after account offline,
+        1=restore; restore skips user-removed groups)."""
+
+    async def mark_groups_removed(self, group_ids: list[str], removed: int) -> int:
+        """Mark groups user-removed (removed=1) or restore the flag (removed=0);
+        distinguishes explicit removals from offline auto-hiding."""
+
+    async def restore_all_groups(self) -> int:
+        """Startup self-heal: managed=1 for every group not user-removed;
+        returns the number of rows actually flipped."""
 
     async def restore_account_groups(self, account_id: str) -> int:
         """Restore a back-online account's groups to managed=1; returns the

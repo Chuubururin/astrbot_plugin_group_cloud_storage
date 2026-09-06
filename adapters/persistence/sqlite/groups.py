@@ -192,17 +192,57 @@ class GroupsMixin(StorePart):
             return 0
 
         def _do(conn: sqlite3.Connection):
+            # Guard with removed=0: bringing an account back online must not
+            # resurrect groups the user explicitly removed from management.
+            guard = "AND removed=0" if managed == 1 else ""
             cur = conn.execute(
-                "UPDATE groups SET managed=? WHERE account_id=? AND managed!=?",
+                f"UPDATE groups SET managed=? WHERE account_id=? AND managed!=? {guard}",
                 (managed, account_id, managed),
             )
             conn.commit()
             return cur.rowcount
 
-        return await self._conn.exec(_do)
+        await self._conn.exec(_do)
 
     async def restore_account_groups(self, account_id: str) -> int:
         return await self.mark_account_groups_managed(account_id, 1)
+
+    async def mark_groups_removed(self, group_ids: list[str], removed: int) -> int:
+        """Mark groups user-removed (removed=1) or restore them (removed=0)."""
+        if not group_ids:
+            return 0
+
+        def _do(conn: sqlite3.Connection):
+            conn.execute("BEGIN")
+            try:
+                n = 0
+                for gid in group_ids:
+                    cur = conn.execute(
+                        "UPDATE groups SET removed=? WHERE group_id=? AND removed!=?",
+                        (int(removed), str(gid), int(removed)),
+                    )
+                    n += cur.rowcount
+                conn.commit()
+                return n
+            except Exception:
+                conn.rollback()
+                raise
+
+        return await self._conn.exec(_do)
+
+    async def restore_all_groups(self) -> int:
+        """Startup self-heal: re-enable every group not explicitly removed by
+        the user. Repairs rows left managed=0 by historical offline-detection
+        poisoning; the periodic liveness sweep re-hides genuinely offline
+        accounts afterwards."""
+        def _do(conn: sqlite3.Connection):
+            cur = conn.execute(
+                "UPDATE groups SET managed=1 WHERE removed=0 AND managed!=1"
+            )
+            conn.commit()
+            return cur.rowcount
+
+        return await self._conn.exec(_do)
 
     async def list_account_group_ids(self, account_id: str) -> list[str]:
         if not account_id:

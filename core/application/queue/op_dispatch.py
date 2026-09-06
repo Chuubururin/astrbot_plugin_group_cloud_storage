@@ -9,13 +9,13 @@ testable independently of the Star host.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import secrets
 import time
 from typing import Any, Callable
 
 from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.log import logger
+from core.opctx import account_scope
 from .health import HealthCircuitBreaker
 from .capacity import CapacityMixin
 
@@ -60,32 +60,129 @@ class OpDispatcher(CapacityMixin):
         self._scan_semaphore = asyncio.Semaphore(max_concurrent)
         # Per-account circuit breaker (independent health score per bot)
         self._health = HealthCircuitBreaker()
+        # group_id -> (account_id, managed) TTL cache (per-group account
+        # routing input and chained file-scan managed filter)
+        self._group_accounts: dict = {"at": 0.0, "map": {}}
+        # Groups already chained to a per-group file_scan by the scan
+        # callback (single-threaded async; simple set is sufficient — add a
+        # lock if the scan ever becomes concurrent per group)
+        self._chained_file_scan_groups: set[str] = set()
         # Compatibility aliases retained for callers/tests that inspect state.
         self._bot_health = self._health.bot_health
         self._global_cooldown_until = 0.0
         logger.info(f"[op-queue] scan concurrency: {max_concurrent}")
 
-    # -- Group hash sharding -------------------------------------------
-    def _assign_groups(
-        self, all_groups: list[dict], bots: list
-    ) -> dict[int, list[str]]:
-        """Stably shard the group list across accounts via
-        hash(group_id) % len(bots).
+    # -- Group -> account routing --------------------------------------
+    async def _account_of(self, group_id: str) -> str:
+        """account_id bound to a group (60s-cached from the groups table;
+        empty when unknown). Feeds account_scope so group operations are
+        executed by the account that actually owns the group."""
+        gid = str(group_id or "")
+        if not gid or gid == "*":
+            return ""
+        now = time.monotonic()
+        if now - self._group_accounts["at"] > 60.0:
+            try:
+                self._group_accounts["map"] = {
+                    str(g.group_id): (
+                        str(getattr(g, "account_id", "") or ""),
+                        bool(getattr(g, "managed", 1)),
+                    )
+                    for g in await self.store.list_groups()
+                }
+            except Exception as e:
+                logger.debug(f"[op-queue] group account map refresh failed: {e}")
+            self._group_accounts["at"] = now
+        entry = self._group_accounts["map"].get(gid)
+        return entry[0] if entry else ""
 
-        Returns {bot_index: [group_id, ...]}. When an account goes offline its
-        shard migrates naturally (hash recomputation, no explicit migration
-        table).
+    async def _group_managed(self, group_id: str) -> bool:
+        """Whether the group is currently managed (same 60s cache as
+        _account_of; unknown groups default to managed — the scan only
+        reaches groups a bot is a member of)."""
+        gid = str(group_id or "")
+        if not gid or gid == "*":
+            return False
+        now = time.monotonic()
+        if now - self._group_accounts["at"] > 60.0:
+            await self._account_of(gid)  # refresh the shared cache
+        entry = self._group_accounts["map"].get(gid)
+        return bool(entry[1]) if entry else True
+
+    async def _on_group_scanned(
+        self,
+        *,
+        group_id: str,
+        account_id: str = "",
+        file_count: int = 0,
+        album_count: int = 0,
+        essence_count: int = 0,
+        is_new: bool = False,
+        role_determined: bool = False,
+    ) -> None:
+        """Per-group chaining (invoked by GroupScanService right after each
+        group's info is persisted): queue that group's file scan immediately
+        instead of waiting for the whole group traversal to finish.
+
+        Success rule: a new group must have its role determined (an
+        undetermined group may belong to another account); a known group
+        keeps its previous role and always chains. Dedupe prevents the
+        incremental scan from re-submitting a group already queued; the
+        entry is released when do_file_scan actually processes the group.
+        """
+        gid = str(group_id or "")
+        if not gid:
+            return
+        if not (role_determined or not is_new):
+            return
+        if gid in self._chained_file_scan_groups:
+            return
+        if not await self._group_managed(gid):
+            return
+        self._chained_file_scan_groups.add(gid)
+        await self.queue.submit(
+            "file_scan", target=gid, payload={"mode": "range", "groups": [gid]}
+        )
+
+    # -- Group scan assignment ------------------------------------------
+    async def _assign_groups(
+        self, bots: list, group_filter: list[str] | None = None
+    ) -> dict[int, list[str]]:
+        """Assign groups to bots by ACTUAL MEMBERSHIP: each bot scans only
+        groups returned by its own list_groups() (a group visible to several
+        bots is claimed once, by the first bot in stable id order).
+
+        This replaces the former hash sharding, which could hand a group to
+        a bot that is not a member of it — the scan then failed per call and
+        the group got attributed to the wrong account_id.
         """
         if not bots:
             return {}
-        n = len(bots)
-        assignment: dict[int, list[str]] = {i: [] for i in range(n)}
-        for g in all_groups:
-            gid = str(g.get("group_id") or "")
-            if not gid:
+        wanted = {str(g) for g in group_filter} if group_filter else None
+        assignment: dict[int, list[str]] = {i: [] for i in range(len(bots))}
+        claimed: set[str] = set()
+        for i, bot in enumerate(bots):
+            try:
+                api = (
+                    self._bot_api_factory(bot, 0.1)
+                    if self._bot_api_factory is not None
+                    else None
+                )
+                raw = await api.list_groups() if api is not None else []
+            except Exception as e:
+                logger.debug(
+                    f"[op-queue] pre-scan list_groups failed for "
+                    f"{self._bot_id(bot)}: {e}"
+                )
                 continue
-            shard = int(hashlib.md5(gid.encode()).hexdigest(), 16) % n
-            assignment[shard].append(gid)
+            for g in raw:
+                gid = str(g.get("group_id") or "")
+                if not gid or gid in claimed:
+                    continue
+                if wanted is not None and gid not in wanted:
+                    continue
+                claimed.add(gid)
+                assignment[i].append(gid)
         return assignment
 
     def _bot_id(self, bot) -> str:
@@ -175,6 +272,13 @@ class OpDispatcher(CapacityMixin):
                 )
 
     async def handle(self, op) -> None:
+        # Per-group account routing: run the op under the account that owns
+        # the target group (no-op when the target is not a concrete group or
+        # the account is unknown/unbound — best_bot fallback applies then).
+        with account_scope(await self._account_of(getattr(op, "target", ""))):
+            await self._dispatch(op)
+
+    async def _dispatch(self, op) -> None:
         if op.kind == "scan":
             bots = self._bots_getter() or [None]
             mode = op.payload.get("mode")
@@ -194,24 +298,11 @@ class OpDispatcher(CapacityMixin):
                 # Stable sharding: sort by bot id to remove iteration-order
                 # nondeterminism
                 bots_sorted = sorted(bots, key=lambda b: self._bot_id(b))
-                # Group hash sharding: union the group lists from each bot
-                # API (key path for discovering new groups)
-                all_group_ids: set[str] = set()
-                for b in bots_sorted:
-                    try:
-                        _api = self._bot_api_factory(b, 0.1)
-                        raw = await _api.list_groups()
-                        for g in raw:
-                            gid = str(g.get("group_id") or "")
-                            if gid:
-                                all_group_ids.add(gid)
-                    except Exception as e:
-                        logger.debug(f"[op-queue] pre-scan list_groups failed for {self._bot_id(b)}: {e}")
-                all_groups = [{"group_id": gid} for gid in all_group_ids]
-                if group_filter:
-                    wanted = {str(g) for g in group_filter}
-                    all_groups = [g for g in all_groups if g["group_id"] in wanted]
-                assignment = self._assign_groups(all_groups, bots_sorted)
+                # Membership-based assignment: every bot scans only groups
+                # its own list_groups() returns (new-group discovery included,
+                # each group claimed once), so account attribution and API
+                # visibility are always correct.
+                assignment = await self._assign_groups(bots_sorted, group_filter)
                 # Parallel across bots (dedicated adapter per bot + sharded
                 # group lists)
                 tasks = [
@@ -222,6 +313,13 @@ class OpDispatcher(CapacityMixin):
                     for i, b in enumerate(bots_sorted)
                 ]
                 await asyncio.gather(*tasks, return_exceptions=True)
+            # Per-group chaining already queued file scans as groups were
+            # scanned; the bulk fallback only applies when the callback is
+            # not wired (e.g. minimal test assemblies).
+            if op.payload.get("initial") and getattr(
+                self.scan, "on_group_scanned", None
+            ) is None:
+                await self._queue_initial_file_scan(op.payload.get("accounts"))
         elif op.kind == "file_scan":
             await self.do_file_scan(op)
         elif op.kind == "diff_file_scan":
@@ -322,6 +420,36 @@ class OpDispatcher(CapacityMixin):
                 }
             )
 
+    async def _queue_initial_file_scan(self, accounts=None) -> None:
+        """After a startup/discovery group scan: queue full file indexing for
+        online accounts' managed groups (file lists stay empty in the UI until
+        a file scan covers the group). accounts=None covers all online
+        accounts; a list restricts to the newly online ones."""
+        getter = getattr(self.services, "get_online_account_ids", None)
+        online = {str(a) for a in getter()} if callable(getter) else set()
+        if accounts:
+            online &= {str(a) for a in accounts}
+        if not online:
+            logger.warning(
+                "[group_cloud_storage] initial file scan skipped: no online account"
+            )
+            return
+        groups = [
+            g.group_id
+            for g in await self.store.list_groups()
+            if getattr(g, "managed", 1)
+            and str(getattr(g, "account_id", "") or "") in online
+        ]
+        if not groups:
+            return
+        await self.queue.submit(
+            "file_scan", target="*", payload={"mode": "range", "groups": groups}
+        )
+        logger.info(
+            f"[group_cloud_storage] initial file scan queued: "
+            f"{len(groups)} groups across {len(online)} online account(s)"
+        )
+
     async def do_file_scan(self, op) -> None:
         """File scan across groups (all/range): per-group full_sync plus
         capacity refresh; progress is published live.
@@ -340,27 +468,24 @@ class OpDispatcher(CapacityMixin):
         last_pub = 0.0
         last_log = 0.0
         for i, gid in enumerate(targets, 1):
+            # The group is now being processed: release the chained-scan
+            # dedupe entry so a later group scan can queue it again
+            self._chained_file_scan_groups.discard(str(gid))
             # Cooperative checkpoint: cancel/interrupt and pause take effect
             # between groups
             await self.queue.pause_check(op)
             # Rate-limit before each per-group call (3x the base interval)
             await self.queue.acquire(mult=3.0)
-            lock = self.services.lock_for(gid)
-            result = await self.sync.run_full_sync(gid, lock)
-            await self.refresh_capacity(gid)
-            # Built-in auto op: sweep for over-threshold files that still live
-            # as a single cloud file and queue their volume conversion (the
-            # former user-facing "convert" button is gone). Never fails the scan.
-            ops = getattr(self.services, "ops", None)
-            if result.ok and ops is not None:
-                try:
-                    converted = await ops.sweep_convert_volumes(gid)
-                    if converted:
-                        logger.info(
-                            f"[file-scan] {gid} auto convert_volumes x{converted}"
-                        )
-                except Exception as e:
-                    logger.warning(f"[file-scan] {gid} convert sweep skipped: {e}")
+            # Route this group's sync to the account that owns it
+            with account_scope(await self._account_of(gid)):
+                lock = self.services.lock_for(gid)
+                result = await self.sync.run_full_sync(gid, lock)
+                await self.refresh_capacity(gid)
+                # No automatic volume conversion here: converting existing
+                # cloud files re-uploads and deletes them, so it is strictly a
+                # user decision (files/convert-volumes / the 分卷 action).
+                # Uploads of over-threshold files keep their mandatory
+                # built-in volume pipeline (files/crud).
             now = time.monotonic()
             if not result.ok and result.error:
                 failed += 1
@@ -458,8 +583,9 @@ class OpDispatcher(CapacityMixin):
         for i, gid in enumerate(targets, 1):
             await self.queue.pause_check(op)
             await self.queue.acquire(mult=3.0)
-            lock = self.services.lock_for(gid)
-            result = await self.sync.run_diff_sync(gid, lock)
+            with account_scope(await self._account_of(gid)):
+                lock = self.services.lock_for(gid)
+                result = await self.sync.run_diff_sync(gid, lock)
             now = time.monotonic()
             if not result.ok:
                 failed += 1

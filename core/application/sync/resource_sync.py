@@ -180,6 +180,9 @@ class ResourceSyncService:
         folders_seen: list = []
         folders_name: dict[str, str] = {}
         folders_parent: dict[str, str] = {}
+        # Current folder for the abort log; the root listing failure (e.g. an
+        # AUTHORITY_FAIL group) aborts before the loop ever binds it.
+        folder_id: str | None = None
         queue: deque[tuple[str | None, str]] = deque([(None, "")])  # (folder_id, parent_id)
         try:
             # Read the root first, then process each BFS frontier concurrently.

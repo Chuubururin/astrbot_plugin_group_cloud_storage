@@ -102,6 +102,7 @@ async def api_groups_restore(s: Services) -> dict:
     if not ids or len(ids) > 500:
         return error_response("group_ids required (1..500)", status_code=400)
     gids = [str(x) for x in ids if str(x)]
+    await s.store.mark_groups_removed(gids, 0)
     await s.store.set_groups_managed(gids, 1)
     return json_response({"restored": len(gids)})
 
@@ -260,4 +261,7 @@ async def api_groups_remove(s: Services) -> dict:
         return error_response("items required", status_code=400)
     ids = [str(x) for x in items if str(x)]
     await s.store.set_groups_managed(ids, 0)
+    # removed=1 keeps user removals distinct from offline auto-hiding, so
+    # account restore / liveness sweeps never resurrect them.
+    await s.store.mark_groups_removed(ids, 1)
     return json_response({"removed": len(ids)})

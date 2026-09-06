@@ -15,6 +15,7 @@ from adapters.limiter.tier import interval_mult
 from adapters.onebot.napcat import NapCatApiAdapter
 from core.config import PluginConfig
 from core.domain.enums import OneBotApiError, OneBotErrorKind
+from core.opctx import account_var
 from core.platform import PlatformBotResolver
 from core.application.queue import OpDispatcher
 from webapi import register_page_apis
@@ -53,6 +54,9 @@ class RuntimeAdapter:
             bots_getter=lambda: self._platform_bots, bridge=getattr(self, "bridge", None),
             bot_api_factory=lambda bot, interval: NapCatApiAdapter(
                 lambda action, params: bot.call_action(action, **params), interval=interval))
+        # Per-group scan chaining: as soon as a group's info is persisted the
+        # dispatcher queues that group's file scan (no bulk wait)
+        self.scan.on_group_scanned = self._dispatch._on_group_scanned
         register_page_apis(self.context, self.services)
         logger.info("[group_cloud_storage] page apis registered (storage)")
 
@@ -66,7 +70,13 @@ class RuntimeAdapter:
         self._platform_bots[:] = self._lifecycle._platform_bots
 
     async def _bind_call_action(self, action, params):
-        bot = _bot_var.get() or self._resolver.best_bot()
+        # Priority: event bot (chat context) > account-scoped bot (group ops
+        # routed to the account that owns the group) > best_bot fallback.
+        bot = (
+            _bot_var.get()
+            or self._resolver.bot_for_account(account_var.get())
+            or self._resolver.best_bot()
+        )
         if bot is None: raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, action, "no onebot bot in current context")
         await self._api_limiter.acquire(mult=interval_mult(action), account=str(id(bot)))
         return await bot.call_action(action, **params)
@@ -83,6 +93,7 @@ class RuntimeAdapter:
 
     async def _on_account_resolved(self, bot, account_id):
         self._resolver.register_account(account_id)
+        self._resolver.bind_account_bot(account_id, bot)
         n = await self.store.restore_account_groups(account_id)
         logger.info(f"[group_cloud_storage] account {account_id} online: {n} groups managed=1")
         # Account was actually offline (rows flipped hidden->managed): force a

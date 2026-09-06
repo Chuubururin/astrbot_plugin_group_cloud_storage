@@ -497,6 +497,7 @@ async def api_file_upload(s: Services, token: str) -> dict:
 
 from .resources_mutation import (
     api_file_tags, api_tagcloud, api_file_delete, api_file_replace_name,
+    api_file_convert_volumes,
     api_file_move, api_file_uri, api_file_link, api_download_address,
     api_folder_create, api_folder_delete, api_folder_rename,
     api_file_download, api_files_scan, api_files_sync,

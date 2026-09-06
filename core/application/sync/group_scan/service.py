@@ -22,6 +22,7 @@ class GroupScanService(ScanMixin, CapacityMixin):
         auto_label: bool = True,
         on_account_resolved: Callable[[object, str], Awaitable[None]] | None = None,
         group_info_ttl_hours: float = 24.0,
+        on_group_scanned: Callable[..., Awaitable[None]] | None = None,
     ):
         self.api = api
         self.store = store
@@ -35,6 +36,13 @@ class GroupScanService(ScanMixin, CapacityMixin):
         # after each collection; due groups are picked up for rescan by the
         # lifecycle periodic loop (0 = TTL rescan disabled)
         self.group_info_ttl_hours = float(group_info_ttl_hours)
+        # Per-group chaining callback (keyword-only kwargs: group_id,
+        # account_id, file_count, album_count, essence_count, is_new,
+        # role_determined): invoked right after each group's info is
+        # persisted so the file/album/essence scanners continue that group
+        # without waiting for the whole group traversal. When None the
+        # dispatcher falls back to the bulk initial file scan.
+        self.on_group_scanned = on_group_scanned
 
     async def run_batch_ops(self, op) -> None:
         """Batch group ops: rename / join option / remark, real per-group

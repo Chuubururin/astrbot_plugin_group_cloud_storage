@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 27
 
 MIGRATIONS: dict[int, list[str]] = {
     # Initial five tables (resources/snapshots/sync_logs/groups/schema_version)
@@ -325,11 +325,24 @@ MIGRATIONS: dict[int, list[str]] = {
     25: ["CREATE TABLE IF NOT EXISTS outbox_events (event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', available_at INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, lease_until INTEGER, created_at INTEGER NOT NULL DEFAULT 0);", "CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox_events(state, available_at);"],
     # Optimize volume part-name backfills.
     26: ["CREATE INDEX IF NOT EXISTS idx_vol_part_name ON volumes(part_name);"],
+    # Separate "user-removed" from "auto-hidden (account offline)": both used
+    # to share managed=0, so restoring an online account resurrected
+    # user-removed groups and an offline blip hid groups forever.
+    27: [
+        "ALTER TABLE groups ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;",
+    ],
 }
 
 
-def migrate(conn: sqlite3.Connection) -> int:
-    """Run incremental migrations, return current schema version."""
+def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
+    """Run incremental migrations, return current schema version.
+
+    Statements are executed one by one: a database written by a diverged
+    build may carry the same version marker with different table shapes, and
+    one incompatible statement (e.g. an index over a column this lineage
+    never had) must not abort the chain before the schema extensions this
+    runtime depends on (v27 ``groups.removed``) get applied.
+    """
     has_sv = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
     ).fetchone()
@@ -343,7 +356,11 @@ def migrate(conn: sqlite3.Connection) -> int:
     for v in sorted(MIGRATIONS):
         if v > cur and v <= SCHEMA_VERSION:
             for sql in MIGRATIONS[v]:
-                conn.executescript(sql)
+                try:
+                    conn.executescript(sql)
+                except sqlite3.Error as e:
+                    if on_skip is not None:
+                        on_skip(v, e)
 
     # Post-migration backfill of the ext column.
     if cur < 10:
@@ -376,7 +393,11 @@ def migrate(conn: sqlite3.Connection) -> int:
         conn.execute("DROP TRIGGER IF EXISTS resources_fts_au")
         conn.execute("DROP TABLE IF EXISTS resources_fts")
         for sql in MIGRATIONS[17]:
-            conn.executescript(sql)
+            try:
+                conn.executescript(sql)
+            except sqlite3.Error as e:
+                if on_skip is not None:
+                    on_skip(17, e)
 
     # Unique constraint for schema_version
     conn.execute(

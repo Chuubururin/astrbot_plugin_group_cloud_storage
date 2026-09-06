@@ -43,16 +43,31 @@ class CrudMixin:
             raise ValueError(f"staged file missing: {path}")
         size = src.stat().st_size
         # Capacity overflow switching: single-file direct upload only (volume
-        # uploads keep their original target to avoid parent mapping drift)
+        # uploads keep their original target to avoid parent mapping drift).
+        # The caller's group choice is honored unless that group itself cannot
+        # fit the file (unknown capacity counts as fitting); only then does
+        # the planner pick an overflow group.
         if not op.payload.get("parent_resource_id") and size > 0:
             groups = [
                 g for g in await self.store.list_groups() if getattr(g, "managed", 1)
             ]
-            pick = await self._planner.pick_group(groups, requested_bytes=size)
+            requested = next(
+                (g for g in groups if str(g.group_id) == str(op.target)), None
+            )
+            fits = (
+                requested is None
+                or requested.total_space <= 0
+                or (requested.total_space - requested.used_space) >= size
+            )
+            pick = (
+                None
+                if fits
+                else await self._planner.pick_group(groups, requested_bytes=size)
+            )
             if pick is not None and str(pick.group_id) != str(op.target):
                 logger.info(
                     f"[file-ops] upload target switch {op.target} -> {pick.group_id} "
-                    f"(capacity-aware)"
+                    f"(capacity overflow)"
                 )
                 op.target = pick.group_id
         threshold = consts.CHUNK_THRESHOLD_BYTES

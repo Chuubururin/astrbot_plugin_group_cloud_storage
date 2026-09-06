@@ -20,6 +20,7 @@ export const UPLOAD_EXEC = (token) => `/${PLUGIN}/files/upload/${token}`;
 export const RECOMMEND_GROUP = `/${PLUGIN}/files/recommend-group`;
 export const FILE_DELETE = `/${PLUGIN}/files/delete`;
 export const FILE_REPLACE_NAME = `/${PLUGIN}/files/replace_name`;
+export const FILE_CONVERT_VOLUMES = `/${PLUGIN}/files/convert-volumes`;
 export const FILE_MOVE = `/${PLUGIN}/files/move`;
 export const FILE_LINK = `/${PLUGIN}/files/link`;
 export const FILE_DOWNLOAD = `/${PLUGIN}/files/download`;

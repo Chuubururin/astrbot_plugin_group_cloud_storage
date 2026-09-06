@@ -11,6 +11,7 @@ from pathlib import Path
 import os
 import sqlite3
 import tempfile
+import time
 
 from core.log import logger
 from ports.meta_store import MetaStorePort
@@ -98,13 +99,28 @@ class SqliteMetaStore:
 
     async def init(self) -> None:
         def _do(conn):
-            conn.execute("BEGIN")
-            try:
-                migrate(conn)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+            for attempt in range(3):
+                conn.execute("BEGIN")
+                try:
+                    migrate(
+                        conn,
+                        on_skip=lambda v, err: logger.warning(
+                            f"[group_cloud_storage] migration {v} statement skipped: {err}"
+                        ),
+                    )
+                    conn.commit()
+                    return
+                except sqlite3.OperationalError as e:
+                    conn.rollback()
+                    # Background op writers (WAL, pool of connections) can hold
+                    # the write lock past busy_timeout; migrate is idempotent.
+                    transient = "locked" in str(e) or "busy" in str(e)
+                    if not transient or attempt == 2:
+                        raise
+                    time.sleep(1.5 * (attempt + 1))
+                except Exception:
+                    conn.rollback()
+                    raise
 
         await self._conn.exec(_do)
         logger.info(

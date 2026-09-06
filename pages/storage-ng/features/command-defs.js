@@ -142,12 +142,30 @@ export function registerAllCommands() {
       const name = await promptEx('改名重传', `当前: ${ctx.rows[0].name}`, { value: ctx.rows[0].name });
       if (name === null || name === ctx.rows[0].name) return;
       // OneBot has no rename action: rename = replace upload with the new name.
+      // Backend contract: {id, group, new_name} (files/replace_name).
       await apiPost(API.FILES.REPLACE_NAME, {
-        id: Number(ctx.keys[0]), group: rowGroup(ctx.state, ctx.rows[0]), name,
+        id: Number(ctx.keys[0]), group: rowGroup(ctx.state, ctx.rows[0]), new_name: name,
       });
       toast('改名重传已入队', 'success');
     },
     refresh: ['files'],
+  });
+
+  registerCommand({
+    id: 'convert',
+    label: '分卷',
+    icon: 'COPY',
+    needsSingle: true,
+    async run(ctx) {
+      // Manual volume split of an existing cloud file (never automatic —
+      // the file-scan auto sweep was removed). Backend rejects files below
+      // the threshold or already composite.
+      await apiPost(API.FILES.CONVERT_VOLUMES, {
+        id: Number(ctx.keys[0]), group: rowGroup(ctx.state, ctx.rows[0]),
+      });
+      toast('分卷任务已入队，可在任务页查看进度', 'success');
+    },
+    refresh: ['files', 'tasks'],
   });
 
   registerCommand({

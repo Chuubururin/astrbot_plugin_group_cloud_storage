@@ -89,6 +89,7 @@ class ScanMixin:
                 except Exception as e:
                     logger.warning(f"[group-scan] role judge failed for {gid}: {e}")
                     role = prev.role if prev else "unknown"
+                    failed += 1
             # Capacity collection: an fs failure returns None -> keep the prev
             # values instead of overwriting with 0
             cap_used = cap_total = cap_count = cap_limit = 0
@@ -158,6 +159,24 @@ class ScanMixin:
                     )
                 except Exception as e:
                     logger.debug(f"[group-scan] schedule upsert failed for {gid}: {e}")
+            # Per-group chaining: hand this group to the file scanner right
+            # away (role_determined = the group's role is now known; a new
+            # group whose judge failed must not chain)
+            if self.on_group_scanned is not None:
+                try:
+                    await self.on_group_scanned(
+                        group_id=gid,
+                        account_id=me,
+                        file_count=cap_count,
+                        album_count=album_c,
+                        essence_count=essence_c,
+                        is_new=prev is None,
+                        role_determined=role != "unknown",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[group-scan] on_group_scanned callback failed for {gid}: {e}"
+                    )
             if i % 10 == 0 or i == group_total or time.monotonic() - last_pub >= 5.0:
                 self.queue.publish(
                     {
@@ -336,6 +355,23 @@ class ScanMixin:
                     )
                 ]
             )
+            # Per-group chaining: hand this group to the file scanner right
+            # away (known groups keep their previous role -> always chain)
+            if self.on_group_scanned is not None:
+                try:
+                    await self.on_group_scanned(
+                        group_id=gid,
+                        account_id=me,
+                        file_count=cap_count,
+                        album_count=album_c if need else prev.album_count,
+                        essence_count=essence_c if need else prev.essence_count,
+                        is_new=prev is None,
+                        role_determined=role != "unknown",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[group-scan] on_group_scanned callback failed for {gid}: {e}"
+                    )
             if i % 10 == 0 or i == group_total or time.monotonic() - last_pub >= 5.0:
                 self.queue.publish(
                     {
