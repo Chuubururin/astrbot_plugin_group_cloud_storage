@@ -10,6 +10,7 @@
 
 import { getState, refresh } from '../store.js';
 import { API, apiPost } from '../api.js';
+import { runEachWithFailures } from '../utils/helpers.js';
 import { showFormModal, confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 
@@ -17,7 +18,7 @@ import { toast } from '../components/toast.js';
 export async function openNetdiskUrlUpload() {
   const { netdiskPath } = getState();
   const res = await showFormModal('URL 上传到网盘', [
-    { name: 'url', label: '文件 URL', placeholder: 'https://...' },
+    { name: 'url', label: '文件 URL', required: true, placeholder: 'https://...' },
     { name: 'dir', label: '目标目录', value: netdiskPath || '/', placeholder: '/' },
   ]);
   if (!res?.url) return;
@@ -29,3 +30,27 @@ export async function openNetdiskUrlUpload() {
 }
 
 /** Recursive netdisk indexing task (cancelable from the tasks tab). */
+
+/**
+ * Rename one netdisk entry by full path (shared by the command layer and the
+ * folder context menu). Throws on failure.
+ * @param {string} path
+ * @param {string} name
+ */
+export async function netdiskRename(path, name) {
+  return apiPost(API.BRIDGE.RENAME, { path, name });
+}
+
+/**
+ * Remove netdisk entries given as full paths (splits dir/name per entry).
+ * Collects per-item failures instead of stopping at the first.
+ * @param {string[]} paths
+ * @returns {Promise<{done: number, failed: string[]}>}
+ */
+export async function netdiskRemovePaths(paths) {
+  return runEachWithFailures(paths, async (p) => {
+    const dir = p.replace(/\/[^/]+$/, '') || '/';
+    await apiPost(API.BRIDGE.REMOVE, { dir, names: [p.split('/').pop()] });
+  });
+}
+

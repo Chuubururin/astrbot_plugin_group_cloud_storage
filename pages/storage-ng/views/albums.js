@@ -1,5 +1,5 @@
 /**
- * Albums view (T-2) - group albums tab.
+ * Albums view  - group albums tab.
  *
  * Uses the shared module toolbar (upload / group focus / two-tier refresh
  * / title-desc search) plus the unified data table over the album source,
@@ -40,7 +40,8 @@ export function initAlbumsView(container) {
   const tableCleanup = initDataTable(tableHost, ALBUM_SOURCE);
 
   const actionBar = document.createElement('div');
-  // 2026-09-03 核对补写：动作栏容器 id（E2E 探针可定位，与 files/netdisk 视图一致）
+  // Action-bar container id, locatable by the E2E probe (same as the
+  // files/netdisk views).
   actionBar.id = 'album-action-bar';
   container.appendChild(actionBar);
   const barCleanup = initActionBar(actionBar, ALBUM_SOURCE);

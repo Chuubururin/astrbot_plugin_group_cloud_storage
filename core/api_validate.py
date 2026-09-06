@@ -1,10 +1,11 @@
-"""api_validate —— Page API 零依赖参数校验层（M0 工程加固）。
+"""api_validate — dependency-free parameter validation for the Page API.
 
-目标：字段拼写/类型错误即时给出可读 400，而不是 500 或静默出错。
-成功路径行为与原手工取值完全一致；错误路径只收紧（原 500 → 400）。
+Goal: field typos / type errors produce a readable 400 immediately instead of
+a 500 or silent misbehavior.
 
-约定：ApiValidationError 由 webapi._Bound 统一捕获转 error_response(400)，
-端点代码只负责 pick/qi/json_body，不必各自 try/except。
+Contract: ApiValidationError is caught centrally by webapi._Bound and turned
+into error_response(400); endpoint code only uses pick/qi/json_body and needs
+no try/except of its own.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from astrbot.api.web import request
 
 
 class ApiValidationError(Exception):
-    """参数校验失败；message 面向调用方（含字段名与期望）。"""
+    """Parameter validation failure; message is caller-facing (field name + expectation)."""
 
     def __init__(self, message: str):
         super().__init__(message)
@@ -24,7 +25,7 @@ class ApiValidationError(Exception):
 
 
 async def json_body() -> dict:
-    """读取 JSON 请求体并保证是 dict（list/标量 → ApiValidationError）。"""
+    """Read the JSON request body and require a dict (list/scalar raises ApiValidationError)."""
     try:
         body = await request.json(default={})
     except Exception:
@@ -45,13 +46,14 @@ def pick(
     empty_allowed=True,
     error_prefix="",
 ) -> object:
-    """从 dict 中按类型取字段。
+    """Pick a typed field from a dict.
 
-    - required：缺失/None 抛错
-    - cast：str/int/float/bool/list；转换失败抛错（消息含字段名与期望类型）
-    - enum：取值白名单（不在其中抛错，消息列出合法值）
-    - empty_allowed=False：str/list 为空抛错
-    - 默认值行为与手工 .get(key, default) 一致
+    - required: missing/None raises
+    - cast: str/int/float/bool/list; conversion failure raises (message
+      includes the field name and expected type)
+    - enum: value whitelist (raises when absent; message lists valid values)
+    - empty_allowed=False: empty str/list raises
+    - default behavior matches manual .get(key, default)
     """
     prefix = f"{error_prefix}字段 '{key}'" if error_prefix else f"字段 '{key}'"
 
@@ -101,7 +103,7 @@ def pick(
 
 
 def qi(value, field: str = "id", default: int = 0) -> int:
-    """查询参数安全转 int：空值/None 返回 default；非数字抛 ApiValidationError。"""
+    """Safe int conversion for query params: empty/None -> default; non-numeric raises."""
     if value is None:
         return default
     text = str(value).strip()

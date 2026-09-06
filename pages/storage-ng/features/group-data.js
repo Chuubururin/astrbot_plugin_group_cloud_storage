@@ -1,10 +1,10 @@
 /**
- * Group table data layer (E 组) - client-side full-list model.
+ * Group table data layer - client-side full-list model.
  *
  * The groups endpoint returns the FULL list (no server pagination), so
  * filtering/sorting/paging happen here; rows render through the keyed
- * diff in slices per page to respect the render budget (FE-11/12). Group
- * roles are decoded via a display dictionary (FE-8).
+ * diff in slices per page to respect the render budget . Group
+ * roles are decoded via a display dictionary .
  *
  * @module features/group-data
  */
@@ -27,7 +27,7 @@ export function groupSlice() {
     ? groups.filter((g) => (g.account_id || g.account || '') === accountFilter)
     : groups;
   const sorted = sortGroups(list, groupSort);
-  // S4：pageSize=0 表示「全部」（一次显示全量）
+  // pageSize=0 means "all" (render the full list at once)
   const size = groupPageSize > 0 ? groupPageSize : Math.max(sorted.length, 1);
   const start = (groupPage - 1) * size;
   return { slice: sorted.slice(start, start + size), total: sorted.length };
@@ -89,7 +89,8 @@ function renderGroupRows(groups, selectedGroups, isRemoved) {
 
   if (groups.length === 0) {
     for (const tb of [paneA, paneB]) tb.innerHTML = '';
-    // 2026-09-03 修复：空态行携带稳定 key（'empty'）——keyed diff 在其后有数据时移除
+    // The empty-state row carries a stable key ('empty') so the keyed
+    // diff removes it once data arrives.
     const tr = document.createElement('tr');
     tr.dataset.key = 'empty';
     tr.dataset.gid = '';

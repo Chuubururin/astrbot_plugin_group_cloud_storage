@@ -1,7 +1,9 @@
-"""NapCatApiAdapter —— OneBotApiPort 的 NapCat 实现（模块化装配）。
+"""NapCatApiAdapter -- NapCat implementation of OneBotApiPort (modular assembly).
 
-能力按 NapCat API 分类拆分为底座（调用通道/限速/能力探测）与各能力混入
-（ports/capabilities 一一对应）；本文件仅做聚合装配，保持既有导入路径。
+Capabilities are split by NapCat API category into a base class (call
+channel / rate limiting / capability probing) and per-capability mixins
+(one-to-one with ports/capabilities). This file only performs the
+aggregation and preserves the existing import path.
 """
 
 from __future__ import annotations
@@ -28,4 +30,4 @@ class NapCatApiAdapter(
     NapCatBase,
     OneBotApiPort,
 ):
-    """聚合装配：底座 + 六类能力混入。"""
+    """Aggregated assembly: base class plus the six capability mixins."""

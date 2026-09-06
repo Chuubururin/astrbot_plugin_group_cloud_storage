@@ -1,5 +1,5 @@
 /**
- * Netdisk view (T-4) - OpenList storage tab (2026-09-03 整改 S2)。
+ * Netdisk view  - OpenList storage tab.
  *
  * Layout:
  *   1. netdisk toolbar (upload local/URL, root, mkdir, type chips)
@@ -8,9 +8,9 @@
  *   3. action bar (link, download, rename, tags, delete, distribute
  *      local/group/album/essence)
  *
- * 已移除（S2）：桥接传输面板（任务统一走任务 Tab）、深度索引入口（无意义）、
- * 重复的 transfer-in 入口（网盘→群文件=分发 target=group）。OpenList 连接配置
- * 归属配置 Tab（config 中心分组）；传输任务归属任务 Tab（台账四动作）。
+ * OpenList connection config lives in the config tab (config center
+ * grouping); transfer tasks live in the tasks tab (where the four
+ * ledger actions are recorded).
  *
  * @module views/netdisk
  */

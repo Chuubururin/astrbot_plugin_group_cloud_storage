@@ -1,7 +1,8 @@
-"""OpenListClient -- httpx control plane thin client (~250 lines).
+"""OpenListClient -- thin httpx client for the OpenList control plane.
 
-Implements REQ-05 (capability probe & degradation), REQ-06 (URL not persisted),
-REQ-07 (idempotency), REQ-09 (DTO up), REQ-13 (auto-pagination).
+Covers capability probing with degradation, URL resolution without
+persistence, idempotent task operations, DTO mapping, and automatic
+pagination.
 
 Dependencies:
 - httpx (host dependency, explicitly declared in requirements.txt)
@@ -10,7 +11,6 @@ Dependencies:
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,7 +28,7 @@ from .base import (
 )
 
 
-# DTOs (REQ-09: dataclass, no bare dict across layers)
+# DTOs 
 
 
 @dataclass(frozen=True)
@@ -56,14 +56,14 @@ class NetFile:
 
 @dataclass(frozen=True)
 class DirectLink:
-    """Direct URL for file access (memory-only, REQ-06: not persisted)."""
+    """Direct URL for file access ."""
 
     url: str
 
 
-# Task state enum for clarity
-# 统一使用 core.domain.enums.BridgeTaskState.from_external() 映射
-_TASK_STATE_MAP = None  # 已迁移至 BridgeTaskState.from_external()
+# Task state mapping is centralized in
+# core.domain.enums.BridgeTaskState.from_external()
+_TASK_STATE_MAP = None  # Unused; mapping lives in BridgeTaskState.from_external()
 
 
 def _normalize_task_state(state) -> str:
@@ -85,9 +85,9 @@ class OpenListClient:
 
     Features:
     - Lazy httpx.AsyncClient initialization
-    - Automatic 401/403 re-login with single replay (REQ-05)
+    - Automatic 401/403 re-login with single replay 
     - Envelope error handling
-    - SSRF protection (REQ-11)
+    - SSRF protection 
     - Token/password log sanitization
     """
 
@@ -100,7 +100,7 @@ class OpenListClient:
         timeout: float = 30.0,
         allow_private_address: bool = False,
     ):
-        # Validate base URL (REQ-11 SSRF protection)
+        # Validate base URL 
         self._base_url = validate_base_url(
             base_url, allow_private=allow_private_address
         )
@@ -113,7 +113,7 @@ class OpenListClient:
         # Lazy-initialized httpx client
         self._client: httpx.AsyncClient | None = None
 
-        # Capability state (REQ-05)
+        # Capability state 
         self._capability: str = "UNKNOWN"  # UNKNOWN | OK | BROKEN
         self._ping_failures: int = 0
 
@@ -138,7 +138,7 @@ class OpenListClient:
             self._client = None
 
     async def ping(self) -> bool:
-        """Health check (REQ-05).
+        """Health check .
 
         Returns True if OpenList is reachable and healthy.
         On failure, sets capability to BROKEN and increases backoff.
@@ -244,7 +244,7 @@ class OpenListClient:
         json: dict | None = None,
         params: dict | None = None,
     ) -> dict[str, Any]:
-        """Make authenticated request with automatic 401/403 re-login (REQ-05).
+        """Make authenticated request with automatic 401/403 re-login .
 
         Behavior:
         1. Attach Authorization header
@@ -298,7 +298,7 @@ class OpenListClient:
         tool: str = "SimpleHttp",
         delete_policy: str = "delete_on_upload_succeed",
     ) -> list[OfflineTask]:
-        """Submit offline download task (REQ-01: only generate/submit links, no file IO).
+        """Submit offline download task .
 
         Args:
             urls: List of direct download URLs
@@ -383,13 +383,8 @@ class OpenListClient:
         )
         return data.get("code") == 200
 
-    async def task_clear_done(self) -> bool:
-        """Clear all completed offline download tasks."""
-        data = await self._request("POST", "/api/task/offline_download/clear_done")
-        return data.get("code") == 200
-
     async def get_raw_url(self, path: str) -> DirectLink:
-        """Get direct/raw URL for a file (REQ-06: memory-only, not persisted).
+        """Get direct/raw URL for a file .
 
         Tries fs/link first, falls back to fs/get on failure.
         """
@@ -410,7 +405,7 @@ class OpenListClient:
         return DirectLink(url=raw_url)
 
     async def stat(self, path: str) -> NetFile | None:
-        """Check if file/directory exists (probe for idempotency, REQ-07).
+        """Check if file/directory exists .
 
         Returns NetFile if exists, None if not found.
         Uses fs/get with path to check existence.
@@ -428,15 +423,15 @@ class OpenListClient:
                 sign=info.get("sign", ""),
             )
         except OpenListApiError as e:
-            # "not found" type errors -> return None
-            # Exact error message varies by OpenList version; M5 will calibrate
+            # "not found" style errors -> return None
+            # Exact wording varies across OpenList versions; match common variants.
             msg = (e.message or "").lower()
             if "not found" in msg or "not exist" in msg or "404" in msg:
                 return None
             raise
 
     async def list_dir(self, path: str) -> list[NetFile]:
-        """List directory contents with automatic pagination (REQ-13).
+        """List directory contents with automatic pagination .
 
         Handles both new API (has_more/pages_total) and legacy API (total).
         per_page capped at 500 (OpenList limit).
@@ -453,7 +448,7 @@ class OpenListClient:
     async def list_dir_page(
         self, path: str, page: int, per_page: int = 200
     ) -> tuple[list[NetFile], bool]:
-        """List one directory page; returns (files, has_more) (N4, FE-11).
+        """List one directory page; returns (files, has_more) .
 
         per_page capped at 500 (OpenList limit); has_more follows the new API
         (has_more flag) or the legacy total-based protocol.
@@ -491,11 +486,11 @@ class OpenListClient:
         return files, False
 
     async def mkdir(self, path: str) -> None:
-        """Create directory (REQ-07: 405 treated as success)."""
+        """Create directory ."""
         try:
             await self._request("POST", "/api/fs/mkdir", json={"path": path})
         except OpenListApiError as e:
-            # 405 = directory already exists = success (REQ-07)
+            # 405 = directory already exists = success 
             if e.code == 405:
                 logger.debug(f"[openlist] mkdir 405 (already exists): {path}")
                 return

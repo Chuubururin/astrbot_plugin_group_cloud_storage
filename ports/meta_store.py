@@ -1,11 +1,12 @@
-"""MetaStorePort —— 持久化唯一出口（docs/02 §3、docs/04 §2）。
+"""MetaStorePort — the single persistence exit point.
 
-命令层禁止直接操作数据库（DoD #2），一律经由本端口。
+The command layer must not touch the database directly; all access goes
+through this port.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from typing import Protocol, runtime_checkable
 
 from core.domain.sync import (
     GroupInfo,
@@ -18,213 +19,176 @@ from core.domain.sync import (
 )
 
 
-class MetaStorePort(ABC):
-    """元数据持久化抽象（V1.0 实现：SqliteMetaStore）。"""
+@runtime_checkable
+class MetaStorePort(Protocol):
+    """Metadata persistence abstraction (SqliteMetaStore; a Protocol like the limiter port)."""
 
-    @abstractmethod
     async def upsert_resources(self, items: list) -> int:
-        """幂等 UPSERT（DoD #4），返回写入/更新行数。"""
+        """Idempotent UPSERT; returns the number of written/updated rows."""
 
-    @abstractmethod
     async def query_resources(self, q: ResourceQuery) -> Page:
-        """分页查询资源。"""
+        """Paged resource query."""
 
-    @abstractmethod
     async def get_resource_detail(self, group_id: str, id: int) -> dict | None:
-        """详情（限定群范围，防跨群 ID 泄漏，AC10 关联）。"""
+        """Resource detail (scoped to one group to prevent cross-group ID leaks)."""
 
-    @abstractmethod
     async def update_resource_fields(self, id: int, **fields) -> None:
-        """更新资源字段（name/folder_id/status，列名白名单校验；管理操作后同步）。"""
+        """Update resource fields (name/folder_id/status; column whitelist; after admin ops)."""
 
-    @abstractmethod
     async def stats(self, group_id: str) -> ResourceStats:
-        """单群统计聚合。"""
+        """Aggregate statistics for one group."""
 
-    @abstractmethod
     async def list_groups(self) -> list[GroupInfo]:
-        """群清单（含 role/display_name/sort_order/label，docs/09 §12）。"""
+        """Group list (includes role/display_name/sort_order/label)."""
 
-    @abstractmethod
     async def upsert_groups(self, items: list[GroupInfo]) -> int:
-        """群信息 upsert（扫描结果写入，group_id 唯一键）。"""
+        """Group info upsert (written by scan results; group_id unique key)."""
 
-    @abstractmethod
     async def update_group_fields(self, group_id: str, **fields) -> None:
-        """更新群管理字段（display_name/label，列名白名单校验）。"""
+        """Update group admin fields (display_name/label; column name whitelist)."""
 
-    @abstractmethod
     async def get_resource_any(self, id: int) -> dict | None:
-        """按主键全局取资源（跨群兜底定位）。"""
+        """Fetch a resource by primary key across groups (fallback lookup)."""
 
-    @abstractmethod
     async def count_active(self, group_id: str) -> int:
-        """群内 active 文件计数（容量持久化兜底）。"""
+        """Count of active files in a group (fallback for capacity persistence)."""
 
-    @abstractmethod
     async def upsert_album_essence(
         self, group_id: str, albums: list, essences: list, account_id: str = ""
     ) -> None:
-        """资源化：相册条目 + 精华消息（统一资源目录，仅元数据/摘要）。"""
+        """Store albums and essence messages as resources in the unified catalog (summary only)."""
 
-    @abstractmethod
     async def upsert_folders(self, group_id: str, folders: list[dict]) -> None:
-        """目录实体持久化（folder_id/folder_name/parent_id 幂等）。"""
+        """Persist folder entities (idempotent on folder_id/folder_name/parent_id)."""
 
-    @abstractmethod
     async def list_folders_detail(self, group_id: str) -> list[dict]:
-        """群目录实体列表（目录树）。"""
+        """List folder entities for a group (folder tree)."""
 
-    @abstractmethod
     async def clear_folders(self, group_id: str) -> None:
-        """清空群目录（全量刷新前调用）。"""
+        """Clear a group's folders (called before a full refresh)."""
 
-    @abstractmethod
     async def sum_resource_sizes(self, group_id: str) -> int:
-        """已用容量（索引精确统计）：群内 active 文件大小合计。"""
+        """Used capacity (exact index-based total): sum of active file sizes in the group."""
 
-    @abstractmethod
     async def set_groups_managed(self, group_ids: list[str], managed: int) -> None:
-        """批量设置管理标记（0=从管理列表移除且扫描不复活）。"""
+        """Batch-set the managed flag (0=removed from managed list; scans will not restore it)."""
 
-    @abstractmethod
     async def reorder_groups(self, ordered_ids: list[str]) -> None:
-        """按传入顺序持久化 sort_order。"""
+        """Persist sort_order following the given order."""
 
-    @abstractmethod
     async def get_resource_by_resource_id(self, resource_id: str) -> dict | None:
-        """按唯一键取资源（分卷父资源/回填用）。"""
+        """Fetch a resource by its unique key (for volume parents / backfill)."""
 
-    @abstractmethod
     async def insert_volumes(self, items: list[VolumeInfo]) -> None:
-        """分卷注册（docs/09 §14.1，父资源下 seq 唯一）。"""
+        """Register volumes (seq unique within a parent resource)."""
 
-    @abstractmethod
     async def list_volumes(self, parent_resource_id: str) -> list[VolumeInfo]:
-        """按序返回父资源的分卷列表。"""
+        """Return a parent resource's volumes in sequence order."""
 
-    @abstractmethod
     async def update_volume_fields(
         self, parent_resource_id: str, seq: int, **fields
     ) -> None:
-        """更新分卷字段（source_ref/busid/sha256/status，白名单校验）。"""
+        """Update volume fields (source_ref/busid/sha256/status; whitelist check)."""
 
-    @abstractmethod
     async def backfill_volume_by_part(
         self, group_id: str, part_name: str, source_ref: str, busid: int
     ) -> int:
-        """事件驱动回填：按 part 文件名匹配同群未就绪卷，返回回填条数。"""
+        """Event-driven backfill: match the group's unready volumes by part name; returns count."""
 
-    @abstractmethod
     async def remove_volumes(self, parent_resource_id: str) -> None:
-        """删除父资源的全部分卷（级联清理）。"""
+        """Delete all volumes of a parent resource (cascade cleanup)."""
 
-    @abstractmethod
     async def mark_missing_as_deleted(
         self, group_id: str, complete: bool, source_file_ids: set[str]
     ) -> int:
-        """孤儿清理：仅当 complete=True 时执行（DoD #5 / AC9），返回置 deleted 行数。"""
+        """Orphan cleanup: runs only when complete=True; returns rows marked deleted."""
 
-    @abstractmethod
     async def create_sync_log(self, log: SyncLog) -> int:
-        """创建同步日志，返回任务号。"""
+        """Create a sync log entry; returns the log id."""
 
-    @abstractmethod
     async def finish_sync_log(self, log_id: int, result: SyncResult) -> None:
-        """结束同步日志。"""
+        """Finalize a sync log entry."""
 
-    @abstractmethod
     async def save_snapshot(self, snap) -> None:
-        """保存统计快照（只追加）。"""
+        """Save a statistics snapshot (append only)."""
 
-    @abstractmethod
     async def fts_match(
         self, group_id: str | None, q: str, limit: int = 2000
     ) -> list[int]:
-        """磁盘化全文检索（FTS5 trigram；短词元回退 name LIKE）。"""
+        """Disk-backed full-text search."""
 
-    @abstractmethod
     async def mark_all_groups_managed(self, managed: int) -> int:
-        """批量设置所有群的管理标记（启动时 managed=0 保护，扫描后恢复）。"""
+        """Batch-set the managed flag on all groups (0 at startup, restored after scan)."""
 
-    @abstractmethod
     async def mark_account_groups_managed(self, account_id: str, managed: int) -> int:
-        """按账号 ID 批量设置群管理标记（0=账号离线后隐藏，1=恢复）。"""
+        """Set group managed flags by account (0=hidden after account offline, 1=restore)."""
 
-    @abstractmethod
     async def restore_account_groups(self, account_id: str) -> int:
-        """账号恢复在线：将该账号的群 managed 重置为 1（扫描成功后调用）。"""
+        """Restore a back-online account's groups to managed=1; returns the
+        number of rows actually flipped (0 = account was never hidden)."""
 
-    # ---------- archive_map (REQ-03/09) ----------
+    async def list_account_group_ids(self, account_id: str) -> list[str]:
+        """Group ids bound to an account (post-offline full rescan input)."""
 
-    @abstractmethod
+    # ---------- archive_map  ----------
+
     async def get_archive_map(
         self, group_id: str, resource_id: int, direction: str
     ) -> dict | None:
         """Get archive map entry for a specific resource and direction."""
 
-    @abstractmethod
     async def upsert_archive_map(self, row: dict) -> None:
         """Insert or update archive map entry."""
 
-    @abstractmethod
     async def clear_archive_map(
         self, group_id: str, resource_id: int, direction: str
     ) -> None:
         """Remove archive map entry for a specific resource and direction."""
 
-    @abstractmethod
     async def list_archive_map(
         self, *, states: tuple[str, ...], direction: str
     ) -> list[dict]:
         """List archive map entries filtered by state and direction."""
 
-    @abstractmethod
     async def update_archive_state(self, row: dict, state: str) -> None:
         """Update state of an archive map entry."""
 
-    @abstractmethod
     async def list_archived_done_ids(
         self, resource_ids: list[int], direction: str = "out"
     ) -> set[int]:
-        """2026-09-01 N-02：返回给定资源 ID 中已归档完成（state=done）的 ID 集
-        （文件状态筛选「在网盘」派生），供列表投影批量判定。"""
+        """Return the ids among the given resource ids whose archive is done (state=done).
 
-    @abstractmethod
+        Supports the "in netdisk" file status filter and batch checks in
+        list projections.
+        """
+
     async def update_archive_state_by_task(self, task_id: str, state: str) -> None:
         """Update state of an archive map entry by task_id."""
 
-    @abstractmethod
     async def update_archive_remote_path(
         self, resource_id: int, group_id: str, direction: str, new_remote_path: str
     ) -> None:
         """Update remote_path of an archive map entry (for rename operations)."""
 
-    @abstractmethod
     async def get_archive_map_by_task(self, task_id: str) -> dict | None:
         """Get archive map entry by bridge task id (OpenList task or fetch op id)."""
 
-    # ---------- netdisk_meta（ADR-0004，N4 网盘索引与标记） ----------
+    # ---------- netdisk_meta (netdisk index and tags) ----------
 
-    @abstractmethod
     async def upsert_netdisk_rows(self, rows: list[dict]) -> int:
-        """浏览登记：幂等新增（INSERT OR IGNORE，不覆盖已有人工标注）；返回新增行数。"""
+        """Register browsed rows: idempotent INSERT OR IGNORE; keeps manual tags; returns count."""
 
-    @abstractmethod
     async def get_netdisk_meta(self, dir_prefix: str) -> list[dict]:
-        """按目录前缀取标记行（remote_path LIKE dir_prefix%）。"""
+        """Return tagged rows by directory prefix (remote_path LIKE dir_prefix%)."""
 
-    @abstractmethod
     async def set_netdisk_tags(self, remote_path: str, tags: str) -> None:
-        """设置单文件标签（覆盖式）。"""
+        """Set tags for a single file (overwrites)."""
 
-    @abstractmethod
     async def mark_netdisk_indexed(self, remote_paths: list[str]) -> None:
-        """深度索引回填 indexed_at。"""
+        """Backfill indexed_at after deep indexing."""
 
-    # ---------- 任务台账与操作流（v15，ADR-0005 经纠偏 D-6 实施） ----------
+    # ---------- Task ledger and operation log ----------
 
-    @abstractmethod
     async def ledger_upsert(
         self,
         task_id: str,
@@ -235,13 +199,11 @@ class MetaStorePort(ABC):
         retries: int = 0,
         error: str | None = None,
     ) -> None:
-        """任务台账 upsert（状态机：pending/running/paused/retry/done/failed/cancelled）。"""
+        """Task ledger upsert (states: pending/running/paused/retry/done/failed/cancelled)."""
 
-    @abstractmethod
     async def ledger_get(self, task_id: str) -> dict | None:
-        """按 task_id 取台账行。"""
+        """Fetch a task ledger entry by task_id."""
 
-    @abstractmethod
     async def ledger_query(
         self,
         state: str | None = None,
@@ -250,33 +212,39 @@ class MetaStorePort(ABC):
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
-        """台账分页查询（updated_at 倒序）。"""
+        """Paged task ledger query (ordered by updated_at desc)."""
 
-    @abstractmethod
     async def ledger_reconcile(self) -> int:
-        """启动对账：白名单 kind 置 pending（断点续传候选），其余置 failed。"""
+        """Startup reconciliation: whitelist kinds become pending (resumable), others failed."""
 
-    @abstractmethod
     async def ops_append(
         self, task_id: str, action: str, before: dict | None, after: dict | None
     ) -> None:
-        """操作流追加（可逆操作 before/after 快照；直连操作 task_id 传 ''）。"""
+        """Append an operation log entry (before/after snapshots for reversible ops).
 
-    @abstractmethod
+        Direct operations pass task_id=''.
+        """
+
     async def ops_list(self, task_id: str) -> list[dict]:
-        """按任务列出操作流（seq 升序）。"""
+        """List operation log entries for a task (ordered by seq asc)."""
 
-    @abstractmethod
     async def ops_last_for_resource(self, action: str, resource_id: int) -> dict | None:
-        """直连操作定位：按资源取最近一次操作流记录（如标签撤销）。"""
+        """Locate direct operations: latest operation log entry for a resource (e.g. tag undo)."""
 
-    @abstractmethod
     async def hide_account_groups(self, account_id: str, hidden: int) -> int:
-        """账号离线 → 该账号全部群组隐藏（hidden=1 非删除）；恢复在线 → 0。"""
+        """Account offline: hide all its groups (hidden=1, not deleted); back online: set to 0."""
 
-    @abstractmethod
+    async def upsert_scan_schedule(
+        self, group_id: str, next_scan_at: int, priority: int = 0
+    ) -> None:
+        """Group info TTL scheduling (scan_schedule): record the next due scan time."""
+
+    async def list_due_scan_groups(
+        self, now: int | None = None, limit: int = 100
+    ) -> list[dict]:
+        """Groups due for rescan (TTL claim); higher priority and earlier due first."""
+
     async def init(self) -> None:
-        """建表/迁移。"""
+        """Create tables / run migrations."""
 
-    @abstractmethod
     async def close(self) -> None: ...

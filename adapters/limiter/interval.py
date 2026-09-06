@@ -1,7 +1,9 @@
-"""固定间隔限速器（V1.0 内联实现，docs/04 §6）。
+"""Fixed-interval rate limiter.
 
-限速范围：OneBot 扩展 API 请求之间的最小间隔（递归采集是"每文件夹一次请求"）。
-V1.1 升级为 RateLimiter 端口 + 令牌桶。
+Scope: enforces a minimum interval between OneBot extension API requests
+(recursive collection issues one request per folder). Provided as the
+fixed-interval implementation behind the RateLimiter port
+(ports/limiter.py).
 """
 
 from __future__ import annotations
@@ -11,15 +13,23 @@ import time
 
 
 class IntervalLimiter:
-    """全局最小间隔限制：任意两次 acquire 之间至少间隔 interval 秒。"""
+    """Global minimum-interval limit: at least `interval` seconds elapse
+    between any two acquire() calls."""
 
     def __init__(self, interval: float = 0.5, min_interval: float = 0.1):
         self.interval = max(interval, min_interval)
         self._lock = asyncio.Lock()
         self._last = 0.0
 
-    async def acquire(self, mult: float = 1.0) -> None:
-        """mult=1 基础间隔；批量任务（如扫描）可传 >1 放大间隔防风控。"""
+    async def acquire(
+        self, mult: float = 1.0, account: str | None = None
+    ) -> None:
+        """mult=1 uses the base interval; batch jobs (e.g. scans) may pass
+        mult > 1 to widen the interval and reduce risk-control pressure.
+
+        account exists only to satisfy the RateLimiter port signature
+        (this global limiter does not distinguish accounts).
+        """
         async with self._lock:
             now = time.monotonic()
             wait = self.interval * mult - (now - self._last)
@@ -29,7 +39,9 @@ class IntervalLimiter:
 
 
 class KeyedLimiter:
-    """按账号键控限速器（v2.11）：每账号独立最小间隔，跨账号并发互不等待。"""
+    """Per-account keyed rate limiter: each account gets its own minimum
+    interval, and concurrent acquires on different accounts never wait
+    for each other."""
 
     def __init__(
         self,
@@ -43,8 +55,10 @@ class KeyedLimiter:
         self._limiters: dict = {}
         self._lock = asyncio.Lock()
 
-    async def acquire(self, key=None, mult: float = 1.0) -> None:
-        k = key if key is not None else self.default_key
+    async def acquire(
+        self, mult: float = 1.0, account: str | None = None
+    ) -> None:
+        k = account if account is not None else self.default_key
         lim = self._limiters.get(k)
         if lim is None:
             async with self._lock:
@@ -56,7 +70,3 @@ class KeyedLimiter:
 
     def keys(self) -> list:
         return list(self._limiters)
-
-    def inject(self, key: str, limiter: IntervalLimiter) -> None:
-        """注入既有限速器（如 bootstrap 的共享限速器 → 默认键）。"""
-        self._limiters[key] = limiter

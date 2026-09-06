@@ -1,12 +1,12 @@
 /**
- * Config view (T-7) - grouped configuration center (D-7, 归纳分类、便利优先).
+ * Config view  - grouped configuration center (categorized, convenience first).
  *
  * Fetches config/get (grouped schema + current values), renders by
  * category with a search filter, marks reload-required keys, tracks
  * dirty items, and saves the changed subset via config/save. The 13-class
- * type-extension table (type_ext_overrides, N-01) is editable right here
+ * type-extension table (type_ext_overrides) is editable right here
  * as a normal config item - changing the table changes classification
- * without code changes (CT-9).
+ * without code changes .
  *
  * @module views/config
  */
@@ -42,7 +42,7 @@ export function initConfigView(container) {
 
   const unsubRefresh = subscribe('refresh:config', loadConfig);
 
-  // Convenience search filter (D-7): group name or item key match.
+  // Convenience search filter : group name or item key match.
   const search = container.querySelector('#config-search');
   search?.addEventListener('input', debounce(() => {
     const q = (search.value || '').toLowerCase();
@@ -161,7 +161,7 @@ async function saveConfig() {
     if (typeof el.__getValue === 'function') {
       const v = el.__getValue();
       if (v !== null) {
-        // Masked fields: empty string = no change (留空则不修改)
+        // Masked fields: empty string = no change
         if (el.classList.contains('masked') && (v === '' || v === '***')) return;
         values[el.dataset.key] = v;
       }
@@ -175,8 +175,21 @@ async function saveConfig() {
     const r = await apiPost(API.CONFIG_SAVE, { values });
     toast(`已保存 ${(r.saved || []).length} 项配置`, 'success');
     if (r.reload_required && r.reload_required.length) {
-      setTimeout(() => confirmEx('重载提示',
-        `以下配置需要插件重载生效：\n${r.reload_required.join('、')}\n\n是否立即重载？（将在 AstrBot 插件页重载）`), 300);
+      setTimeout(async () => {
+        const yes = await confirmEx('应用配置',
+          `以下配置需重载插件后生效：\n${r.reload_required.join('、')}\n\n立即热重载？（与 AstrBot 插件页重载等效，约需 2 秒）`,
+          { okText: '立即热重载', cancelText: '稍后手动重载' });
+        if (!yes) return;
+        try {
+          await apiPost(API.CONFIG_RELOAD, {});
+          toast('插件正在热重载，完成后自动刷新…', 'success');
+          // Reload rebuilds the runtime and reconnects SSE; refetch the
+          // config afterwards to show the latest state.
+          setTimeout(() => { loadConfig(); set('refresh:all', Date.now()); }, 2500);
+        } catch (e2) {
+          toast(`热重载失败: ${e2.message || e2}`, 'error');
+        }
+      }, 300);
     }
     loadConfig();
   } catch (e) {

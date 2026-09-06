@@ -1,5 +1,5 @@
 /**
- * Constants - every magic number and machine-value enum (FE-7).
+ * Constants - every magic number and machine-value enum .
  *
  * Backend constants keep the same names so the pairing is obvious.
  * Anything numeric or enumerable that appears in more than one place
@@ -8,7 +8,7 @@
  * @module constants
  */
 
-// ---- Hard limits (owner constraints, ADR-0007 L series) ----
+// ---- Hard limits (platform constraints) ----
 export const VOLUME_BYTES = 95 * 1024 * 1024;   // files above this split into volumes (95MB)
 export const CHUNK_SIZE = 4500;                 // text chunk budget incl. reassembly marker
 export const VIDEO_SEGMENT = 600;               // album video segment ceiling in seconds
@@ -30,7 +30,7 @@ export const SSE_HEARTBEAT_TIMEOUT_MS = 90000;  // 3 missed heartbeats -> forced
 export const SSE_RECONNECT_BASE_MS = 1000;      // exponential backoff base
 export const SSE_RECONNECT_MAX_MS = 30000;      // backoff cap
 
-// ---- Render budget (FE-16: max keyed-row writes per animation frame) ----
+// ---- Render budget  ----
 export const MAX_ROWS_PER_FRAME = 50;
 export const TASK_LOG_LIMIT = 50;               // task panel log capacity
 
@@ -40,9 +40,9 @@ export const MARQUEE_EDGE_PX = 60;              // viewport edge auto-scroll zon
 export const MARQUEE_SCROLL_STEP = 14;
 export const MARQUEE_CLICK_SUPPRESS_MS = 250;   // suppress row click after drag
 
-// ---- Machine value enums (FE-8: backend emits, api.js maps to labels) ----
+// ---- Machine value enums  ----
 
-/** SSE event types (CT-6). */
+/** SSE event types. */
 export const EVENT_TYPES = {
   QUEUED: 'queued',
   STARTED: 'started',
@@ -79,8 +79,8 @@ export const EVENT_KINDS = {
 };
 
 /**
- * data_changed kind -> store refresh topics (FE-14: only data_changed
- * may reload a topic; the map keeps one refresh per topic, FE-4).
+ * data_changed kind -> store refresh topics (only data_changed
+ * may reload a topic; the map keeps one refresh per topic).
  */
 export const DATA_CHANGED_TOPICS = {
   scan: ['groups'],

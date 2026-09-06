@@ -1,4 +1,4 @@
-"""命令处理器薄壳（DoD #2：parse → authorize → service，不直接碰 DB/OneBot）。"""
+"""Thin command handlers: parse -> authorize -> delegate; no direct DB/OneBot access."""
 
 from __future__ import annotations
 
@@ -6,16 +6,16 @@ import asyncio
 from dataclasses import dataclass, field
 
 from core.domain.enums import SyncStatus
-from core.services.permission import PermissionService
-from core.services.resource_query import ResourceQueryService, StatsService
-from core.services.resource_sync import ResourceSyncService
+from core.application.policies import PermissionService
+from core.application.catalog import ResourceQueryService, StatsService
+from core.application.sync import ResourceSyncService
 from ports.meta_store import MetaStorePort
 from ports.onebot_api import OneBotApiPort
 
 
 @dataclass
 class Services:
-    """服务组合，由 main.py 装配注入。"""
+    """Service bundle, wired in by main.py."""
 
     permission: PermissionService
     store: MetaStorePort
@@ -24,7 +24,7 @@ class Services:
     query: ResourceQueryService
     stats: StatsService
     sync_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
-    # Page/群管理（docs/09 §12）——向后兼容可选注入
+    # Page / group management services (optional; None when not configured)
     scan: "GroupScanService | None" = None
     ops: "FileOpsService | None" = None
     planner: "StoragePlanner | None" = None
@@ -34,14 +34,15 @@ class Services:
     transfer: "TransferService | None" = None
     dlserver: "DownloadServerService | None" = None
     gateway: "StorageGateway | None" = None
-    bridge: "BridgeService | None" = None  # OpenList bridge (REQ-08)
-    netdisk: "NetdiskService | None" = None  # 网盘浏览/登记/索引（ADR-0004）
-    task_control: "TaskControlService | None" = None  # v15：任务台账与控制（D-6）
-    distributor: "DistributorService | None" = None  # 2026-09-02 W2-A：下载分发编排
-    converter: "ConverterService | None" = None  # 2026-09-02 W2-B：格式转换
+    bridge: "BridgeService | None" = None  # OpenList bridge 
+    netdisk: "NetdiskService | None" = None  # Netdisk browse/registration/indexing
+    task_control: "TaskControlService | None" = None  # Task records and control
+    distributor: "DistributorService | None" = None  # Download distribution orchestration
+    converter: "ConverterService | None" = None  # Format conversion
     config: dict = field(default_factory=dict)
-    ready: "Callable[[], Awaitable[None]] | None" = None  # 惰性初始化（Page API 首调）
-    # 在线账号查询（由 main.py 注入，返回当前在线的 account_id 集合）
+    database_admin: object | None = None
+    ready: "Callable[[], Awaitable[None]] | None" = None  # Lazy init on first Page API call
+    # Online account query, injected by main.py: returns the currently online account IDs
     get_online_account_ids: "Callable[[], set[str]] | None" = None
 
     def lock_for(self, group_id: str) -> asyncio.Lock:
@@ -53,7 +54,7 @@ def _err(msg: str) -> str:
 
 
 async def handle_cssync(event, services: Services, group_id: str = "") -> str:
-    """解析群号（默认当前群）→ 授权 → 全量同步 → 统计报告。"""
+    """Resolve group ID (default: current group) -> authorize -> full sync -> stats report."""
     actual_group = event.get_group_id()
     target = group_id or actual_group
     if not target:
@@ -70,7 +71,7 @@ async def handle_cssync(event, services: Services, group_id: str = "") -> str:
     stats = await services.stats.stats(target)
     return (
         StatsService.format_stats(stats)
-        + f"\n▸ 本次：发现 {result.files_found} / 入库 {result.files_indexed}"
+        + f"\n▸ 本次：发现 {result.files_found} / 登记 {result.files_indexed}"
     )
 
 
@@ -102,7 +103,7 @@ async def handle_csfile(event, services: Services, id: int, group_id: str = "") 
     if not row:
         return _err(f"群 {target} 中不存在文件 ID={id}。")
     text = StatsService.format_detail(row)
-    # 动态直链（AC10：不持久化 url）
+    # Direct link generated on demand (URL is not persisted)
     try:
         url = await services.api.get_group_file_url(
             target, row["source_ref"], row["busid"] or 0, row["name"]
@@ -116,7 +117,11 @@ async def handle_csfile(event, services: Services, id: int, group_id: str = "") 
 async def handle_cssave(
     event, services: Services, group_id: str = "", title: str = "", text: str = ""
 ) -> str:
-    """文本保存为群精华（v1.2）：长文本自动分段（每段 ≤4500 字）逐段发送并设精。"""
+    """Save text as an essence message.
+
+    Long text is split into segments (at most 4500 chars each), sent one by
+    one, and each segment is set as an essence message.
+    """
     actual_group = event.get_group_id()
     target = group_id or actual_group
     if not target:
@@ -126,7 +131,7 @@ async def handle_cssave(
     ):
         return _err("权限不足。")
     if not services.ingest:
-        return _err("入库服务未就绪。")
+        return _err("导入服务未就绪。")
     if not title.strip() or not text.strip():
         return _err("用法：/cssave [群号] <标题> <正文>（正文可含空格）")
     try:
@@ -134,7 +139,7 @@ async def handle_cssave(
     except ValueError as e:
         return _err(str(e))
     return (
-        f"▸ 文本保存为群精华已排队：{title.strip()}\n"
+        f"▸ 文本保存为精华消息已排队：{title.strip()}\n"
         f"▸ 任务 {task_id}（长文本将自动分段存储；状态可经插件页面查看）"
     )
 
@@ -142,7 +147,7 @@ async def handle_cssave(
 async def handle_csfetch(
     event, services: Services, group_id: str = "", url: str = "", name: str = ""
 ) -> str:
-    """HTTP/HTTPS/FTP 外部文件入库（v1.2）：非本机文件多途径传输至目标群。"""
+    """Queue an external file import (HTTP/HTTPS/FTP URL) into the target group."""
     actual_group = event.get_group_id()
     target = group_id or actual_group
     if not target:
@@ -152,7 +157,7 @@ async def handle_csfetch(
     ):
         return _err("权限不足。")
     if not services.ingest:
-        return _err("入库服务未就绪。")
+        return _err("导入服务未就绪。")
     if not url:
         return _err("用法：/csfetch [群号] <http|https|ftp URL> [文件名]")
     try:
@@ -161,7 +166,7 @@ async def handle_csfetch(
         )
     except ValueError as e:
         return _err(str(e))
-    return f"▸ 外部文件入库已排队：{url}\n▸ 任务 {task_id}"
+    return f"▸ 外部文件导入已排队：{url}\n▸ 任务 {task_id}"
 
 
 async def handle_csarchive(
@@ -264,10 +269,10 @@ def handle_cshelp() -> str:
 
 
 def _role(event) -> str:
-    """从事件提取群角色（owner/admin → admin）。
+    """Extract the group role from the event (owner/admin -> admin).
 
-    注意：AstrBot 4.27 对 OneBot 消息事件不填充 event.role（恒为 member），
-    需回退读取 raw_message.sender.role（OneBot 11 标准字段）。
+    AstrBot does not populate event.role for OneBot message events (it stays
+    "member"), so fall back to raw_message.sender.role (a OneBot 11 field).
     """
     try:
         raw = getattr(event.message_obj, "raw_message", None) or {}

@@ -2,205 +2,252 @@
   "managed_groups": {
     "type": "list",
     "default": [],
-    "description": "受管群白名单（群号列表）：仅这些群允许管理操作；留空 = 全部已发现群可管理",
-    "group": "权限与发布"
+    "group": "基础设置",
+    "description": "要管理的群号列表（留空 = 自动管理机器人所在的所有群）",
+    "hint": "示例：[\"123456\", \"654321\"]；填写后只有列表内的群会出现在管理面板中",
+    "obvious_hint": true
   },
   "global_admin_qqs": {
     "type": "list",
     "default": [],
-    "description": "跨群管理授权 QQ 号（全局管理员，可操作任意受管群）",
-    "group": "权限与发布"
-  },
-  "request_interval_ms": {
-    "type": "int",
-    "default": 1000,
-    "description": "OneBot API 请求最小间隔（毫秒），防风控；扫描等批量任务自动放大间隔（默认 1000，建议 ≥500）",
-    "group": "同步与凋零"
-  },
-  "max_concurrent_scans": {
-    "type": "int",
-    "default": 8,
-    "description": "最大并行扫描账号数（多账号水平扩展）；1=串行，建议 ≤ 账号数，上限 20",
-    "group": "同步与凋零"
+    "group": "基础设置",
+    "description": "全局管理员 QQ 号（可以管理上面所有群）",
+    "hint": "普通用户只能在群里发指令；填入 QQ 号后，这些人可以跨群执行管理操作"
   },
   "auto_index_upload_event": {
     "type": "bool",
     "default": true,
-    "description": "监听群文件上传事件（group_upload）并实时写入本地索引",
-    "group": "同步与凋零"
+    "group": "基础设置",
+    "description": "有人上传群文件时自动登记",
+    "obvious_hint": true
   },
   "auto_scan_interval_hours": {
     "type": "float",
     "default": 6,
-    "description": "凋零差分对账周期（小时）（2026-09-01 D-4 语义重定义：目录级差分替代定时全量；云端消失条目差分即剔除；缺席群冻结不误删；全量扫描降级为手动例外）；0 = 关闭定时，仅事件与手动触发",
-    "group": "同步与凋零"
+    "group": "基础设置",
+    "description": "定时与云端对账的间隔（小时），自动清理已消失的文件记录",
+    "hint": "默认 6 小时；设为 0 表示关闭定时对账（仍可手动触发）；对账按目录级差分进行，云端缺席的群会冻结保护、不会误删"
+  },
+  "group_info_ttl_hours": {
+    "type": "float",
+    "default": 24,
+    "group": "基础设置",
+    "description": "群信息有效期（小时），到期自动重扫保持容量/相册/精华计数最新",
+    "hint": "默认 24 小时；设为 0 表示关闭过期重扫（仍可手动刷新）；账号离线时其群组会自动隐藏，恢复在线后自动恢复"
   },
   "auto_label": {
     "type": "bool",
     "default": true,
-    "description": "同步后自动为未编号群续填编号（字母/数字自动编号，辅助排序）",
-    "group": "同步与凋零"
+    "group": "基础设置",
+    "description": "自动为群分配编号（便于在面板中排序）"
   },
   "page_size": {
     "type": "int",
     "default": 10,
-    "description": "文件列表默认每页条数（1-100；页面内可临时切换）",
-    "group": "页面与预览"
+    "group": "基础设置",
+    "description": "管理面板文件列表每页条数（1-100，页面上可临时切换）"
   },
-  "essence_chunk_size": {
+  "request_interval_ms": {
     "type": "int",
-    "default": 4000,
-    "description": "群精华单条消息字符上限（硬限制 4000）；长文本保存为精华时按此分段（每段 ≤ 该值，末尾语义化标记整合）；实限 4500 预留标记预算",
-    "group": "入库与组合存储"
-  },
-  "video_segment_seconds": {
-    "type": "int",
-    "default": 599,
-    "description": "群相册视频时长上限（秒，硬限制 <599）；超过该时长的视频入库时无损切分为多个 <599s 分片",
-    "group": "入库与组合存储"
+    "default": 1000,
+    "group": "基础设置",
+    "description": "调用 QQ 接口的基础间隔（毫秒），防止账号被风控",
+    "hint": "默认 1000（每秒 1 次）；读类接口（浏览列表等）自动放宽到 0.4 倍；一般无需修改"
   },
   "fetch_max_bytes": {
     "type": "int",
     "default": 2147483648,
-    "description": "外部文件入库（/csfetch）单文件大小上限（字节，默认 2GB）",
-    "group": "入库与组合存储"
-  },
-  "fetch_timeout_sec": {
-    "type": "int",
-    "default": 180,
-    "description": "外部文件入库下载超时（秒）",
-    "group": "入库与组合存储"
-  },
-  "volume_compress_enabled": {
-    "type": "bool",
-    "default": false,
-    "description": "C-4 分卷压缩开关（文件侧）：大文件分卷上传前启用 zip 可逆压缩（下载重组自动解压）；默认关闭",
-    "group": "入库与组合存储"
-  },
-  "volume_checksum_enabled": {
-    "type": "bool",
-    "default": false,
-    "description": "C-5 校验卷开关：分卷上传后附加 SHA-256 校验卷，确保上传前/重组后数据一致；默认关闭",
-    "group": "入库与组合存储"
+    "group": "自动保存与分卷",
+    "description": "/csfetch 外部链接导入的单文件大小上限",
+    "hint": "单位字节，默认 2GB = 2147483648"
   },
   "download_server_enabled": {
     "type": "bool",
     "default": false,
-    "description": "开启本机下载服务（HTTP + FTP）：外部客户端直接访问本机接口拉取群文件（单文件 302 至 QQ CDN，分卷/视频流式重组）",
-    "group": "下载服务"
+    "group": "下载服务",
+    "description": "开启本机下载服务（浏览器/外部客户端可直接拉取群文件）",
+    "obvious_hint": true
   },
   "download_server_host": {
     "type": "string",
     "default": "127.0.0.1",
-    "description": "本机下载服务的对外地址（IP/域名）；局域网访问请填本机内网 IP",
-    "group": "下载服务"
+    "group": "下载服务",
+    "description": "下载服务的对外地址",
+    "hint": "本机访问保持 127.0.0.1；局域网其他设备访问请改成这台机器的内网 IP（如 192.168.1.10）"
   },
   "download_http_port": {
     "type": "int",
     "default": 6186,
-    "description": "本机 HTTP 下载服务端口（0 = 关闭 HTTP）",
-    "group": "下载服务"
+    "group": "下载服务",
+    "description": "下载服务的 HTTP 端口（0 = 关闭 HTTP）"
   },
   "download_ftp_port": {
     "type": "int",
     "default": 0,
-    "description": "本机 FTP 下载服务端口（0 = 关闭 FTP；虚拟目录 /<群号>/<文件名>）",
-    "group": "下载服务"
+    "group": "下载服务",
+    "description": "下载服务的 FTP 端口（0 = 关闭 FTP）",
+    "hint": "开启后可用 FTP 客户端浏览 群号/文件名 目录结构"
+  },
+  "download_smb_port": {
+    "type": "int",
+    "default": 0,
+    "group": "下载服务",
+    "description": "下载服务的 SMB 端口（0 = 关闭 SMB）",
+    "hint": "需要可选依赖 impacket（pip install impacket）；共享名 cloud，内容按需落盘"
   },
   "download_token": {
     "type": "string",
     "default": "",
-    "description": "下载服务访问令牌（留空 = 不校验；生成的下载地址会附带此令牌）",
-    "group": "下载服务"
-  },
-  "op_high_priority_kinds": {
-    "type": "list",
-    "default": [],
-    "description": "操作队列优先级覆盖（操作类型列表）；留空 = 内置默认；填写后完全替换内置高优集合，例如 [\"rename\",\"upload\"]",
-    "group": "任务与队列"
+    "group": "下载服务",
+    "description": "下载服务的访问令牌（留空 = 不校验）",
+    "hint": "对外暴露下载服务时建议设置，生成的下载链接会自动附带此令牌"
   },
   "openlist_enabled": {
     "type": "bool",
     "default": false,
-    "description": "Enable OpenList bridge (archive group files to OpenList netdisk)",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "启用 OpenList 网盘桥接（群文件自动归档到网盘）",
+    "obvious_hint": true
   },
   "openlist_base_url": {
     "type": "string",
     "default": "",
-    "description": "OpenList server URL (e.g. http://192.168.1.10:5244)",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "OpenList 服务地址",
+    "hint": "例如 http://192.168.1.10:5244 或 http://openlist:5244（Docker 同网络时用容器名）"
   },
   "openlist_username": {
     "type": "string",
     "default": "",
-    "description": "OpenList login username",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "OpenList 用户名"
   },
   "openlist_password": {
     "type": "string",
     "default": "",
-    "description": "OpenList login password",
-    "group": "桥接与网盘"
-  },
-  "openlist_token": {
-    "type": "string",
-    "default": "",
-    "description": "OpenList direct token injection (bypass username/password login)",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "OpenList 密码",
+    "hint": "登录成功后令牌会自动缓存；也可以在高级选项中直接填令牌跳过账号登录"
   },
   "openlist_dst_dir": {
     "type": "string",
     "default": "/",
-    "description": "OpenList target root directory for archived files",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "归档文件存放到网盘的根目录"
   },
   "openlist_dst_dir_template": {
     "type": "string",
     "default": "{group_id}/{filename}",
-    "description": "Path template for archived files (literal replace: {group_id}, {filename})",
-    "group": "桥接与网盘"
-  },
-  "openlist_timeout_sec": {
-    "type": "float",
-    "default": 30.0,
-    "description": "OpenList API request timeout (seconds)",
-    "group": "桥接与网盘"
-  },
-  "openlist_allow_private_address": {
-    "type": "bool",
-    "default": false,
-    "description": "Allow private/reserved IP addresses for OpenList (SSRF protection toggle)",
-    "group": "桥接与网盘"
-  },
-  "openlist_poll_interval_sec": {
-    "type": "int",
-    "default": 0,
-    "description": "Bridge task polling interval (seconds); 0 = manual mode (query via /csbridge status); >0 = auto polling (stops when no pending tasks)",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "归档路径模板",
+    "hint": "可用变量：{group_id} 群号、{filename} 文件名；默认按 群号/文件名 分目录存放"
   },
   "bridge_min_bytes": {
     "type": "int",
     "default": 0,
-    "description": "Minimum file size for bridge archive (bytes); 0 = no limit",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "归档文件大小下限（字节，0 = 不限制）"
   },
   "bridge_max_bytes": {
     "type": "int",
     "default": 0,
-    "description": "Maximum file size for bridge archive (bytes); 0 = no limit",
-    "group": "桥接与网盘"
+    "group": "网盘归档",
+    "description": "归档文件大小上限（字节，0 = 不限制）"
+  },
+  "openlist_allow_private_address": {
+    "type": "bool",
+    "default": false,
+    "group": "网盘归档",
+    "description": "允许连接内网地址的 OpenList",
+    "hint": "OpenList 部署在本机或同一 Docker 网络时（地址形如 http://openlist:5244 或 http://192.168.x.x）必须开启；默认关闭以防内网探测"
+  },
+  "max_concurrent_scans": {
+    "type": "int",
+    "default": 8,
+    "group": "高级选项",
+    "description": "多账号时的并行扫描数（1 = 串行）",
+    "invisible": true
+  },
+  "essence_chunk_size": {
+    "type": "int",
+    "default": 4000,
+    "group": "高级选项",
+    "description": "长文本保存为精华消息时的分段长度（受 QQ 单条 4000 字符硬限制）",
+    "invisible": true
+  },
+  "video_segment_seconds": {
+    "type": "int",
+    "default": 599,
+    "group": "高级选项",
+    "description": "长视频导入相册时切分的时长上限（受 QQ 相册 599 秒硬限制）",
+    "invisible": true
+  },
+  "fetch_timeout_sec": {
+    "type": "int",
+    "default": 180,
+    "group": "高级选项",
+    "description": "/csfetch 下载超时（秒）",
+    "invisible": true
+  },
+  "fetch_allow_private_address": {
+    "type": "bool",
+    "default": false,
+    "group": "高级选项",
+    "description": "允许 fetch 拉取内网地址（环回/私有/保留段）",
+    "hint": "外部链接导入（URL 上传/网盘回链等）默认拒绝访问 127.0.0.1、192.168.x.x 等内网地址以防内网探测；确认目标确在内网时才开启",
+    "invisible": true
+  },
+  "openlist_token": {
+    "type": "string",
+    "default": "",
+    "group": "高级选项",
+    "description": "OpenList 令牌直填（跳过账号密码登录）",
+    "invisible": true
+  },
+  "openlist_timeout_sec": {
+    "type": "float",
+    "default": 30.0,
+    "group": "高级选项",
+    "description": "OpenList 请求超时（秒）",
+    "invisible": true
+  },
+  "openlist_poll_interval_sec": {
+    "type": "int",
+    "default": 0,
+    "group": "高级选项",
+    "description": "桥接任务自动轮询间隔（秒；0 = 手动模式，用 /csbridge status 查询）",
+    "invisible": true
+  },
+  "op_high_priority_kinds": {
+    "type": "list",
+    "default": [],
+    "group": "高级选项",
+    "description": "操作队列高优先级类型覆盖（留空 = 内置默认）",
+    "invisible": true
   },
   "type_ext_overrides": {
     "type": "dict",
     "default": {},
-    "description": "CT-9 type classification overrides: {\".xyz\": \"pdf\"} (extension with dot -> 13-class group: document/pdf/spreadsheet/slide/online_doc/image/video/audio/archive/installer/flash/folder/other; program->installer, data->other legacy aliases); suffix editing = 13-class reclassification; applies to file listing, netdisk indexing and preview routing (2026-09-01 ADR-0008 N-01)",
-    "group": "页面与预览"
+    "group": "高级选项",
+    "description": "文件扩展名 → 类型分类覆盖表",
+    "hint": "格式：{\".xyz\": \"pdf\"}；分类可选 document/pdf/spreadsheet/slide/online_doc/image/video/audio/archive/installer/flash/folder/other",
+    "editor_mode": "json",
+    "invisible": true
   },
   "preview_policy": {
     "type": "dict",
     "default": {},
-    "description": "CT-9 preview policy overrides: {\"key\": {\"types\": \"document,data\", \"mode\": \"external|builtin|download\", \"template\": \"https://viewer.example/?url={src}\"}}; merged over the built-in default table",
-    "group": "页面与预览"
+    "group": "高级选项",
+    "description": "在线预览策略覆盖（在内置默认表之上合并）",
+    "hint": "格式：{\"key\": {\"types\": \"document,data\", \"mode\": \"external|builtin|download\", \"template\": \"https://viewer.example/?url={src}\"}}",
+    "editor_mode": "json",
+    "invisible": true
+  },
+  "database_admin_token": {
+    "type": "string",
+    "default": "",
+    "group": "高级选项",
+    "description": "数据库管理接口的独立令牌（留空 = 沿用面板管理权限）",
+    "invisible": true
   }
 }

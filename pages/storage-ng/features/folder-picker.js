@@ -12,6 +12,7 @@ import { getState } from '../store.js';
 import { API, apiGet } from '../api.js';
 import { getIcon } from '../icons.js';
 import { escapeHtml } from '../utils/helpers.js';
+import { toast } from '../components/toast.js';
 
 let overlay = null;
 let resolvePick = null;
@@ -43,8 +44,15 @@ function done(value) {
 }
 
 async function fetchFolders(group, folder) {
-  const data = await apiGet(API.FILES.LIST, { group, folder, page: 1, page_size: 100 });
-  return data.folders || [];
+  try {
+    const data = await apiGet(API.FILES.LIST, { group, folder, page: 1, page_size: 100 });
+    return data.folders || [];
+  } catch (e) {
+    // Was a bare await: a failed fetch stalled the tree toggle on "..."
+    // with no feedback at all.
+    toast(`目录列表获取失败: ${(e && e.message) || e}`, 'error');
+    return [];
+  }
 }
 
 function renderNode(container, node, depth, group) {

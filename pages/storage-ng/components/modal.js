@@ -119,7 +119,10 @@ export function promptEx(title, text, opts = {}) {
   body.classList.toggle('hidden', !text);
   const form = overlay.querySelector('.modal-form');
   form.classList.remove('hidden');
-  form.innerHTML = `<input type="text" name="value" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || '')}" style="width:100%">`;
+  // The single prompt input is required by definition: mark it and add the
+  // legend so required vs optional fields is visible everywhere.
+  form.innerHTML = `<input type="text" name="value" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || '')}" style="width:100%">` +
+    `<div class="form-legend">带 <i class="req-mark">*</i> 为必填项，其余为可选项</div>`;
   overlay.querySelector('.modal-ok').textContent = okText;
   overlay.querySelector('.modal-ok').className = 'modal-ok primary';
   overlay.querySelector('.modal-cancel').textContent = '取消';
@@ -177,20 +180,27 @@ export function showFormModal(title, rows, opts = {}) {
   body.textContent = '';
   const form = overlay.querySelector('.modal-form');
   form.classList.remove('hidden');
+  // Required rows get a trailing "*" so required vs optional is visible;
+  // the legend renders only when the form actually has required fields.
+  const reqMark = '<i class="req-mark" title="必填">*</i>';
   form.innerHTML = rows.map((r) => {
     const id = r.name || r.label;
+    const label = `${escapeHtml(r.label)}${r.required ? reqMark : ''}`;
     if (r.type === 'select') {
       const optsHtml = (r.options || []).map((o) =>
         `<option value="${escapeHtml(String(o.value))}" ${o.value === r.value ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
       ).join('');
-      return `<label class="form-row"><span>${escapeHtml(r.label)}</span><select name="${escapeHtml(id)}">${optsHtml}</select></label>`;
+      return `<label class="form-row"><span>${label}</span><select name="${escapeHtml(id)}">${optsHtml}</select></label>`;
     }
     if (r.type === 'textarea') {
-      return `<label class="form-row"><span>${escapeHtml(r.label)}</span><textarea name="${escapeHtml(id)}" rows="${r.rows || 4}" placeholder="${escapeHtml(r.placeholder || '')}">${escapeHtml(r.value || '')}</textarea></label>`;
+      return `<label class="form-row"><span>${label}</span><textarea name="${escapeHtml(id)}" rows="${r.rows || 4}" placeholder="${escapeHtml(r.placeholder || '')}">${escapeHtml(r.value || '')}</textarea></label>`;
     }
-    return `<label class="form-row"><span>${escapeHtml(r.label)}</span>` +
+    return `<label class="form-row"><span>${label}</span>` +
       `<input type="${escapeHtml(r.type || 'text')}" name="${escapeHtml(id)}" value="${escapeHtml(r.value == null ? '' : r.value)}" placeholder="${escapeHtml(r.placeholder || '')}"></label>`;
   }).join('');
+  if (rows.some((r) => r.required)) {
+    form.innerHTML += '<div class="form-legend">带 <i class="req-mark">*</i> 为必填项，其余为可选项</div>';
+  }
   overlay.querySelector('.modal-ok').textContent = okText;
   overlay.querySelector('.modal-ok').className = 'modal-ok primary';
   overlay.querySelector('.modal-cancel').textContent = '取消';

@@ -1,4 +1,4 @@
-"""领域枚举（V1.0 冻结，docs/02 §3 / docs/04 §3、§5）。"""
+"""Domain enums."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from enum import Enum
 
 
 class ResourceType(str, Enum):
-    """资源类型。V1.0 仅 FILE；V1.1 增加 ESSENCE；V1.2 增加 ALBUM。"""
+    """Resource type."""
 
     FILE = "file"
-    ALBUM = "album"  # v9：群相册条目（资源化，媒体按需实时拉取）
-    ESSENCE = "essence"  # v9：精华消息（文本/图片，摘要元数据）
+    ALBUM = "album"  # group album entry (indexed as a resource; media fetched on demand)
+    ESSENCE = "essence"  # essence message (text/image, summary metadata)
 
 
 class ResourceStatus(str, Enum):
@@ -33,7 +33,7 @@ class SyncStatus(str, Enum):
 
 
 class PermissionLevel(Enum):
-    """权限层级（docs/04 §3）。"""
+    """Permission levels."""
 
     NONE = 0
     GROUP_MEMBER = 1
@@ -42,7 +42,7 @@ class PermissionLevel(Enum):
 
 
 class CapabilityState(str, Enum):
-    """OneBot 扩展 API 能力探测状态（docs/04 §5）。"""
+    """Capability probe states for extended OneBot APIs."""
 
     UNKNOWN = "unknown"
     SUPPORTED = "supported"
@@ -51,17 +51,17 @@ class CapabilityState(str, Enum):
 
 
 class OneBotErrorKind(str, Enum):
-    """扩展 API 失败分类（DoD #8 / docs/04 §6）。"""
+    """Extended API failure categories."""
 
-    UNSUPPORTED = "unsupported"  # 实现端无此 action
-    TIMEOUT = "timeout"  # 超时
-    RATE_LIMITED = "rate_limited"  # 触发限频
-    REMOTE_ERROR = "remote_error"  # 其他远端错误
-    LOCAL_ERROR = "local_error"  # 本地参数/逻辑错误
+    UNSUPPORTED = "unsupported"  # action not implemented by the adapter
+    TIMEOUT = "timeout"  # timeout
+    RATE_LIMITED = "rate_limited"  # rate limited
+    REMOTE_ERROR = "remote_error"  # other remote error
+    LOCAL_ERROR = "local_error"  # local parameter/logic error
 
 
 class OneBotApiError(Exception):
-    """OneBot 扩展 API 调用失败（统一出口，禁止原始异常上浮到 core）。"""
+    """Extended OneBot API failure (unified exit; raw exceptions never reach core)."""
 
     def __init__(self, kind: OneBotErrorKind, action: str, message: str = ""):
         self.kind = kind
@@ -71,9 +71,10 @@ class OneBotApiError(Exception):
 
 
 class BridgeTaskState(str, Enum):
-    """桥接任务状态（docs/14 §2.3 archive_map.state）。
+    """Bridge task state (archive_map.state).
 
-    内部统一状态，外部状态通过 normalize_task_state() 映射。
+    Unified internal states; external states are mapped via
+    normalize_task_state() and from_external().
     """
 
     PENDING = "pending"
@@ -84,9 +85,9 @@ class BridgeTaskState(str, Enum):
 
     @classmethod
     def from_external(cls, state) -> "BridgeTaskState":
-        """从外部状态（OpenList API 或旧数据）映射到内部枚举。
+        """Map an external state (OpenList API or legacy data) to the internal enum.
 
-        支持字符串和整数（OpenList API 兼容）。
+        Accepts strings and integers (OpenList API compatibility).
         """
         if isinstance(state, int):
             _INT_MAP = {0: cls.PENDING, 1: cls.RUNNING, 2: cls.DONE, 3: cls.FAILED}
@@ -108,11 +109,6 @@ class BridgeTaskState(str, Enum):
         return _STR_MAP.get(str(state or "").strip().lower(), cls.UNKNOWN)
 
     @classmethod
-    def is_terminal(cls, state: "BridgeTaskState") -> bool:
-        """状态是否为终态（done/failed）。"""
-        return state in (cls.DONE, cls.FAILED)
-
-    @classmethod
     def is_actionable(cls, state: "BridgeTaskState") -> bool:
-        """状态是否需要继续处理（pending/running/unknown）。"""
+        """Whether the state still needs processing (pending/running/unknown)."""
         return state in (cls.PENDING, cls.RUNNING, cls.UNKNOWN)

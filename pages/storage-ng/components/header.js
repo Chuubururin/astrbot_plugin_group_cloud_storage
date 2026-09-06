@@ -3,7 +3,7 @@
  *
  * Title with current group context, home/refresh shortcuts, the queue
  * indicator (opens the task panel) and the layout preference toggle
- * (single/dual pane, N-07 rule 3 default is single).
+ * .
  *
  * @module components/header
  */

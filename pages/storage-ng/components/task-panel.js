@@ -2,7 +2,7 @@
  * Task panel (A3/G1-G3) - floating log behind the header queue indicator.
  *
  * Renders the SSE-fed taskLog (newest first); rows update in place by
- * log id so progress events mutate rather than rebuild (FE-14). Panel
+ * log id so progress events mutate rather than rebuild . Panel
  * visibility follows store.taskPanelOpen, toggled by cs-header.
  *
  * @module components/task-panel
@@ -64,7 +64,7 @@ function renderTasks(panel) {
   const tasks = getState().taskLog || [];
   if (count) count.textContent = tasks.length ? `${tasks.length} 条` : '';
 
-  // In-place update by log id (FE-14): remove stale, update or append.
+  // In-place update by log id : remove stale, update or append.
   const existing = new Map();
   for (const el of Array.from(list.children)) {
     if (el.dataset && el.dataset.key != null) existing.set(el.dataset.key, el);

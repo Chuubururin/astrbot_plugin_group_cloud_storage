@@ -403,6 +403,22 @@
 
 .form-row input, .form-row textarea, .form-row select { width: 100%; }
 
+/* Required-field marker (trailing "*" after the label) and form legend. */
+.req-mark {
+  font-style: normal;
+  font-weight: 700;
+  color: var(--danger);
+  margin-left: 2px;
+}
+
+.form-legend {
+  font-size: 11px;
+  color: var(--text-dim, var(--text-md));
+  opacity: 0.85;
+  margin-top: -2px;
+  margin-bottom: var(--space-3);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -589,7 +605,29 @@ body.marquee-active tr { cursor: crosshair; }
 }
 
 .gallery-img { width: 100%; height: 100%; object-fit: cover; }
+/* Inside a card shared with the management actions bar, the media shrinks
+   so the bar stays visible instead of being clipped by overflow: hidden. */
+.gallery-item .gallery-img { height: auto; flex: 1 1 0; min-height: 0; }
 .gallery-hint { word-break: break-all; }
+
+.gallery-item { position: relative; flex-direction: column; gap: 4px; }
+.gallery-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+  z-index: 1;
+}
+.gallery-item-actions button {
+  font-size: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+.gallery-item-actions button:hover { background: var(--surface2); }
 
 .gallery-vid-btn {
   margin-top: 4px;

@@ -1,8 +1,8 @@
 /**
- * Groups view (T-6) - 群组 tab.
+ * Groups view  - groups tab.
  *
  * Thin shell over components/group-table.js which owns the full group
- * management UI: online accounts only (L-4: offline/switched accounts are
+ * management UI: online accounts only (offline/switched accounts are
  * hidden by the backend, the list decays with scans), client-side sort /
  * pagination, batch ops, remove/restore, labels and ordering. A row click
  * sets the file context and opens the files tab.

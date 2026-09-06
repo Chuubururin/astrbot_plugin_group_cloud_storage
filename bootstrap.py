@@ -1,7 +1,8 @@
-"""Bootstrap —— 服务装配工厂（自 main.py 拆出，M0 工程加固）。
+"""Bootstrap — service assembly factory.
 
-Star 入口只保留命令壳/事件/生命周期；全部服务装配收敛于此，
-配合 OpDispatcher 使入口从「上帝类」退化为薄壳。
+The Star entry point keeps only command shells, events and lifecycle; all
+service assembly lives here, and together with OpDispatcher the entry stays
+thin.
 """
 
 from __future__ import annotations
@@ -10,28 +11,27 @@ from pathlib import Path
 
 from astrbot.api import logger
 
-from adapters.limiter.interval import IntervalLimiter
+from adapters.limiter.interval import KeyedLimiter
 from adapters.onebot.napcat import NapCatApiAdapter
-from adapters.store.sqlite import SqliteMetaStore
+from adapters.persistence.sqlite import SqliteMetaStore
 from commands.handlers import Services
 from core.config import PluginConfig
-from core.services.bridge import BridgeService
-from core.services.netdisk import NetdiskService
-from core.services.cloud_ingest import CloudIngestService
-from core.services.download_server import DownloadServerService
-from core.services.converter import ConverterService  # noqa: E402
-from core.services.distributor import DistributorService  # noqa: E402
-from core.services.file_ops import FileOpsService
-from core.services.gateway import StorageGateway
-from core.services.group_scan import GroupScanService
-from core.services.op_queue import OpQueue
-from core.services.permission import PermissionService
-from core.services.resource_query import ResourceQueryService, StatsService
-from core.services.resource_sync import ResourceSyncService
-from core.services.search_kv import SearchKV
-from core.services.storage_planner import StoragePlanner
-from core.services.task_control import TaskControlService
-from core.services.transfer import TransferService
+from core.application.policies import PermissionService
+from core.application.files import FileOpsService
+from core.application.ingest import CloudIngestService
+from core.application.files.converter import ConverterService
+from core.application.catalog import (
+    ResourceQueryService, StatsService, SearchKV, StoragePlanner,
+)
+from core.application.transfer import TransferService
+from core.application.distributor import DistributorService
+from core.application.sync import ResourceSyncService, GroupScanService
+from core.application.queue import OpQueue, TaskControlService
+from core.application.bridge import BridgeService
+from core.application.netdisk import NetdiskService
+from core.application.download_server import DownloadServerService
+from core.application.database import DatabaseAdminService
+from core.application.gateway import StorageGateway
 from adapters.external.openlist import OpenListClient
 
 
@@ -44,12 +44,16 @@ def build_components(
     on_account_resolved=None,
     get_online_account_ids=None,
 ) -> dict:
-    """装配全部服务，返回组件 dict（键名 = Main 现有属性名）。
+    """Assemble all services and return the components dict (keys match Main's
+    attribute names).
 
-    - bind_call_action / run_handler / ready 由宿主注入（避免循环依赖）
-    - config 包装为 PluginConfig：get() 透传语义，行为与原 dict 完全一致
-    - on_account_resolved: 扫描成功后回调 (bot, account_id) → 注册映射 + 恢复 managed
-    - get_online_account_ids: 返回当前在线 account_id 集合的回调
+    - bind_call_action / run_handler / ready are injected by the host
+      (avoids circular dependencies)
+    - config is wrapped in PluginConfig: get() passes through with the same
+      semantics as the raw dict
+    - on_account_resolved: callback after a successful scan
+      (bot, account_id) -> register mapping + restore managed flags
+    - get_online_account_ids: callback returning the set of online account_ids
     """
     cfg = config if isinstance(config, PluginConfig) else PluginConfig(config or {})
     for key, msg in cfg.validate():
@@ -58,6 +62,9 @@ def build_components(
     interval = float(cfg.get("request_interval_ms", 500)) / 1000.0
 
     store = SqliteMetaStore(data_dir / "meta.db")
+    database_admin = DatabaseAdminService(
+        store, data_dir=data_dir, token=str(cfg.get("database_admin_token", "") or "")
+    )
     api = NapCatApiAdapter(bind_call_action, interval=interval)
     perm = PermissionService(
         managed_groups=cfg.get("managed_groups", []),
@@ -65,17 +72,20 @@ def build_components(
     )
     sync = ResourceSyncService(api, store)
 
-    # 群管理/Page（docs/09 §12）：共享限速器（OpQueue 与扫描复合操作全局限速）
-    limiter = IntervalLimiter(interval)
+    # Group management / page: shared rate limiter (global pacing for the
+    # OpQueue and composite scan operations). Keyed per account: the default
+    # key carries the global pace; OpQueue consumes it via the RateLimiter port.
+    limiter = KeyedLimiter(interval)
 
-    # v15：任务台账与控制（D-6）——台账挂钩随队列；队列/补偿执行器在装配后补入
+    # Task records and control: record hooks ride along with the queue;
+    # the queue and compensation executors are attached after assembly.
     task_control = TaskControlService(store=store, queue=None)
     queue = OpQueue(
         run_handler=run_handler,
-        interval=0.05,  # v2.11：队列仅保序/重试/槽位；QQ 节奏由适配器按账号键控
+        interval=0.05,  # ordering/retry/slots only; QQ pacing per account in the adapter
         limiter=limiter,
         high_priority=set(cfg.op_high_priority_kinds) or None,
-        slots=4,  # 跨账号并发消费槽位（高优/常规各半）
+        slots=4,  # cross-account consumer slots (half high-priority, half normal)
         ledger=task_control,
     )
     task_control.queue = queue
@@ -85,10 +95,13 @@ def build_components(
         queue,
         auto_label=bool(cfg.get("auto_label", True)),
         on_account_resolved=on_account_resolved,
+        group_info_ttl_hours=float(cfg.get("group_info_ttl_hours", 24) or 0),
     )
     auto_scan_hours = float(cfg.get("auto_scan_interval_hours", 6) or 0)
-    ops = FileOpsService(api, store, queue, sync, tmp_dir=data_dir / "tmp")
-    task_control.file_ops = ops  # 撤销补偿执行器
+    ops = FileOpsService(
+        api, store, queue, sync, tmp_dir=data_dir / "tmp", config=cfg
+    )
+    task_control.file_ops = ops  # undo compensation executor
 
     transfer = TransferService(
         store,
@@ -122,7 +135,7 @@ def build_components(
         fileops=ops,
     )
 
-    # OpenList bridge (REQ-05/08): only build if enabled
+    # OpenList bridge: only build if enabled
     bridge = None
     netdisk = None
     openlist_client = None
@@ -182,12 +195,14 @@ def build_components(
             tmp_dir=data_dir / "tmp",
         ),
         config=cfg,
+        database_admin=database_admin,
         ready=ready,
         get_online_account_ids=get_online_account_ids,
     )
 
     return {
         "store": store,
+        "database_admin": database_admin,
         "api": api,
         "perm": perm,
         "sync": sync,

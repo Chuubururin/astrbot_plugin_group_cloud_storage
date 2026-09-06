@@ -1,12 +1,15 @@
-"""文件类型字典（2026-09-01 所有者定稿：13 类分类，ADR-0008 N-01）。
+"""File type dictionary: 13-category classification.
 
-- `classify(name)` -> 分组名（未识别 → other）
-- `FILE_TYPE_EXT` -> 分组 → [扩展名]（含点，小写），供 SQL 后缀筛选
-- 存量别名：`program` -> `installer`、`data` -> `other`（normalize_type 归一，
-  兼容历史 type_ext_overrides 配置与存量 type 列；存量行不重写）
+- `classify(name)` -> group name (unknown -> other)
+- `FILE_TYPE_EXT` -> group -> [extensions] (lowercase, with dot), for SQL
+  suffix filters
+- legacy aliases: `program` -> `installer`, `data` -> `other` (normalized by
+  normalize_type, keeping older type_ext_overrides configs and stored type
+  values working; existing rows are not rewritten)
 
-13 类机器值：document/pdf/spreadsheet/slide/online_doc/image/video/audio/
-archive/installer/flash/folder/other（folder 恒为目录行类别，不参与扩展名判定）。
+Machine values for the 13 groups: document/pdf/spreadsheet/slide/online_doc/
+image/video/audio/archive/installer/flash/folder/other (folder is always the
+category of directory rows and never participates in extension matching).
 """
 
 from __future__ import annotations
@@ -18,14 +21,14 @@ FILE_TYPE_EXT: dict[str, list[str]] = {
     "pdf": [".pdf"],
     "spreadsheet": [".xls", ".xlsx", ".et", ".csv"],
     "slide": [".ppt", ".pptx", ".dps"],
-    "online_doc": [],  # 无固定后缀；配置 type_ext_overrides 可增补
+    "online_doc": [],  # no fixed extensions; extensible via the type_ext_overrides config
     "image": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic"],
     "video": [".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".wmv"],
     "audio": [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"],
     "archive": [".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"],
     "installer": [".exe", ".msi", ".apk", ".deb", ".rpm", ".dmg", ".appimage"],
-    "flash": [],  # 无固定后缀；配置 type_ext_overrides 可增补
-    "folder": [],  # 目录行类别（N-03）；不参与扩展名判定
+    "flash": [],  # no fixed extensions; extensible via the type_ext_overrides config
+    "folder": [],  # category of directory rows; not used for extension matching
     "other": [],
 }
 
@@ -45,7 +48,7 @@ FILE_TYPE_LABEL: dict[str, str] = {
     "other": "其他",
 }
 
-# 存量类型别名（只增不减：历史配置/存量 type 列经此归一）
+# legacy type aliases (add-only: historical configs / stored type values are normalized here)
 TYPE_ALIASES: dict[str, str] = {
     "program": "installer",
     "data": "other",
@@ -60,20 +63,20 @@ for _t, _exts in FILE_TYPE_EXT.items():
 
 
 def normalize_type(ftype: str | None) -> str:
-    """存量类型归一（program→installer、data→other）；未知原样返回。"""
+    """Normalize legacy types (program->installer, data->other); unknown passes through."""
     if not ftype:
         return "other"
     return TYPE_ALIASES.get(ftype, ftype)
 
 
 def classify(name: str) -> str:
-    """按文件名返回类型分组（other 兜底）。"""
+    """Return the type group for a file name (falls back to other)."""
     ext = Path(name or "").suffix.lower()
     return _EXT_2_TYPE.get(ext, "other")
 
 
 def type_exts(ftype: str) -> list[str]:
-    """类型分组 → 扩展名列表（含点）；未知组/别名组返回 []（别名经 normalize_type 归一）。"""
+    """Type group -> extension list (with dot); aliases normalized, unknown returns []."""
     return FILE_TYPE_EXT.get(normalize_type(ftype), [])
 
 
@@ -81,10 +84,10 @@ def type_label(ftype: str) -> str:
     return FILE_TYPE_LABEL.get(normalize_type(ftype), ftype)
 
 
-# ---------- CT-9 分类与预览可配置（N6：数据驱动默认表 + 配置覆盖） ----------
+# ---------- Configurable classification and preview (defaults + config overrides) ----------
 
-# 预览策略默认表：类型组 -> {mode: builtin|external|download, template}
-# external 模板含 {src} 占位符（替换为直链后打开）；空 template = 直链直接打开
+# Default preview policy table: type group -> {mode: builtin|external|download, template}
+# external template has a {src} placeholder (replaced with direct link); empty = open directly
 DEFAULT_PREVIEW_POLICY: dict[str, dict] = {
     "document": {"mode": "external", "template": ""},
     "pdf": {"mode": "external", "template": ""},
@@ -105,7 +108,7 @@ DEFAULT_PREVIEW_POLICY: dict[str, dict] = {
 
 
 def preview_policy_for(ftype: str, policy_overrides: dict | None = None) -> dict:
-    """类型组 → 预览策略；overrides（配置键 preview_policy）按组合并覆盖。"""
+    """Type group -> preview policy; overrides (config key preview_policy) merge per group."""
     policy = dict(
         DEFAULT_PREVIEW_POLICY.get(normalize_type(ftype), DEFAULT_PREVIEW_POLICY["other"])
     )
@@ -123,10 +126,28 @@ def preview_policy_for(ftype: str, policy_overrides: dict | None = None) -> dict
 
 
 def classify_with_overrides(name: str, ext_overrides: dict | None = None) -> str:
-    """按文件名分类；ext_overrides（配置键 type_ext_overrides：{".xyz": "video"}）优先。"""
+    """Classify by file name; ext_overrides (config key type_ext_overrides) take priority."""
     ext = Path(name or "").suffix.lower()
     if ext_overrides:
         hit = ext_overrides.get(ext) or ext_overrides.get(ext.lstrip("."))
         if hit:
             return normalize_type(str(hit))
     return classify(name)
+
+
+def type_exts_with_overrides(ftype: str, ext_overrides: dict | None = None) -> list[str]:
+    """Extension set for a type filter = static table union config-assigned extensions.
+
+    Uses the same source as classify_with_overrides (type_ext_overrides) so
+    that classification display and type filtering agree on the same file.
+    """
+    exts = list(type_exts(ftype))
+    target = normalize_type(ftype)
+    for ext, hit in (ext_overrides or {}).items():
+        if normalize_type(str(hit)) == target:
+            e = str(ext).lower()
+            if not e.startswith("."):
+                e = f".{e}"
+            if e not in exts:
+                exts.append(e)
+    return exts

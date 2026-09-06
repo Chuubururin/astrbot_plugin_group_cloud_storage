@@ -1,10 +1,10 @@
 /**
- * Store - single source of truth for application state (FE-2).
+ * Store - single source of truth for application state .
  *
  * All mutations go through set()/update(); components subscribe via
  * subscribe(). Selection sets are module-scoped: each data source owns
  * its own selection via selectionFor() so albums/essence never interfere
- * with the file selection (ADR-0010 W3-A).
+ * with the file selection .
  *
  * @module store
  */
@@ -70,7 +70,7 @@ function notify(key) {
   }
 }
 
-// ---- Refresh scheduler (FE-4: one notify per topic, views reload on it) ----
+// ---- Refresh scheduler  ----
 
 /**
  * Ask every subscriber of a topic to reload. Views subscribe to
@@ -81,7 +81,7 @@ export function refresh(topic) {
   notify(`refresh:${topic}`);
 }
 
-// ---- Generic module selection (W3-A: per-module sets) ----
+// ---- Generic module selection (per-module sets) ----
 
 /**
  * Build a selection helper bound to one store key.
@@ -143,7 +143,7 @@ export function clearTaskLog() {
   notify('taskLog');
 }
 
-// ---- Layout preference (N-07 rule 3: single pane default, persisted) ----
+// ---- Layout preference (single pane default, persisted) ----
 
 export function setLayout(mode) {
   state.layout = mode === 'dual' ? 'dual' : 'single';

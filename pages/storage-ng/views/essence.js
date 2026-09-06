@@ -1,12 +1,12 @@
 /**
- * Essence view (T-3) - essence messages tab.
+ * Essence view  - essence messages tab.
  *
  * The shared module toolbar (upload: browser input / document file / URL
  * read) + unified data table over the essence source + action bar
  * (view / detail / distribute local-copy-netdisk-group) + module-isolated
  * tag cloud (W-9). Full-text preview on double-click, and a character
- * counter derived from the listed text sizes (字符统计; the real totals
- * come from the full-text viewer).
+ * counter derived from the listed text sizes (character stats; the real
+ * totals come from the full-text viewer).
  *
  * @module views/essence
  */
@@ -48,7 +48,8 @@ export function initEssenceView(container) {
   const tableCleanup = initDataTable(tableHost, ESSENCE_SOURCE);
 
   const actionBar = document.createElement('div');
-  // 2026-09-03 核对补写：动作栏容器 id（E2E 探针可定位，与 files/netdisk 视图一致）
+  // Action-bar container id, locatable by the E2E probe (same as the
+  // files/netdisk views).
   actionBar.id = 'essence-action-bar';
   container.appendChild(actionBar);
   const barCleanup = initActionBar(actionBar, ESSENCE_SOURCE);

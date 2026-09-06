@@ -1,5 +1,5 @@
 /**
- * Netdisk local upload - two-step relay (W3-D).
+ * Netdisk local upload - two-step relay .
  *
  * There is no direct OpenList upload endpoint in this plugin, so the
  * flow honestly relays through existing capabilities (zero new endpoints):
@@ -18,6 +18,7 @@
 
 import { getState, refresh } from '../store.js';
 import { API } from '../api.js';
+import { uploadOnce } from './upload.js';
 import { confirmEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 
@@ -78,11 +79,11 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
   const total = files.length;
   const convertTo = options.convertTo || '';
   let group = deps.group;
-  // N-07 default rule: smallest group id with enough free space (best-effort).
+  // Default rule: smallest group id with enough free space (best-effort).
   if (!group) {
     const size = files.reduce((s, f) => s + (f.size || 0), 0);
     try {
-      // 2026-09-03 修复：recommend-group 为 GET 端点（apiGet；此前 POST→405 缺省失败）
+      // recommend-group is a GET endpoint (apiGet).
       const rec = await deps.apiGet(API.FILES.RECOMMEND_GROUP, { kind: 'file', size });
       group = (rec && rec.recommended && rec.recommended.group_id) || '';
     } catch (e) { /* best-effort */ }
@@ -99,12 +100,11 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
       const convertOk = (isVideo && ['mp4', 'mkv', 'webm'].includes(convertTo))
         || (isImage && ['png', 'jpg', 'jpeg', 'webp'].includes(convertTo));
       const outName = convertOk ? `${f.name.replace(/\.[^.]+$/, '')}.${convertTo}` : f.name;
-      const prep = await deps.apiPost(API.FILES.UPLOAD_PREPARE, {
-        group, name: outName, size: f.size, convert_to: convertOk ? convertTo : undefined,
-      });
-      if (!prep?.token) throw new Error('prepare 未返回 token');
-      const up = await deps.upload(`${API.FILES.UPLOAD}/${prep.token}`, f);
-      jobs.push({ name: outName, taskId: up?.task_id || '' });
+      const r = await uploadOnce(group, { file: f, name: outName }, {
+        convert_to: convertOk ? convertTo : undefined,
+      }, deps);
+      if (!r.ok) throw new Error('prepare 未返回 token');
+      jobs.push({ name: outName, taskId: r.result?.task_id || '' });
     } catch (e) {
       failed.push(`${f.name}（上传提交失败）`);
     }

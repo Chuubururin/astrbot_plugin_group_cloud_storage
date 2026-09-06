@@ -1,9 +1,9 @@
 /**
  * Toolbars - files and netdisk tabs.
  *
- *  - files   (T-1): upload (five sources), URL/text ingest, three-tier
+ *  - files   : upload (five sources), URL/text ingest, three-tier
  *                   refresh menu, 13-class chips, status chips, search
- *  - netdisk (T-4): refresh, local/URL upload, root/mkdir/deep-index,
+ *  - netdisk : refresh, local/URL upload, root/mkdir/deep-index,
  *                   type chips (local filter, folder excluded)
  *
  * The albums/essence shared toolbar (group focus / two-tier refresh /
@@ -14,9 +14,10 @@
  */
 
 import { getState, set, refresh } from '../store.js';
-import { API, apiGet, apiPost } from '../api.js';
+import { API } from '../api.js';
 import { getIcon } from '../icons.js';
 import { debounce } from '../utils/helpers.js';
+import { mutate } from '../utils/mutate.js';
 import { attachMenu } from './menu.js';
 import { promptEx, showFormModal } from './modal.js';
 import { toast } from './toast.js';
@@ -24,7 +25,7 @@ import {
   showUploadSourceModal,
   handleNetdiskUploadLocal,
 } from '../features/ingest.js';
-import { handleFileUpload } from '../features/upload.js';
+import { handleFileUpload, resolveUploadGroup } from '../features/upload.js';
 import {
   openGroupFileToNetdisk, openAlbumToNetdisk, openEssenceToNetdisk,
 } from '../features/cross-upload.js';
@@ -32,8 +33,9 @@ import { openNetdiskUrlUpload } from '../features/netdisk-ops.js';
 
 export { initModuleToolbar, MODULE_TOOLBAR_SPECS } from './module-toolbar.js';
 
-// 13-class classification chips (ADR-0008 N-01; folder is a row class, N-03).
-// 2026-09-03 网盘独立分类（不复用群文件 13 类）：文本/音频/视频/图片/其他
+// 13-class classification chips (folder is a row class).
+// Netdisk uses its own classification (not the group-file 13 classes):
+// text / audio / video / image / other.
 export const NETDISK_CHIPS = [
   { value: '', label: '全部' },
   { value: 'text', label: '文本' },
@@ -60,7 +62,7 @@ export const TYPE_CHIPS = [
   { value: 'other', label: '其他' },
 ];
 
-// Derived storage-state filter chips (ADR-0008 N-02).
+// Derived storage-state filter chips .
 const STATUS_CHIPS = [
   { value: '', label: '全部状态' },
   { value: 'netdisk', label: '在网盘' },
@@ -85,9 +87,10 @@ function bindChips(container, scopeId, chips, key, onPick) {
   });
 }
 
-/** Files toolbar (T-1). 2026-09-03 整改（S1）：上传入口合并（本地/URL/网盘/相册/精华/
- * 从浏览器上传文本全部经「上传」模态）；刷新只有两档（全部列表/当前群列表）；
- * 新增「新建文件夹」（仅根路径可用，文件夹内禁用——后端扁平单级语义）。 */
+/** Files toolbar. Upload entry is merged (local/URL/netdisk/album/essence/
+ * browser-text upload all go through the upload modal); refresh has two
+ * levels (all list / current group list); "new folder" is root-path only,
+ * disabled inside folders (backend flat single-level semantics). */
 export function initFilesToolbar(container) {
   container.className = 'toolbar';
   const canNewFolder = !getState().folder;
@@ -124,7 +127,7 @@ export function initFilesToolbar(container) {
     refresh('files');
   }, 260));
 
-  // Two-tier refresh menu (S1)：全部列表 / 当前群列表（无第三档）。
+  // Two-tier refresh menu: all list / current group list (no third tier).
   attachMenu(container.querySelector('#btn-refresh-menu'), container.querySelector('#refresh-menu'));
   container.querySelectorAll('#refresh-menu [data-act]').forEach((btn) => {
     btn.addEventListener('click', () => handleRefreshAction(btn.dataset.act));
@@ -140,44 +143,36 @@ export function initFilesToolbar(container) {
   });
 }
 
-/** 新建一级文件夹（仅根路径；文件夹内禁用由按钮 disabled 保证）。 */
+/** Create a first-level folder (root path only; inside a folder the
+ * button is disabled). */
 async function handleNewFolder() {
   if (getState().folder) { toast('仅在根路径可新建文件夹', 'warn'); return; }
-  let { currentGroup } = getState();
-  if (!currentGroup) {
-    try {
-      // recommend-group 为 GET 端点（apiGet；2026-09-03 修复：此前 apiPost 405 导致缺省失败）
-      const rec = await apiGet(API.FILES.RECOMMEND_GROUP, { kind: 'file' });
-      currentGroup = (rec && rec.recommended && rec.recommended.group_id) || '';
-    } catch (e) { /* best-effort */ }
-  }
+  const currentGroup = await resolveUploadGroup(getState().currentGroup, 'file');
   if (!currentGroup) { toast('请先选择群', 'warn'); return; }
   const name = await promptEx('新建文件夹', `在群 ${currentGroup} 根路径下新建一级文件夹`, { placeholder: '文件夹名' });
   if (!name) return;
-  try {
-    await apiPost(API.FILES.FOLDER_CREATE, { group: currentGroup, name });
-    toast('新建文件夹任务已提交', 'success');
-    refresh('files');
-  } catch (e) { toast(`新建失败: ${e.message || ''}`, 'error'); }
+  await mutate('新建', API.FILES.FOLDER_CREATE, { group: currentGroup, name },
+    { refresh: 'files', successText: '新建文件夹任务已提交' });
 }
 
 async function handleRefreshAction(act) {
   const { currentGroup } = getState();
-  try {
-    if (act === 'scan-current') {
-      // 契约 mode=all|range（group_ids）；单群=range（不再有第三档）。
-      if (!currentGroup) { toast('请先选择群', 'warn'); return; }
-      await apiPost(API.FILES.SCAN, { mode: 'range', group_ids: [currentGroup] });
-      toast('当前群列表刷新已启动', 'success');
-    } else {
-      await apiPost(API.GROUPS.SCAN);
-      toast('全部列表刷新已启动', 'success');
-    }
-  } catch (e) { toast('刷新失败', 'error'); }
+  if (act === 'scan-current') {
+    // Contract: mode=all|range (group_ids); a single group uses range.
+    if (!currentGroup) { toast('请先选择群', 'warn'); return; }
+    await mutate('刷新', API.FILES.SCAN, { mode: 'range', group_ids: [currentGroup] },
+      { successText: '当前群列表刷新已启动' });
+  } else {
+    // The file-domain "all list" refresh must call files/scan with
+    // mode=all (full refetch of all group files); groups/scan only
+    // refreshes group info/albums/essence.
+    await mutate('刷新', API.FILES.SCAN, { mode: 'all' },
+      { successText: '全部列表刷新已启动' });
+  }
 }
 
-/** Netdisk toolbar (T-4). 2026-09-03 整改（S2）：
- * 删除深度索引（无意义）；保留 刷新/上传(本地接力)/URL 上传/根目录/新建目录。 */
+/** Netdisk toolbar: refresh, upload (local relay), URL upload, root,
+ * mkdir. */
 export function initNetdiskToolbar(container) {
   container.className = 'toolbar';
   container.innerHTML = `
@@ -197,7 +192,8 @@ export function initNetdiskToolbar(container) {
   });
 
   container.querySelector('#btn-netdisk-refresh')?.addEventListener('click', () => refresh('netdisk'));
-  // 2026-09-03 网盘上传矩阵（五来源）：本地接力 / URL 链接 / 群文件 / 相册 / 精华
+  // Netdisk upload matrix (five sources): local relay / URL link /
+  // group files / album / essence.
   container.querySelector('#btn-netdisk-upload')?.addEventListener('click', showNetdiskUploadSourceModal);
   container.querySelector('#btn-netdisk-home')?.addEventListener('click', () => {
     set('netdiskPath', '/');
@@ -208,7 +204,8 @@ export function initNetdiskToolbar(container) {
 }
 
 
-/** 2026-09-03：网盘上传来源模态（本地/URL/群文件/相册/精华）——直达分发端点 */
+/** Netdisk upload source modal (local/URL/group files/album/essence),
+ * dispatching directly to the matching endpoint. */
 async function showNetdiskUploadSourceModal() {
   const res = await showFormModal('上传到网盘：选择来源', [
     { name: 'source', label: '来源', type: 'select', value: 'local', options: [
@@ -232,9 +229,6 @@ async function handleNetdiskMkdir() {
   const name = await promptEx('新建目录', `在 ${netdiskPath} 下创建目录`, { placeholder: '目录名' });
   if (!name) return;
   const fullPath = netdiskPath === '/' ? `/${name}` : `${netdiskPath}/${name}`;
-  try {
-    await apiPost(API.BRIDGE.MKDIR, { path: fullPath });
-    toast('目录创建成功', 'success');
-    refresh('netdisk');
-  } catch (e) { toast('创建目录失败', 'error'); }
+  await mutate('创建目录', API.BRIDGE.MKDIR, { path: fullPath },
+    { refresh: 'netdisk', successText: '目录创建成功' });
 }

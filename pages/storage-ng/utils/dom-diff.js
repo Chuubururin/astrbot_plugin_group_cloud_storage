@@ -1,11 +1,11 @@
 /**
- * DOM diff - keyed row reconciliation (FE-12/13).
+ * DOM diff - keyed row reconciliation .
  *
  * Lists render through applyKeyedDiff: existing <tr> nodes are reused by
  * row key, changed ones are replaced, stale ones removed, and order is
  * fixed with DOM moves - never a full innerHTML rewrite. All mutations
  * are rAF-batched in chunks capped by MAX_ROWS_PER_FRAME so no single
- * animation frame exceeds the render budget (FE-16); statistics are
+ * animation frame exceeds the render budget ; statistics are
  * exposed for the E2E acceptance probes (TE-1).
  *
  * @module utils/dom-diff
@@ -22,7 +22,7 @@ const diffStats = {
   violations: 0,
 };
 
-/** Snapshot of the render statistics (FE-16 acceptance data). */
+/** Snapshot of the render statistics . */
 export function getDiffStats() {
   return { ...diffStats };
 }

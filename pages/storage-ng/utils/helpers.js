@@ -106,3 +106,28 @@ export async function copyToClipboard(text) {
     ta.remove();
   }
 }
+
+/**
+ * Sequential per-item runner with failure collection (no early stop) —
+ * the shared shape for per-row request loops (downloads, deletes,
+ * removals) so one bad item surfaces in the summary instead of silently
+ * dropping the rest.
+ * @param {Array} items
+ * @param {(item: any, index: number) => Promise<void>} fn
+ * @returns {Promise<{done: number, failed: string[]}>} failed entries are
+ *   "label: message" with the item's name/id when available
+ */
+export async function runEachWithFailures(items, fn) {
+  const failed = [];
+  let done = 0;
+  for (let i = 0; i < items.length; i++) {
+    try {
+      await fn(items[i], i);
+      done++;
+    } catch (e) {
+      const label = (items[i] && (items[i].name || items[i].id)) || i;
+      failed.push(`${label}: ${(e && e.message) || e}`);
+    }
+  }
+  return { done, failed };
+}

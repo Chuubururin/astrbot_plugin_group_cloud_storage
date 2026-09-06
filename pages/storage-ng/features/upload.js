@@ -6,7 +6,7 @@
  *   2) files/upload/<token>  -> bridge multipart upload
  * Long-file sharding, long-video splitting and essence text sharding are
  * server-side responsibilities; this module only forwards the user's
- * explicit ingest mode and optional W2-B format conversion target.
+ * explicit ingest mode and optional format conversion target.
  *
  * @module features/upload
  */
@@ -42,6 +42,36 @@ export async function resolveUploadGroup(focusGroup, kind, size = 0) {
 }
 
 /**
+ * One two-phase upload round: prepare -> bridge multipart upload.
+ *
+ * Shared by every local-file upload path (files tab, album, essence text,
+ * netdisk relay).
+ *
+ * @param {string} group - target group
+ * @param {{file: File|Blob, name?: string, size?: number}} spec - payload;
+ *   name/size default from file (rename support)
+ * @param {Object} [prepareOpts] - extra prepare fields (folder/mode/to_album/
+ *   convert_to/lossy)
+ * @param {{apiPost?: Function, upload?: Function}} [deps] - injectable IO for
+ *   relay callers driven by stubs in unit tests (netdisk-upload)
+ * @returns {Promise<{ok: boolean, prep: Object|null, result: Object|null}>}
+ *   ok=false means prepare refused (no token); transport errors throw
+ */
+export async function uploadOnce(group, spec, prepareOpts = {}, deps = {}) {
+  const post = deps.apiPost || apiPost;
+  const upload = deps.upload || bridgeUpload;
+  const prep = await post(API.FILES.UPLOAD_PREPARE, {
+    group,
+    name: spec.name || spec.file.name,
+    size: spec.size ?? spec.file.size,
+    ...prepareOpts,
+  });
+  if (!prep?.token) return { ok: false, prep: prep || null, result: null };
+  const result = await upload(`${API.FILES.UPLOAD}/${prep.token}`, spec.file);
+  return { ok: true, prep, result };
+}
+
+/**
  * Ask one combined form for media/text ingest choices.
  *
  * @param {Array<{file: File, name: string}>} fileArr
@@ -51,22 +81,22 @@ async function askIngestModes(fileArr) {
   const hasVideo = fileArr.some((f) => VIDEO_EXT.test(f.name));
   const hasImage = fileArr.some((f) => IMAGE_EXT.test(f.name));
   const hasText = fileArr.some((f) => TEXT_EXT.test(f.name));
-  if (!hasVideo && !hasImage && !hasText) return { videoMode: 'auto', textMode: 'auto', convertTo: '' };
+  if (!hasVideo && !hasImage && !hasText) return { videoMode: 'auto', textMode: 'auto', convertTo: '', lossy: '' };
 
   const fields = [];
   if (hasVideo) {
     fields.push({
-      name: 'videoMode', label: '视频入库方式', type: 'select', value: 'auto',
+      name: 'videoMode', label: '视频导入方式', type: 'select', value: 'auto',
       options: [
         { value: 'auto', label: '自动（超限分段入群文件）' },
         { value: 'video', label: '入群文件' },
-        { value: 'video_album', label: '入群相册' },
+        { value: 'video_album', label: '入群相册（施工中，暂未实现）' },
       ],
     });
   }
   if (hasText) {
     fields.push({
-      name: 'textMode', label: '文本入库方式', type: 'select', value: 'auto',
+      name: 'textMode', label: '文本导入方式', type: 'select', value: 'auto',
       options: [
         { value: 'auto', label: '自动' },
         { value: 'text', label: '文本入精华' },
@@ -74,7 +104,7 @@ async function askIngestModes(fileArr) {
       ],
     });
   }
-  // W2-B: one conversion target for the whole batch. The option list is
+  // Format conversion: one target for the whole batch. The option list is
   // narrowed by the media kinds actually selected.
   const isOnlyVideo = hasVideo && !hasImage;
   const isOnlyImage = hasImage && !hasVideo;
@@ -93,12 +123,27 @@ async function askIngestModes(fileArr) {
     ],
   });
 
+  // Lossy re-encode tier (user's per-upload choice; only meaningful for
+  // the album path — group-file/essence uploads stay untouched).
+  if (hasVideo || hasImage) {
+    fields.push({
+      name: 'lossy', label: '有损压缩（仅入相册时生效，不可逆）', type: 'select',
+      value: '', options: [
+        { value: '', label: '不压缩' },
+        { value: 'high', label: '轻度（画质优先）' },
+        { value: 'medium', label: '均衡' },
+        { value: 'low', label: '强力（体积优先）' },
+      ],
+    });
+  }
+
   const res = await showFormModal('上传选项', fields, { okText: '继续' });
   if (!res) return null;
   return {
     videoMode: res.videoMode || 'auto',
     textMode: res.textMode || 'auto',
     convertTo: res.convertTo || '',
+    lossy: res.lossy || '',
   };
 }
 
@@ -139,19 +184,16 @@ export async function handleFileUpload(files) {
         : (isText && modes.textMode !== 'auto' ? modes.textMode : undefined);
       const convertOk = (isVideo && ['mp4', 'mkv', 'webm'].includes(modes.convertTo))
         || (IMAGE_EXT.test(file.name) && ['png', 'jpg', 'jpeg', 'webp'].includes(modes.convertTo));
-      const prep = await apiPost(API.FILES.UPLOAD_PREPARE, {
-        group,
-        name: file.name,
-        size: file.size,
+      const toAlbum = isVideo && modes.videoMode === 'video_album';
+      const r = await uploadOnce(group, { file: file.file, name: file.name, size: file.size }, {
         folder,
         mode,
-        to_album: isVideo && modes.videoMode === 'video_album',
+        to_album: toAlbum,
         convert_to: convertOk ? modes.convertTo : undefined,
+        lossy: toAlbum ? Boolean(modes.lossy) : undefined,
+        lossy_level: toAlbum ? (modes.lossy || undefined) : undefined,
       });
-      if (prep?.token) {
-        await bridgeUpload(`${API.FILES.UPLOAD}/${prep.token}`, file.file);
-        success++;
-      }
+      if (r.ok) success++;
     } catch (e) {
       toast(`上传失败: ${file.name}`, 'error');
     }

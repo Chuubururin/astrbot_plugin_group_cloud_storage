@@ -14,19 +14,16 @@
 import { getState, refresh } from '../store.js';
 import { toast } from '../components/toast.js';
 import { confirmEx } from '../components/modal.js';
+import { recoverAfterFailure } from '../utils/recover.js';
 
 const registry = new Map();
 
 /**
- * Resolve the group context for an operation in the aggregated (D-3)
- * view: row-level group_id has priority, then the global currentGroup.
- * @param {Object} state
- * @param {Object} [row]
- * @returns {string}
+ * Row-first group resolution now lives in utils/group.js (it is a data
+ * concern, not a command concern); re-exported here so command
+ * definitions and existing importers keep one stable import site.
  */
-export function rowGroup(state, row) {
-  return (row && row.group_id) || state.currentGroup || '';
-}
+export { rowGroup, rowGroupFor, groupFor } from '../utils/group.js';
 
 /**
  * Register a command definition (idempotent by id).
@@ -56,14 +53,14 @@ export function commands() {
 export function canRun(id, env) {
   const cmd = registry.get(id);
   if (!cmd) return { ok: false, reason: 'unknown command' };
-  if (env.count === 0) return { ok: false, reason: 'no selection' };
+  if (env.count === 0 && !cmd.allowNoSelection) return { ok: false, reason: 'no selection' };
   if (cmd.needsSingle && env.count !== 1) return { ok: false, reason: 'select exactly one item' };
   if (cmd.needsGroup && !env.hasGroup) return { ok: false, reason: 'select a group first' };
   return { ok: true };
 }
 
 /**
- * Row-aware precondition: in the aggregated (D-3) view rows carry their
+ * Row-aware precondition: in the aggregated  view rows carry their
  * own group_id, so group-dependent commands stay available without a
  * global currentGroup selection.
  */
@@ -133,7 +130,16 @@ export async function runCommand(id, ctx, hooks = {}) {
     }
     if (!cmd.keepSelection && ctx.source?.selection) ctx.source.selection.clear();
   } catch (e) {
-    toast(`${cmd.label || id}失败: ${e.message || e}`, 'error');
+    // Failure contract: besides the toast, re-pull the affected rows'
+    // authoritative info from their cloud storage so the table never keeps
+    // rendering a stale entry (opt out per command with recover: false).
+    const sourceId = ctx.source?.id || 'group';
+    const msg = `${cmd.label || id}失败: ${e.message || e}`;
+    if (cmd.recover === false) {
+      toast(msg, 'error');
+    } else {
+      await recoverAfterFailure(sourceId, ctx, msg);
+    }
   } finally {
     if (hooks.onDone) hooks.onDone();
   }

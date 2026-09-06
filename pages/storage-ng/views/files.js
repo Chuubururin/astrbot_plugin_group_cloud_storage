@@ -1,13 +1,13 @@
 /**
- * Files view (T-1) - group files tab.
+ * Files view  - group files tab.
  *
  * Assembles the files toolbar, breadcrumb+keyed table, action bar and
  * tag cloud over the GROUP_SOURCE adapter. Requirements covered:
- *  - five upload sources (local/URL/netdisk/album/essence, N-06)
+ *  - five upload sources (local/URL/netdisk/album/essence)
  *  - three-tier refresh (groups / current group files / full rescan)
- *  - 13-class type chips + derived status chips (N-01/N-02)
- *  - full-filename search, folder rows + ../ up-level (N-03/N-08)
- *  - big-file/volume/long-asset badges via row fields (L-1, N-10)
+ *  - 13-class type chips + derived status chips 
+ *  - full-filename search, folder rows + ../ up-level 
+ *  - big-file/volume/long-asset badges via row fields 
  *
  * @module views/files
  */

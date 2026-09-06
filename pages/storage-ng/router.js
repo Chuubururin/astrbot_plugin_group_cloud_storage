@@ -1,12 +1,12 @@
 /**
- * Router - view switching with URL hash sync (FE-4).
+ * Router - view switching with URL hash sync .
  *
  * Views are lazy-loaded: main.js registers render functions that return
  * a cleanup, and navigation disposes the previous view before mounting
  * the next one. Legacy hashes (e.g. #view=bridge) are aliased onto the
  * tabs that absorbed their functionality.
  *
- * v2.13: generation counter prevents stale async imports from overwriting
+ * A generation counter prevents stale async imports from overwriting
  * currentCleanup when tabs are switched rapidly.
  *
  * @module router
@@ -23,7 +23,7 @@ let currentCleanup = null;
 /** Generation counter: incremented on each navigate(), stale imports are discarded. */
 let generation = 0;
 
-/** History aliases: old view ids -> current tab ids (功能只增不减). */
+/** History aliases: old view ids -> current tab ids (old links keep working). */
 const VIEW_ALIASES = { bridge: 'netdisk' };
 
 /** Register a view renderer. */

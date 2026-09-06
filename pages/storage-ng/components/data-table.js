@@ -1,12 +1,12 @@
 /**
  * Resource table - the single list renderer for files / albums / essence /
- * netdisk (C1-C9, FE-18).
+ * netdisk .
  *
  * The table is driven entirely by a DataSource adapter. Every source owns
  * its page key and type-filter key, so the tabs no longer share pagination
  * or chip state accidentally. Rendering stays keyed and rAF-batched via
  * features/file-rows.js and only data_changed-triggered refreshes reload
- * (FE-14); a per-topic sequence guard drops stale responses.
+ * ; a per-topic sequence guard drops stale responses.
  *
  * @module components/data-table
  */
@@ -20,6 +20,7 @@ import {
   extTypeMap, renderRows, updateCheckboxes, syncSelectAll,
   updatePagination,
 } from '../features/file-rows.js';
+import { escapeHtml } from '../utils/helpers.js';
 import { toast } from './toast.js';
 
 const PREFIX = { group: 'file', album: 'album', essence: 'essence', netdisk: 'netdisk' };
@@ -96,8 +97,10 @@ export function initDataTable(container, source) {
       : (source.id === 'essence' ? st.essenceQuery : st.searchQuery)
   );
 
-  // 2026-09-03 性能修复（P-1）：load 串行化 + 尾部合并——in-flight 期间的新请求
-  // 只标记 dirty，完成后再跑一次（连续翻页/排序/击键不再并发堆积请求）。
+  // Load is serialized with tail coalescing: a request arriving while one
+  // is in flight only marks dirty and reruns once after completion
+  // (continuous paging/sorting/typing no longer pile up concurrent
+  // requests).
   let loadingInFlight = false;
   let loadDirty = false;
   let cancelled = false;
@@ -109,8 +112,12 @@ export function initDataTable(container, source) {
     set('loading', true);
     try {
       await doLoad();
+      // Success clears the inline error row (next paint shows fresh rows).
+      set(`loadError:${topic}`, false);
     } catch (e) {
       console.error('[data-table] load failed:', e);
+      set(`loadError:${topic}`, true);
+      renderErrorRow(e);
       toast('加载列表失败', 'error');
     } finally {
       loadingInFlight = false;
@@ -119,9 +126,29 @@ export function initDataTable(container, source) {
     }
   }
 
+  /** Inline error state: an actionable row replaces stale content so a
+   * failed load never silently keeps rendering outdated data. */
+  function renderErrorRow(e) {
+    const paneA = container.querySelector('.file-tbody[data-pane="a"]');
+    const paneB = container.querySelector('.file-tbody[data-pane="b"]');
+    if (!paneA) return;
+    paneA.innerHTML = '';
+    if (paneB) paneB.innerHTML = '';
+    const tr = document.createElement('tr');
+    tr.dataset.key = 'load-error';
+    tr.dataset.dir = '1';
+    tr.innerHTML = `<td colspan="6" class="empty-hint">加载失败：${escapeHtml(String(e && e.message || e || '网络错误'))}
+      <button class="load-retry" type="button">重试</button></td>`;
+    tr.querySelector('.load-retry').addEventListener('click', () => {
+      tr.remove();
+      load();
+    });
+    paneA.appendChild(tr);
+  }
+
   async function doLoad() {
     const st = getState();
-    // D-3: an empty group means the aggregated all-groups view.
+    // An empty group means the aggregated all-groups view.
     const seq = nextSeq(topic);
     try {
       const sort = st.fileSort || { by: 'created_at', dir: 'desc' };
@@ -152,7 +179,7 @@ export function initDataTable(container, source) {
         rows = applyLocalFilterSort(
           rows,
           { type: typeFilter(), sort_by: sort.by, sort_dir: sort.dir },
-          // 2026-09-03 网盘独立分类映射（文本/音频/视频/图片/其他）
+          // Netdisk has its own classification map (text/audio/video/image/other)
           source.id === 'netdisk' ? netdiskTypeMap() : extTypeMap(st.extTypes),
         );
       }

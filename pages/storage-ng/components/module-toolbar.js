@@ -1,5 +1,5 @@
 /**
- * Module toolbar - shared albums/essence toolbar (W3-B).
+ * Module toolbar - shared albums/essence toolbar .
  *
  * The albums and essence tabs used to carry two near-identical toolbar
  * copies (upload entry, group focus select, two-tier refresh menu,
@@ -11,9 +11,10 @@
  */
 
 import { getState, set, refresh, subscribe } from '../store.js';
-import { API, apiPost } from '../api.js';
+import { API } from '../api.js';
 import { getIcon } from '../icons.js';
 import { debounce } from '../utils/helpers.js';
+import { mutate } from '../utils/mutate.js';
 import { attachMenu } from './menu.js';
 import { toast } from './toast.js';
 import {
@@ -31,6 +32,7 @@ export const MODULE_TOOLBAR_SPECS = {
     searchPlaceholder: '搜索相册名称/描述...',
     countSuffix: ' 个相册',
     refreshHint: '云端刷新（全部群，含相册重采集）',
+    cloudScope: 'albums',
     openUpload: showAlbumUploadModal,
     handleUpload: handleAlbumFileUpload,
     accept: 'image/*,video/*',
@@ -43,6 +45,7 @@ export const MODULE_TOOLBAR_SPECS = {
     searchPlaceholder: '搜索精华内容...',
     countSuffix: ' 条精华',
     refreshHint: '云端刷新（全部群，含精华重采集）',
+    cloudScope: 'essence',
     openUpload: showEssenceUploadModal,
     handleUpload: handleEssenceFileUpload,
     accept: '.txt,.md,.docx,.pdf',
@@ -91,7 +94,7 @@ export function initModuleToolbar(container, modId) {
     }
   });
 
-  // Group focus: '' = aggregated view over all groups (D-3/N-07 rule 1).
+  // Group focus: '' = aggregated view over all groups .
   renderGroupFocus(container.querySelector(`#${mod.id}-group`), mod);
   const unsub = subscribe('groups', () => renderGroupFocus(container.querySelector(`#${mod.id}-group`), mod));
 
@@ -104,7 +107,7 @@ export function initModuleToolbar(container, modId) {
     btn.addEventListener('click', () => handleModuleRefresh(btn.dataset.act, mod));
   });
 
-  // Independent per-module search (D-5) with debounce.
+  // Independent per-module search  with debounce.
   container.querySelector(`#${mod.id}-search`)?.addEventListener('input', debounce(() => {
     set(mod.queryKey, container.querySelector(`#${mod.id}-search`).value);
     set(mod.id === 'album' ? 'albumPage' : 'essencePage', 1);
@@ -136,14 +139,21 @@ function renderGroupFocus(selectEl, mod) {
 }
 
 async function handleModuleRefresh(act, mod) {
+  const { [mod.groupKey]: focusGroup } = getState();
   if (act === 'list') {
     refresh(mod.topic);
     toast('列表已刷新', 'success');
     return;
   }
-  try {
-    // Full rescan including album/essence cloud collection (incremental first).
-    await apiPost(API.GROUPS.SCAN);
-    toast('云端刷新已启动（全部群）', 'success');
-  } catch (e) { toast('云端刷新失败', 'error'); }
+  // Cloud rescan including album/essence recollection. When a module group
+  // focus is set the scan narrows to that group (scope + group_ids);
+  // otherwise all managed groups (mode=all).
+  if (focusGroup) {
+    await mutate('云端刷新', API.GROUPS.SCAN,
+      { scope: mod.cloudScope, mode: 'range', group_ids: [focusGroup] },
+      { successText: '云端刷新已启动（当前群）' });
+  } else {
+    await mutate('云端刷新', API.GROUPS.SCAN, { mode: 'all' },
+      { successText: '云端刷新已启动（全部群）' });
+  }
 }

@@ -1,12 +1,11 @@
-"""PlatformBotResolver —— 平台 bot 解析与多账号登记（加固 main.py 单次探测）。
+"""PlatformBotResolver — platform bot resolution and multi-account registration.
 
-痛点（架构评审）：bot 晚于插件就绪时，单次探测失败即放弃；'aiocqhttp' 字符串
-散落主入口；不可单测。本模块把探测逻辑收敛为可重试、可单测的服务组件。
+Discovers OneBot bots with retry support, packaged as a service component that
+can be unit-tested without the host:
 
-行为与 main.py _resolve_platform_bot 三级探测完全一致：
   1. context.get_platform(PlatformAdapterType.AIOCQHTTP)
-  2. context.get_platform("aiocqhttp")（兼容字符串形态）
-  3. context.platform_manager.platform_insts 反射（多账号）
+  2. context.get_platform("aiocqhttp") (string form fallback)
+  3. reflection over context.platform_manager.platform_insts (multi-account)
 """
 
 from __future__ import annotations
@@ -20,19 +19,21 @@ class PlatformBotResolver:
     def __init__(self, context, config=None):
         self._context = context
         self._config = config
-        self.bots: list = []  # 全部 OneBot bot（去重，登记顺序）
-        self.preferred_bot = None  # 平台适配器 bot（首选后台账号）
-        self.last_bot = None  # 最近活跃事件 bot
-        # 直接追踪在线的 account_id 集合（不依赖 bot 对象的内存地址）
+        self.bots: list = []  # all OneBot bots (deduplicated, registration order)
+        self.preferred_bot = None  # platform adapter bot (preferred background account)
+        self.last_bot = None  # most recently active event bot
+        # Tracks the set of online account_ids directly (independent of bot
+        # object identity)
         self._online_account_ids: set[str] = set()
 
-    # ---------- 探测 ----------
+    # ---------- Resolution ----------
 
     async def resolve_once(self) -> bool:
-        """执行一轮三级探测；返回本轮是否新发现 bot（异常逐级吞掉）。
+        """Run one three-step resolution pass; return whether a new bot was
+        found (exceptions swallowed at each step).
 
-        新发现的 bot 会立即尝试注册 account_id（通过 get_login_info），
-        确保离线清理时能正确识别账号归属。
+        Newly found bots immediately try to register their account_id (via
+        get_login_info) so offline cleanup can attribute groups correctly.
         """
         found = False
         adapter = self._get_platform_adapter()
@@ -45,7 +46,7 @@ class PlatformBotResolver:
                 logger.info(
                     "[group_cloud_storage] platform bot resolved (auto scan ready)"
                 )
-            # 新 bot 立即注册 account_id（不等待扫描）
+            # Register the new bot's account_id immediately (no wait for a scan)
             if is_new:
                 await self._try_register_account(bot)
         for bot in self._iter_platform_insts():
@@ -55,30 +56,30 @@ class PlatformBotResolver:
                     f"[group_cloud_storage] additional bot resolved "
                     f"(total {len(self.bots)})"
                 )
-                # 新 bot 立即注册 account_id
+                # Register the new bot's account_id immediately
                 await self._try_register_account(bot)
         return found
 
     async def _try_register_account(self, bot) -> None:
-        """尝试注册 bot 的 account_id（轻量调用，失败静默忽略）。"""
+        """Try to register the bot's account_id (lightweight call, failures ignored)."""
         try:
             info = await asyncio.wait_for(
                 bot.call_action("get_login_info"), timeout=5.0
             )
             if info and info.get("user_id"):
                 account_id = str(info["user_id"])
-                # 直接添加到在线账号集合
+                # Add directly to the online account set
                 self._online_account_ids.add(account_id)
                 logger.info(
                     f"[group_cloud_storage] bot account registered: "
                     f"{account_id} (early detection)"
                 )
         except Exception:
-            pass  # 静默失败，扫描时会重试
+            pass  # fail silently; the scan will retry
 
     def _get_platform_adapter(self):
         try:
-            from astrbot.api.event import filter  # 延迟 import，可脱离宿主单测
+            from astrbot.api.event import filter  # deferred import; testable without host
 
             return self._context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
         except Exception:
@@ -105,40 +106,36 @@ class PlatformBotResolver:
         self.bots.append(bot)
         return True
 
-    # ---------- 事件登记 / 选取 ----------
+    # ---------- Event registration / selection ----------
 
     def register_bot(self, bot) -> None:
-        """登记事件 bot（去重入列，并记为最近活跃 bot）。"""
+        """Register an event bot (deduplicated append, recorded as most recent)."""
         if bot is None:
             return
         self._add_bot(bot)
         self.last_bot = bot
 
     def best_bot(self):
-        """后台任务选 bot 顺序：最近事件 bot → 平台适配器 bot → 首个登记 bot。"""
+        """Bot pick order: latest event bot, adapter bot, first registered bot."""
         return (
             self.last_bot or self.preferred_bot or (self.bots[0] if self.bots else None)
         )
 
-    # ---------- 账号追踪 ----------
+    # ---------- Account tracking ----------
 
     def register_account(self, account_id: str) -> None:
-        """登记在线账号（直接添加到集合）。"""
+        """Register an online account (added directly to the set)."""
         if account_id:
             self._online_account_ids.add(str(account_id))
 
-    def unregister_account(self, account_id: str) -> None:
-        """取消登记账号（从集合中移除）。"""
-        self._online_account_ids.discard(str(account_id))
-
     def get_online_account_ids(self) -> set[str]:
-        """返回当前在线的 account_id 集合（副本）。"""
+        """Return a copy of the currently online account_id set."""
         return set(self._online_account_ids)
 
-    # ---------- 存活检测 ----------
+    # ---------- Liveness checks ----------
 
     async def check_bot_alive(self, bot) -> bool:
-        """检测 bot 是否仍然在线（轻量 API 调用，5 秒超时）。"""
+        """Check whether a bot is still online (lightweight API call, 5s timeout)."""
         try:
             result = await asyncio.wait_for(
                 bot.call_action("get_login_info"), timeout=5.0
@@ -148,14 +145,14 @@ class PlatformBotResolver:
             return False
 
     async def purge_stale_bots(self) -> list[str]:
-        """检测并清除已离线的 bot，返回离线的 account_id 列表。"""
+        """Detect and drop offline bots; return the list of offline account_ids."""
         stale_account_ids = []
         alive = []
         for bot in self.bots:
             if await self.check_bot_alive(bot):
                 alive.append(bot)
             else:
-                # 尝试获取该 bot 的 account_id
+                # Try to get this bot's account_id
                 try:
                     info = await asyncio.wait_for(
                         bot.call_action("get_login_info"), timeout=3.0
@@ -169,22 +166,22 @@ class PlatformBotResolver:
                             f"account={account_id}"
                         )
                 except Exception:
-                    # 无法获取 account_id，尝试从数据库查找
+                    # account_id could not be fetched for this stale bot
                     logger.debug(
                         f"[group_cloud_storage] cannot get account_id for stale bot"
                     )
         self.bots = alive
-        # 同步清理 preferred/last 引用
+        # Also clean up the preferred/last references
         if self.preferred_bot and self.preferred_bot not in self.bots:
             self.preferred_bot = self.bots[0] if self.bots else None
         if self.last_bot and self.last_bot not in self.bots:
             self.last_bot = None
         return stale_account_ids
 
-    # ---------- 后台重试 ----------
+    # ---------- Background retry ----------
 
     async def ensure(self, interval_sec: float = 30.0, max_attempts: int = 20) -> bool:
-        """轮询 resolve_once 直到发现 bot 或次数耗尽；发现后停止并返回 True。"""
+        """Poll resolve_once until a bot is found or attempts run out; stop on success."""
         if self.bots:
             return True
         for attempt in range(1, max_attempts + 1):

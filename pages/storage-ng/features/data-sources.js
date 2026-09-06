@@ -1,5 +1,5 @@
 /**
- * Data sources - one abstract adapter per resource tab (FE-18).
+ * Data sources - one abstract adapter per resource tab .
  *
  * The resource table renders against a DataSource so a single
  * implementation serves group files, albums, essence and the netdisk.
@@ -38,8 +38,8 @@ export const GROUP_SOURCE = {
   rowKey: (f) => String(f.id),
   serverSort: true,
   capabilities: [
-    'download', 'link', 'address', 'bridge-out', 'move', 'rename',
-    'volumes', 'tags', 'verify', 'detail', 'delete', 'clear', 'files-distribute',
+    'files-distribute', 'move', 'rename',
+    'tags', 'detail', 'delete', 'clear',
   ],
   async list(state, params) {
     const query = {
@@ -52,7 +52,7 @@ export const GROUP_SOURCE = {
     if (params.status) query.status = params.status;
     // Folder contract: '' = all, '__root__' = root only, else a flat folder name.
     if (params.folder) query.folder = params.folder;
-    // #tag and filename search share the backend q channel (N-04).
+    // #tag and filename search share the backend q channel .
     const q = state.tagFilter
       ? (params.q ? `${params.q} #${state.tagFilter}` : `#${state.tagFilter}`)
       : params.q;
@@ -74,58 +74,57 @@ export const GROUP_SOURCE = {
   },
 };
 
-/** Albums: unified resource directory, kind=album, image/video only (T-2). */
-export const ALBUM_SOURCE = {
-  id: 'album',
-  itemsKey: 'albumItems',
-  totalKey: 'albumTotal',
-  pageKey: 'albumPage',
-  selectedKey: 'albumSelected',
-  typeKey: '',
-  selection: selectionFor('albumSelected'),
-  rowKey: (f) => String(f.id),
-  serverSort: true,
-  capabilities: ['album-gallery', 'album-detail', 'album-distribute', 'clear'],
-  async list(state, params) {
-    const query = { kind: 'album', page: params.page, page_size: params.page_size };
-    if (state.albumGroup) query.group = state.albumGroup;
-    if (params.q) query.q = params.q;
-    // Custom-tag filter rides the #tag search channel (module-isolated key).
-    if (state.albumTagFilter) {
-      query.q = query.q ? `${query.q} #${state.albumTagFilter}` : `#${state.albumTagFilter}`;
-    }
-    if (params.sort_by) { query.sort = params.sort_by; query.order = params.sort_dir; }
-    const data = await apiGet(API.FILES.LIST, query);
-    return { items: data.items || [], total: data.total || 0, folders: [], tags: data.tags || null };
-  },
-};
+/**
+ * Factory for the kind-based unified directory sources (albums/essence).
+ * They differ only in kind, store keys and the module-isolated tag-filter
+ * key; the query shape and response mapping are shared.
+ */
+function makeKindSource(spec) {
+  return {
+    id: spec.id,
+    itemsKey: spec.itemsKey,
+    totalKey: spec.totalKey,
+    pageKey: spec.pageKey,
+    selectedKey: spec.selectedKey,
+    typeKey: '',
+    selection: selectionFor(spec.selectedKey),
+    rowKey: (f) => String(f.id),
+    serverSort: true,
+    capabilities: spec.capabilities,
+    async list(state, params) {
+      const query = { kind: spec.kind, page: params.page, page_size: params.page_size };
+      if (state[spec.groupKey]) query.group = state[spec.groupKey];
+      if (params.q) query.q = params.q;
+      // Custom-tag filter rides the #tag search channel (module-isolated key).
+      if (state[spec.tagFilterKey]) {
+        query.q = query.q
+          ? `${query.q} #${state[spec.tagFilterKey]}`
+          : `#${state[spec.tagFilterKey]}`;
+      }
+      if (params.sort_by) { query.sort = params.sort_by; query.order = params.sort_dir; }
+      const data = await apiGet(API.FILES.LIST, query);
+      return { items: data.items || [], total: data.total || 0, folders: [], tags: data.tags || null };
+    },
+  };
+}
 
-/** Essence messages: kind=essence, text only, full-text search (T-3). */
-export const ESSENCE_SOURCE = {
-  id: 'essence',
-  itemsKey: 'essenceItems',
-  totalKey: 'essenceTotal',
-  pageKey: 'essencePage',
-  selectedKey: 'essenceSelected',
-  typeKey: '',
-  selection: selectionFor('essenceSelected'),
-  rowKey: (f) => String(f.id),
-  serverSort: true,
-  capabilities: ['essence-view', 'essence-detail', 'essence-delete', 'essence-distribute', 'clear'],
-  async list(state, params) {
-    const query = { kind: 'essence', page: params.page, page_size: params.page_size };
-    if (state.essenceGroup) query.group = state.essenceGroup;
-    if (params.q) query.q = params.q;
-    if (state.essenceTagFilter) {
-      query.q = query.q ? `${query.q} #${state.essenceTagFilter}` : `#${state.essenceTagFilter}`;
-    }
-    if (params.sort_by) { query.sort = params.sort_by; query.order = params.sort_dir; }
-    const data = await apiGet(API.FILES.LIST, query);
-    return { items: data.items || [], total: data.total || 0, folders: [], tags: data.tags || null };
-  },
-};
+/** Albums: unified resource directory, kind=album, image/video only . */
+export const ALBUM_SOURCE = makeKindSource({
+  id: 'album', kind: 'album',
+  itemsKey: 'albumItems', totalKey: 'albumTotal', pageKey: 'albumPage',
+  selectedKey: 'albumSelected', groupKey: 'albumGroup', tagFilterKey: 'albumTagFilter',
+  capabilities: ['album-create', 'album-gallery', 'album-detail', 'tags', 'clear'],
+});
 
-/** Netdisk: OpenList directory listing via the bridge (T-4). */
+/** Essence messages: kind=essence, text only, full-text search . */
+export const ESSENCE_SOURCE = makeKindSource({
+  id: 'essence', kind: 'essence',
+  itemsKey: 'essenceItems', totalKey: 'essenceTotal', pageKey: 'essencePage',
+  selectedKey: 'essenceSelected', groupKey: 'essenceGroup', tagFilterKey: 'essenceTagFilter',
+  capabilities: ['essence-view', 'essence-delete', 'essence-distribute', 'clear'],
+});
+
+/** Netdisk: OpenList directory listing via the bridge . */
 export const NETDISK_SOURCE = {
   id: 'netdisk',
   itemsKey: 'netdiskFiles',
@@ -136,8 +135,8 @@ export const NETDISK_SOURCE = {
   selection: selectionFor('netdiskSelected'),
   rowKey: (f) => f.remote_path || f.name,
   serverSort: false, // local sort/filter: the bridge list has no query params for them
-  // 2026-09-03 整改（S2）：移除 transfer-in（与 netdisk-distribute target=group 重复）
-  // 与 netdisk-index（深度索引无意义）。下载/直链/改名/标记/删除/分发/清空 保留。
+  // No transfer-in capability: netdisk-distribute with target=group
+  // already covers that path.
   capabilities: [
     'netdisk-link', 'netdisk-download', 'netdisk-rename',
     'netdisk-tags', 'netdisk-delete', 'clear', 'netdisk-distribute',
@@ -158,8 +157,9 @@ export const NETDISK_SOURCE = {
 };
 
 /**
- * 2026-09-03 网盘独立分类（不复用群文件 13 类）：
- * 文本 / 音频 / 视频 / 图片 / 其他——本地扩展名映射（不依赖服务器表）。
+ * Netdisk has its own classification (not the group-file 13 classes):
+ * text / audio / video / image / other — local extension mapping, no
+ * server-side table.
  */
 const NETDISK_EXT_TYPES = {
   text: ['.txt', '.md', '.log', '.json', '.xml', '.yaml', '.yml', '.csv', '.ini', '.cfg', '.conf'],
@@ -168,7 +168,7 @@ const NETDISK_EXT_TYPES = {
   image: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico', '.tif', '.tiff'],
 };
 
-/** 网盘扩展名 → 网盘分类（未匹配 → 其他） */
+/** Netdisk extension -> netdisk class (unmatched -> other). */
 export function netdiskExtType(name) {
   const dot = String(name || '').lastIndexOf('.');
   const ext = dot > -1 ? String(name).slice(dot).toLowerCase() : '';
@@ -178,7 +178,8 @@ export function netdiskExtType(name) {
   return 'other';
 }
 
-/** netdisk 过滤用映射（applyLocalFilterSort 兼容形态） */
+/** Extension->class map for the netdisk filter (shape compatible with
+ * applyLocalFilterSort). */
 export function netdiskTypeMap() {
   const map = new Map();
   for (const [type, exts] of Object.entries(NETDISK_EXT_TYPES)) {

@@ -19,8 +19,9 @@ import { formatSize } from '../utils/helpers.js';
 export function initStatBar(container) {
   container.className = 'stat-bar';
 
-  // 2026-09-03 性能修复（P-2）：refresh:files 高频触发（搜索击键/命令完成/
-  // data_changed）→ stat 拉取 400ms 防抖 + 飞行中合并，避免每事件一次 stat 请求。
+  // refresh:files fires frequently (search keystrokes, command completion,
+  // data_changed) -> stat fetches are debounced 400ms with in-flight
+  // coalescing, avoiding one stat request per event.
   let debounceTimer = null;
 
   async function run() {

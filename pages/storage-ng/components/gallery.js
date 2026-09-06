@@ -1,5 +1,5 @@
 /**
- * Gallery - album media viewer (F13/FE-15) + video keyframe GIFs (F14).
+ * Gallery - album media viewer  + video keyframe GIFs (F14).
  *
  * Images mount lazily in batches via IntersectionObserver (media only
  * loads when scrolled into view). Video items have no cloud preview
@@ -10,8 +10,10 @@
  */
 
 import { API, apiPost } from '../api.js';
-import { escapeHtml } from '../utils/helpers.js';
+import { escapeHtml, copyToClipboard } from '../utils/helpers.js';
+import { confirmEx, promptEx } from './modal.js';
 import { toast } from './toast.js';
+import { refresh } from '../store.js';
 
 const LAZY_BATCH = 12;   // items eagerly mounted before scrolling takes over
 
@@ -55,7 +57,11 @@ async function generateKeyframe(holder, item, ctx) {
       img.className = 'gallery-img';
       img.src = 'data:image/gif;base64,' + r.gif_base64;
       img.alt = item.name || '';
+      // The GIF swaps in for the badge/button, but the management actions
+      // bar must survive the replacement.
+      const actions = holder.querySelector('.gallery-item-actions');
       holder.replaceChildren(img);
+      if (actions) holder.appendChild(actions);
     } else {
       fail();
       toast('关键帧生成失败', 'error');
@@ -70,7 +76,23 @@ async function generateKeyframe(holder, item, ctx) {
 }
 
 function mountItem(holder, item) {
-  if (item && item.url) {
+  if (!item) return;
+  // The management actions bar is mounted before this call and must survive
+  // every replacement below (images swap the placeholder for the <img>,
+  // videos keep their badge + keyframe-GIF button and only prepend the cover).
+  const actions = holder.querySelector('.gallery-item-actions');
+  if (item.is_video) {
+    if (item.poster && !holder.querySelector('.gallery-img')) {
+      const img = document.createElement('img');
+      img.className = 'gallery-img';
+      img.src = item.poster;
+      img.alt = item.name || '';
+      img.loading = 'lazy';
+      holder.prepend(img);
+    }
+    return;
+  }
+  if (item.url) {
     const img = document.createElement('img');
     img.className = 'gallery-img';
     img.src = item.url;
@@ -78,11 +100,61 @@ function mountItem(holder, item) {
     img.loading = 'lazy';
     holder.replaceChildren(img);
   } else {
-    holder.textContent = item ? (item.name || '(无预览)') : '';
+    holder.textContent = item.name || '(无预览)';
   }
+  if (actions) holder.appendChild(actions);
 }
 
-/** Mount items lazily: first batch eagerly, the rest on scroll (FE-15). */
+/** Per-media management actions (protocol album extensions): copy / comment / delete. */
+function mountActions(holder, item, ctx) {
+  if (!ctx || !ctx.group || !ctx.albumId || !item.lloc) return;
+  const bar = document.createElement('div');
+  bar.className = 'gallery-item-actions';
+  bar.innerHTML = `
+    <button data-act="copy" title="复制直链">复制直链</button>
+    <button data-act="comment" title="发表评论">评论</button>
+    <button data-act="delete" title="从相册删除">删除</button>
+  `;
+  bar.addEventListener('click', async (e) => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (!act) return;
+    e.stopPropagation();
+    const payload = { group: ctx.group, album_id: ctx.albumId, lloc: item.lloc };
+    if (act === 'copy') {
+      await copyToClipboard(item.url || '');
+      toast('直链已复制', 'success');
+      return;
+    }
+    if (act === 'comment') {
+      const content = await promptEx('相册评论', `对「${item.name || '媒体'}」发表评论：`);
+      if (!content?.trim()) return;
+      try {
+        await apiPost(API.ALBUMS.MEDIA_COMMENT, { ...payload, content: content.trim() });
+        toast('评论已发表', 'success');
+      } catch (err) {
+        toast(`评论失败: ${err.message || err}`, 'error');
+      }
+      return;
+    }
+    if (act === 'delete') {
+      const ok = await confirmEx('删除相册媒体',
+        `确定从相册删除「${item.name || '该媒体'}」？此操作不可撤销。`,
+        { okText: '删除' });
+      if (!ok) return;
+      try {
+        await apiPost(API.ALBUMS.MEDIA_DELETE, payload);
+        toast('媒体已删除', 'success');
+        holder.remove();
+        if (ctx.onChanged) ctx.onChanged();
+      } catch (err) {
+        toast(`删除失败: ${err.message || err}`, 'error');
+      }
+    }
+  });
+  holder.appendChild(bar);
+}
+
+/** Mount items lazily: first batch eagerly, the rest on scroll. */
 function mountLazily(items, grid, ctx) {
   observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
@@ -108,6 +180,7 @@ function mountLazily(items, grid, ctx) {
     } else {
       holder.innerHTML = `<span class="gallery-hint">${escapeHtml(item.name || '')}</span>`;
     }
+    mountActions(holder, item, ctx);
     grid.appendChild(holder);
     holders.push(holder);
   }

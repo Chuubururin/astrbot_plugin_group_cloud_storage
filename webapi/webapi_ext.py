@@ -1,7 +1,7 @@
-"""Page 后端 API —— 分发/转换域（2026-09-03 复杂度拆分第三模块）。
+"""Page backend APIs — distribution/convert domain.
 
-四个分发端点（files/albums/essence/netdisk distribute）——成员自 webapi.py
-迁移，行为零变化；仅 import 改为 webapi_base 共享基础设施。
+The four distribution endpoints (files/albums/essence/netdisk distribute);
+imports the shared infrastructure from webapi_base.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ __all__ = ["register_ext_apis"]
 
 
 def register_ext_apis(context: Context, s: Services) -> None:
-    """注册分发/转换域端点（catalog 采集由 webapi.register_page_apis 统一包装）。"""
+    """Register distribution/convert endpoints (catalog collection is wrapped
+    centrally by webapi.register_page_apis)."""
     context.register_web_api(
         f"/{PLUGIN_NAME}/files/distribute",
         _Bound(s, api_files_distribute),
@@ -51,7 +52,7 @@ def register_ext_apis(context: Context, s: Services) -> None:
 
 
 async def api_files_distribute(s: Services) -> dict:
-    """2026-09-02 W2-A：文件下载分发（目标=local|netdisk|album|essence）。"""
+    """Distribute a group file for download (target=local|netdisk|album|essence)."""
     group = await _param("group", "")
     if not group or not await s.scan.is_page_managed(
         group, s.config.get("managed_groups", [])
@@ -72,7 +73,7 @@ async def api_files_distribute(s: Services) -> dict:
 
 
 async def api_albums_distribute(s: Services) -> dict:
-    """2026-09-02 W2-A：相册媒体下载分发（目标=local|netdisk|group）。"""
+    """Distribute album media for download (target=local|netdisk|group)."""
     group = await _param("group", "")
     payload = await json_body()
     album_id = str(payload.get("album_id") or "")
@@ -94,7 +95,7 @@ async def api_albums_distribute(s: Services) -> dict:
 
 
 async def api_essence_distribute(s: Services) -> dict:
-    """2026-09-02 W2-A：精华全文下载分发（目标=local|copy|netdisk|group）。"""
+    """Distribute essence full text for download (target=local|copy|netdisk|group)."""
     group = await _param("group", "")
     payload = await json_body()
     rid = int(payload.get("id") or 0)
@@ -111,9 +112,10 @@ async def api_essence_distribute(s: Services) -> dict:
 
 
 async def api_netdisk_distribute(s: Services) -> dict:
-    """2026-09-02 W2-A：网盘文件下载分发（目标=local|group|album|essence）；
+    """Distribute a netdisk file for download (target=local|group|album|essence).
 
-    2026-09-03 契约扩展：convert_to 白名单 + lossy 透传（仅请求时携带）。
+    Accepts convert_to (whitelist-checked), supplied only in the request
+    payload. Album media is always lossy re-encoded (mandatory built-in).
     """
     payload = await json_body()
     path = str(payload.get("path") or "")
@@ -139,7 +141,6 @@ async def api_netdisk_distribute(s: Services) -> dict:
             group_id=group_id,
             name=name,
             convert_to=convert_to,
-            lossy=bool(payload.get("lossy")),
         )
     except ValueError as e:
         return error_response(str(e), status_code=400)

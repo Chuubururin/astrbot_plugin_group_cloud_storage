@@ -1,8 +1,8 @@
 /**
  * File rows - row building and pagination helpers for the resource table
- * (shared by group files / albums / essence / netdisk, FE-18).
+ * (shared by group files / albums / essence / netdisk).
  *
- * Rows follow the file-manager paradigm (N-08): an up-level ".." row for
+ * Rows follow the file-manager paradigm : an up-level ".." row for
  * navigating back, folder rows navigate, file rows select on click and
  * open the preview on double-click. Keyed rendering keeps DOM churn low.
  *
@@ -10,17 +10,18 @@
  */
 
 import { getState, set, refresh } from '../store.js';
-import { TYPE_LABELS, API, apiPost } from '../api.js';
+import { TYPE_LABELS, API } from '../api.js';
 import { getIcon } from '../icons.js';
 import { formatSize, formatTime, escapeHtml, copyToClipboard } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
+import { netdiskRename, netdiskRemovePaths } from './netdisk-ops.js';
 import { openPreview } from './preview.js';
 import { show as showContextMenu, showRaw } from '../components/context-menu.js';
 import { runCommand } from './commands.js';
 import { promptEx, confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 
-/** CT-9 ext->type lookup map built from the cached classify table. */
+/** ext->type lookup map built from the cached classify table. */
 export function extTypeMap(table) {
   if (!table || !table.ext_types) return null;
   const map = new Map();
@@ -67,6 +68,11 @@ export function buildRow(source, item) {
       ${isUp ? getIcon('ARROW_LEFT', 13) : (isFolderRow ? getIcon('FOLDER', 13) : (item.is_volume ? getIcon('FILES', 13) : ''))}
       <span class="fname">${escapeHtml(item.name)}</span>
       ${item.is_volume ? '<span class="badge">分卷</span>' : ''}
+      ${item.volume_total
+        ? (item.volume_complete
+          ? `<span class="badge">分卷 ${item.volume_done ?? '?'}/${item.volume_total}</span>`
+          : `<span class="badge warn" title="部分分卷缺失，可下载不完整文件">不完整 ${item.volume_done ?? '?'}/${item.volume_total}</span>`)
+        : ''}
       ${item.is_long ? '<span class="badge">长集</span>' : ''}
       ${item.indexed_at ? '<span class="badge">索引</span>' : ''}
       ${item.tags ? `<span class="badge">${escapeHtml(item.tags)}</span>` : ''}
@@ -129,7 +135,7 @@ function showNetdiskFolderCtx(x, y, source, item) {
       } else if (id === 'rename') {
         const name = await promptEx('重命名', `当前: ${item.name}`, { value: item.name });
         if (!name || name === item.name) return;
-        await apiPost(API.BRIDGE.RENAME, { path: fullPath, name });
+        await netdiskRename(fullPath, name);
         toast('重命名成功', 'success');
         refresh('netdisk');
       } else if (id === 'delete') {
@@ -137,8 +143,12 @@ function showNetdiskFolderCtx(x, y, source, item) {
           `将删除「${item.name}」及其全部内容，不可恢复。`,
           { okText: '删除', danger: true });
         if (!ok) return;
-        await apiPost(API.BRIDGE.REMOVE, { dir: curDir, names: [item.name] });
-        toast('删除成功', 'success');
+        const { done, failed } = await netdiskRemovePaths([fullPath]);
+        if (failed.length) {
+          toast(`删除失败: ${String(failed[0]).slice(0, 80)}`, 'error');
+          return;
+        }
+        toast(done > 0 ? '删除成功' : '未删除任何项', 'success');
         refresh('netdisk');
       } else if (id === 'copy-path') {
         await copyToClipboard(fullPath);
@@ -179,15 +189,15 @@ function navigateRow(source, item, isUp) {
 
 /** Standard empty-state text per source. */
 export function emptyText(source) {
-  // S1（2026-09-03）：聚合视图是设计而非警告——空态统一为「暂无文件」，
-  // 不再常驻「未选择群：展示全部受管群文件」提示（聚合能力不变）。
+  // The aggregated view is by design, not a warning: its empty state is
+  // the unified "no files" hint.
   if (source.id === 'group') return '暂无文件';
   return '空目录';
 }
 
 /**
  * Keyed render into one or two panes (dual-pane layout splits the page,
- * single pane shows everything - N-07 rule 3 default).
+ * single pane shows everything - default layout).
  * @param {HTMLElement} container - the view's table host
  * @param {Object} source
  * @param {Array} items - file rows
@@ -207,8 +217,8 @@ export function renderRows(container, source, items, folders = []) {
 
   if (rows.length === 0) {
     for (const tb of [paneA, paneB]) tb.innerHTML = '';
-    // 2026-09-03 修复：空态行携带稳定 key（'empty'）——keyed diff 在其后数据到达时
-    // 会把它纳入 toRemove 移除（此前无 key 的行永不释放，导致空态残留）。
+    // The empty-state row carries a stable key ('empty') so the keyed
+    // diff removes it once real data arrives later.
     const tr = document.createElement('tr');
     tr.dataset.key = 'empty';
     tr.dataset.dir = '1';
@@ -235,7 +245,7 @@ function renderInto(tbody, source, rows) {
   applyKeyedDiff(tbody, rows, (item) => buildRow(source, item), (item) => rowKeyOf(source, item));
 }
 
-/** Reflect selection state onto rendered checkboxes without re-render (FE-13). */
+/** Reflect selection state onto rendered checkboxes without re-render. */
 export function updateCheckboxes(source) {
   document.querySelectorAll('tbody.file-tbody tr').forEach((tr) => {
     if (tr.dataset.dir === '1') return;

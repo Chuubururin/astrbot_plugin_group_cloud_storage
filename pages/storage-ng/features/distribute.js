@@ -1,31 +1,23 @@
 /**
- * Distribute commands - W2-A target distribution (files/netdisk/album/essence).
+ * Distribute commands - target distribution (files/netdisk/album/essence).
  *
  * The four "distribute" commands share one shape: pick a target from the
- * whitelisted options, submit the module-specific payload, and surface
- * direct links (local) or full text (copy). They differ only in target
- * options and payload extraction, so one factory builds all four.
- *
- * SMB links are explicitly unsupported (no SMB channel, zero new ports);
- * the target list honestly omits them.
+ * shared canonical target table (features/download-targets.js), submit the
+ * module-specific payload, and surface direct links (local) or full text
+ * (copy). They differ only in target options and payload extraction, so
+ * one factory builds all four.
  *
  * @module features/distribute
  */
 
-import { registerCommand, rowGroup } from './commands.js';
+import { registerCommand } from './commands.js';
+import { rowGroupFor } from '../utils/group.js';
 import { API, apiPost } from '../api.js';
 import { showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { copyToClipboard } from '../utils/helpers.js';
-
-const TARGET_OPTIONS = [
-  { value: 'local', label: '下载到本地（直链）' },
-  { value: 'netdisk', label: '下载到网盘' },
-  { value: 'album', label: '下载到相册' },
-  { value: 'essence', label: '下载到精华' },
-  { value: 'group', label: '下载到群文件' },
-  { value: 'copy', label: '浏览器复制（文本）' },
-];
+import { targetOptions, targetLabel } from './download-targets.js';
+import { showDownloadAddress } from './download.js';
 
 /**
  * Distribution command factory.
@@ -34,44 +26,50 @@ const TARGET_OPTIONS = [
 function makeDistribute(spec) {
   registerCommand({
     id: spec.id,
-    label: '分发',
+    label: '转存',
     icon: 'SHARE',
     needsSingle: true,
     async run(ctx) {
-      const options = TARGET_OPTIONS.filter((t) => spec.targets.includes(t.value));
-      const res = await showFormModal(`${spec.contextLabel}：目标分发`, [
-        { name: 'target', label: '分发目标', type: 'select', value: 'local', options },
+      const options = targetOptions(spec.targets);
+      const res = await showFormModal(`${spec.contextLabel}：选择目标`, [
+        { name: 'target', label: '目标', type: 'select', value: 'local', options },
       ]);
       const target = res ? res.target : '';
       if (!target) { toast('已取消', 'info'); return; }
       try {
         const out = await apiPost(spec.endpoint, spec.payload(ctx, target));
-        if (out.target === 'local' || out.target === 'copy') {
-          await copyToClipboard(out.http_url || out.text || '');
-          toast(out.target === 'copy' ? '全文已复制' : '直链已复制（HTTP）', 'success');
+        if (out.target === 'local') {
+          // Local direct-link service: when FTP/SMB lines are present show
+          // the full address modal; HTTP-only results copy straight away.
+          if (out.ftp || out.smb) {
+            const copied = await showDownloadAddress(out);
+            if (copied) toast('HTTP 地址已复制', 'success');
+          } else {
+            await copyToClipboard(out.http_url || '');
+            toast('直链已复制（HTTP）', 'success');
+          }
+        } else if (out.target === 'copy') {
+          await copyToClipboard(out.text || '');
+          toast('全文已复制', 'success');
         } else {
-          toast('分发任务已提交', 'success');
+          toast(`转存到${targetLabel(target).replace(/^转存到/, '')}任务已提交，可在任务页查看进度`, 'success');
         }
       } catch (e) {
-        toast(`分发失败: ${e.message || ''}`, 'error');
+        toast(`操作失败: ${e.message || ''}`, 'error');
       }
     },
     refresh: spec.refresh || ['files', 'bridge', 'tasks'],
   });
 }
 
-/** Register the four module distribution commands. */
+/** Register the cross-module distribution commands.
+ *
+ * files-distribute moved to features/download.js (one download executor
+ * with internal target subdivision; netdisk transfer is a download form).
+ * The three remaining instances are cross-domain transfers (netdisk /
+ * album / essence sources) that still share this factory shape.
+ */
 export function registerDistributeCommands() {
-  makeDistribute({
-    id: 'files-distribute',
-    contextLabel: '文件下载',
-    targets: ['local', 'netdisk', 'album', 'essence'],
-    endpoint: API.FILES.DISTRIBUTE,
-    payload: (ctx, target) => ({
-      id: Number(ctx.keys[0]), group: rowGroup(ctx.state, ctx.rows[0]), target,
-    }),
-  });
-
   makeDistribute({
     id: 'netdisk-distribute',
     contextLabel: '网盘下载',
@@ -95,7 +93,7 @@ export function registerDistributeCommands() {
       if (!albumId) throw new Error('缺少相册 ID');
       return {
         album_id: albumId, name: row.name || '', target,
-        group: row.group_id || ctx.state.albumGroup || ctx.state.currentGroup || '',
+        group: rowGroupFor(ctx.state, row, 'album') || ctx.state.currentGroup || '',
       };
     },
   });
@@ -110,7 +108,7 @@ export function registerDistributeCommands() {
       const row = ctx.rows[0] || {};
       return {
         id: Number(ctx.keys[0]),
-        group: row.group_id || ctx.state.essenceGroup || ctx.state.currentGroup || '',
+        group: rowGroupFor(ctx.state, row, 'essence') || ctx.state.currentGroup || '',
         target,
       };
     },

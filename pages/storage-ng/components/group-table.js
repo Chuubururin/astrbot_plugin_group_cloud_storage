@@ -1,11 +1,11 @@
 /**
- * Group table - the groups tab shell (T-6): toolbar, dual-pane table,
+ * Group table - the groups tab shell : toolbar, dual-pane table,
  * pager, selection and event wiring. The data layer (sort/filter/page/
  * row building) lives in features/group-data.js and the bulk actions in
  * features/group-actions.js; this module stays within the line budget by
  * delegating to them.
  *
- * Requirements: only online-account groups qualify (L-4 - offline or
+ * Requirements: only online-account groups qualify (offline or
  * switched accounts are hidden backend-side, the list decays with scans);
  * row click sets the file context and opens the files tab.
  *
@@ -72,7 +72,7 @@ export function initGroupsView(container) {
           <option value="10" selected>10</option>
           <option value="50">50</option>
           <option value="100">100</option>
-          <!-- 2026-09-03 整改（S4）：每页含「全部」 -->
+          <!-- 每页含「全部」 -->
           <option value="0">全部</option>
         </select>
       </label>

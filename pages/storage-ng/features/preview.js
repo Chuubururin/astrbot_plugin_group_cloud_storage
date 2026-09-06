@@ -1,5 +1,5 @@
 /**
- * Preview routing (C5) + configurable preview policy (CT-9/N6).
+ * Preview routing + configurable preview policy .
  *
  * Built-in preview routes per resource type (file detail / album gallery /
  * essence text); the per-extension policy endpoint decides between
@@ -13,10 +13,12 @@
 import { getState } from '../store.js';
 import { API, apiGet, apiPost, download } from '../api.js';
 import { formatSize } from '../utils/helpers.js';
+import { rowGroupFor } from '../utils/group.js';
 import { detailEx } from '../components/modal.js';
 import { showTextViewer } from '../components/text-viewer.js';
 import { showGallery } from '../components/gallery.js';
 import { toast } from '../components/toast.js';
+import { normalizeMedia } from './album-media.js';
 
 /** ext -> policy cache (backend default table + config overrides). */
 const policyCache = new Map();
@@ -35,50 +37,34 @@ async function policyFor(name) {
   }
 }
 
-function normalizeMedia(media) {
-  return (media || []).map((m) => {
-    const photos = ((m.image && m.image.photo_url) || []).slice().sort((a, b) => {
-      const wa = (a.url && a.url.width) || 0;
-      const ha = (a.url && a.url.height) || 0;
-      const wb = (b.url && b.url.width) || 0;
-      const hb = (b.url && b.url.height) || 0;
-      return wb * hb - wa * ha;
-    });
-    const url = photos.length ? (photos[0].url && photos[0].url.url) : '';
-    // Video items have no image direct link; the gallery offers a keyframe GIF.
-    const is_video = !url && Boolean(m.video);
-    return { url, is_video, name: m.desc || (m.video && m.video.name) || '(未命名)' };
-  });
-}
-
-/** Module-scoped group context (D-3 per-module state). */
-function groupFor(sourceId) {
-  const st = getState();
-  if (sourceId === 'album') return st.albumGroup || '';
-  if (sourceId === 'essence') return st.essenceGroup || '';
-  return st.currentGroup || '';
-}
-
 async function previewEssence(row, sourceId) {
   try {
-    const data = await apiGet(API.ESSENCE.TEXT, { id: row.id, group: groupFor(sourceId || 'essence') });
+    // Row-first group: the essence view may list without a group filter.
+    const group = rowGroupFor(getState(), row, sourceId || 'essence');
+    const data = await apiGet(API.ESSENCE.TEXT, { id: row.id, group });
     showTextViewer(row.name, { text: data.text, missing: data.missing_parts || [] });
   } catch (e) {
-    toast('获取精华内容失败', 'error');
+    toast(`获取精华内容失败: ${e.message || e}`, 'error');
   }
 }
 
 async function previewAlbum(row, sourceId) {
   try {
+    // The row carries its own group: the album view may list without a group
+    // filter, so the module-scoped group state is not authoritative here.
+    const group = rowGroupFor(getState(), row, sourceId || 'album');
+    // Primary param album_id (QQ-assigned, alphanumeric); numeric row id
+    // resolves server-side from local meta when the album ID is unknown.
     const data = await apiGet(API.ALBUMS.MEDIA, {
-      id: row.album_id || row.id, group: groupFor(sourceId || 'album'),
+      album_id: row.album_id || '', id: row.id, group,
     });
     showGallery(row.name, normalizeMedia(data.media), {
-      group: groupFor(sourceId || 'album'),
+      group,
       albumId: data.album_id || row.album_id || row.id || '',
+      onChanged: () => refresh('albums'),
     });
   } catch (e) {
-    toast('获取相册失败', 'error');
+    toast(`获取相册失败: ${e.message || e}`, 'error');
   }
 }
 
@@ -93,7 +79,7 @@ async function previewFileDetail(row, sourceId) {
     ]);
     return;
   }
-  const data = await apiGet(API.FILES.DETAIL, { id: row.id, group: groupFor(sourceId) });
+  const data = await apiGet(API.FILES.DETAIL, { id: row.id, group: rowGroupFor(getState(), row, sourceId) });
   await detailEx('文件详情', [
     { label: '名称', value: data.name || '-' },
     { label: '类型', value: data.type || '-' },
@@ -120,13 +106,15 @@ export async function openPreview(row, sourceId = 'group') {
       const d = await apiPost(API.BRIDGE.NETDISK_LINK, { path: row.remote_path || row.name });
       window.open(d.url || '', '_blank', 'noopener');
     } else {
-      await download(API.FILES.DOWNLOAD, { id: row.id, group: groupFor(sourceId) }, row.name);
+      await download(API.FILES.DOWNLOAD, { id: row.id, group: rowGroupFor(getState(), row, sourceId) }, row.name);
+      // 预览触发的下载也是用户操作：必须给出可见反馈，不留静默副作用
+      toast(`已开始下载: ${row.name}`, 'success');
     }
     return;
   }
   if (policy.mode === 'external' && sourceId !== 'netdisk') {
     try {
-      const d = await apiGet(API.FILES.LINK, { id: row.id, group: groupFor(sourceId) });
+      const d = await apiGet(API.FILES.LINK, { id: row.id, group: rowGroupFor(getState(), row, sourceId) });
       const url = (d && (d.url || d.link)) || '';
       if (!url) { toast('直链获取失败', 'error'); return; }
       const target = policy.template

@@ -1,4 +1,4 @@
-"""领域实体与值对象：Resource / 采集 DTO（docs/03 §2、docs/02 §3）。"""
+"""Domain entities and value objects: Resource / collection DTOs."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .enums import ResourceStatus, ResourceType
 
 @dataclass
 class GroupFolder:
-    """OneBot 群文件目录（适配器 DTO）。"""
+    """OneBot group file folder (adapter DTO)."""
 
     folder_id: str
     name: str
@@ -17,7 +17,7 @@ class GroupFolder:
 
 @dataclass
 class GroupFile:
-    """OneBot 群文件（适配器 DTO，禁止原始 JSON 上浮，DoD #3）。"""
+    """OneBot group file (adapter DTO; raw JSON must not leak upward)."""
 
     file_id: str
     name: str
@@ -32,7 +32,7 @@ class GroupFile:
 
 @dataclass
 class GroupFileList:
-    """一次目录列举的结果（files + folders，含本层是否完整成功）。"""
+    """Result of one directory listing (files + folders, with per-level completeness)."""
 
     group_id: str
     files: list[GroupFile] = field(default_factory=list)
@@ -42,7 +42,7 @@ class GroupFileList:
 
 @dataclass
 class FileSystemInfo:
-    """群文件系统容量（get_group_file_system_info 结果）。"""
+    """Group file system capacity (get_group_file_system_info result)."""
 
     file_count: int
     limit_count: int
@@ -52,7 +52,7 @@ class FileSystemInfo:
 
 @dataclass
 class GroupMember:
-    """群成员（上传者名称解析用）。"""
+    """Group member (used to resolve uploader names)."""
 
     user_id: str
     nickname: str = ""
@@ -61,10 +61,10 @@ class GroupMember:
 
 @dataclass
 class Resource:
-    """资源实体（入库对象）。
+    """Resource entity (index entry).
 
-    - `id`：当前群范围内的内部主键（/csfile <id> 使用）
-    - `resource_id`：`{group_id}:{type}:{source_ref}` 幂等唯一键（DoD #4）
+    - `id`: internal primary key within the current group (used by /csfile <id>)
+    - `resource_id`: `{group_id}:{type}:{source_ref}` idempotent unique key
     """
 
     group_id: str

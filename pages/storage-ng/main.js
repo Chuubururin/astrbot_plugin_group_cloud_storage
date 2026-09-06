@@ -1,7 +1,7 @@
 /**
- * Main entry - shell assembly and initialization (FE-10).
+ * Main entry - shell assembly and initialization .
  *
- * main.js wires the shell: theme following (N-08: host context first,
+ * main.js wires the shell: theme following (host context first,
  * system preference fallback), router with eight lazy views, SSE pipeline
  * with heartbeat watchdog, global error handling and keyboard shortcuts.
  * Views are lazy-loaded via dynamic import; this module stays a shell.
@@ -21,7 +21,7 @@ import { EVENT_TYPES, DATA_CHANGED_TOPICS, EVENT_KINDS } from './constants.js';
 import { createResilientSSE } from './utils/sse.js';
 import { toast } from './components/toast.js';
 
-// ---------- Theme (N-08: follow the host AstrBot theme; fall back to the
+// ---------- Theme (follow the host AstrBot theme; fall back to the
 // system preference and react to live changes) ----------
 
 function initTheme() {
@@ -49,7 +49,7 @@ function initTheme() {
   } catch (e) { /* matchMedia unsupported */ }
 }
 
-// ---------- SSE (FE-14 precise updates, I5 self-healing) ----------
+// ---------- SSE  ----------
 
 /** Event types that feed the floating task-panel log. */
 const TASK_LOG_TYPES = new Set([
@@ -57,8 +57,9 @@ const TASK_LOG_TYPES = new Set([
   EVENT_TYPES.DONE, EVENT_TYPES.FAILED, EVENT_TYPES.RETRY,
 ]);
 
-/** After a reconnection: one refresh per data topic (FE-4). */
+/** After a reconnection: one refresh per data topic. */
 function refreshAllTopics() {
+  lastDataRefreshAt = Date.now();
   refresh('groups');
   refresh('files');
   refresh('bridge');
@@ -68,9 +69,11 @@ function refreshAllTopics() {
   refresh('essence');
 }
 
-// ---------- 2026-09-03 性能修复（P-3）：data_changed 主题刷新合并 ----------
-// 批量任务完成会连续推送 data_changed（file_scan 按群、多任务批量 DONE）：
-// 同一主题在 150ms 窗口内合并为一次刷新，避免多主题并发全量拉取的请求风暴。
+// ---------- data_changed topic refresh coalescing ----------
+// Batch task completion pushes consecutive data_changed events (file_scan
+// per group, batch DONE across multiple tasks): refreshes for the same
+// topic within a 150ms window coalesce into one refresh, avoiding a
+// request storm of concurrent full refetches across topics.
 const _pendingDataRefresh = new Map();
 
 function debouncedTopicRefresh(topics) {
@@ -102,13 +105,18 @@ function handleSSEEvent(ev) {
       break;
 
     case EVENT_TYPES.FAILED:
+      // A backend task failure may still have mutated cloud state
+      // (partial uploads, half-applied batches): hot-reload the affected
+      // topics so the visible rows match the cloud instead of going stale.
       toast(`${kind || '任务'}失败: ${detail || ''}`, 'error');
+      debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
       break;
 
     case EVENT_TYPES.DATA_CHANGED: {
-      // Only data_changed may reload a topic (FE-14); topics via map.
-      // P-3: 150ms 窗口合并（批量事件防风暴）。
+      // Only data_changed may reload a topic ; topics via map.
+      // 150ms window coalescing (storm guard for batch events).
       const topics = DATA_CHANGED_TOPICS[kind] || ['files'];
+      lastDataRefreshAt = Date.now();
       debouncedTopicRefresh(topics);
       break;
     }
@@ -130,7 +138,21 @@ function initSSE() {
   });
   sse.start();
   window.addEventListener('unload', () => sse.stop());
+
+  // Visibility staleness guard: after a long time in a hidden tab, missed
+  // SSE events (or silent connection decay) can leave stale rows. When the
+  // tab becomes visible again and the last data refresh is older than
+  // ~60s, do an internal refresh of every data topic.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (Date.now() - lastDataRefreshAt < 60_000) return;
+    lastDataRefreshAt = Date.now();
+    refreshAllTopics();
+  });
 }
+
+/** Timestamp of the last data refresh (SSE-driven or reconnect). */
+let lastDataRefreshAt = Date.now();
 
 // ---------- Global error handling (A6, I4) ----------
 
@@ -172,8 +194,9 @@ function initKeyboard() {
 
 // ---------- Init ----------
 
-/** E2E mode detection inline（testing/ 目录不入库——GitHub 安装无此文件，
- * 任何对它的顶层 import 都会让整个模块图 404、页面白屏） */
+/** E2E mode detection inline (testing/ is not shipped with the plugin —
+ * a GitHub install lacks the file, and any top-level import of it would
+ * 404 the whole module graph and blank the page). */
 function isE2EMode() {
   return new URLSearchParams(window.location.search).get('e2e') === '1';
 }
@@ -196,10 +219,11 @@ async function init() {
   initTaskPanel();
   initStatBar(document.getElementById('stat-bar'));
 
-  // ---- View registration (lazy loaded, FE-10) ----
-  // v2.13: import 完成后检查容器是否仍在 DOM，防止快速切 tab 时旧 import
-  // 把 DOM 写进已被新视图占用的 #content（router generation 仅保护 cleanup，
-  // 不阻止 render 内部的 DOM 挂载）。
+  // ---- View registration  ----
+  // After the import resolves, check the container is still connected:
+  // on a fast tab switch a stale import must not write its DOM into
+  // #content already owned by the new view (the router generation counter
+  // only guards cleanup, not DOM mounts inside render).
   registerView('files', async (container) => {
     const { initFilesView } = await import('./views/files.js');
     if (!container.isConnected) return () => {};
@@ -236,7 +260,7 @@ async function init() {
     return initConfigView(container);
   });
 
-  // CT-9 classification table preload (drives netdisk local chips).
+  // classification table preload (drives netdisk local chips).
   import('./api.js').then(async ({ apiGet, API }) => {
     try { set('extTypes', await apiGet(API.META_CLASSIFY)); }
     catch (e) { console.warn('[main] classify table unavailable:', e); }

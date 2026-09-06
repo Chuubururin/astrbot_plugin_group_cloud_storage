@@ -1,14 +1,15 @@
-"""统一日志入口。
+"""Unified logging entry point.
 
-正式环境使用 AstrBot 官方日志接口（docs/06 §1 官方原则第 7 条）；
-测试/独立运行环境（SDK 未装）自动回退到标准 logging，保证核心代码可脱离宿主单测。
+Production uses the official AstrBot logging interface; test / standalone
+environments (SDK not installed) automatically fall back to standard logging,
+so core code stays unit-testable without the host.
 """
 
 from __future__ import annotations
 
 try:
     from astrbot.api import logger  # type: ignore[attr-defined]
-except ImportError:  # pragma: no cover - SDK 未安装的独立测试环境
+except ImportError:  # pragma: no cover - standalone test environment without the SDK
     import logging
 
     logger = logging.getLogger("group_cloud_storage")

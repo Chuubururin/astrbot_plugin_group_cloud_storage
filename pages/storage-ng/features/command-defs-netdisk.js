@@ -1,8 +1,9 @@
 /**
- * Command definitions - netdisk domain (T-4).
+ * Command definitions - netdisk domain .
  *
- * 2026-09-03 整改（S2）：移除 transfer-in（网盘→群文件已由分发 target=group 覆盖）
- * 与 netdisk-index（深度索引无意义）。保留：直链、下载、改名、标记、删除、分发。
+ * Commands: direct link, download, rename, tags, delete, distribute.
+ * No transfer-in command: netdisk -> group files is covered by
+ * distribute with target=group.
  * Register via registerAllNetdiskCommands() from the netdisk view.
  *
  * @module features/command-defs-netdisk
@@ -14,26 +15,27 @@ import { getState } from '../store.js';
 import { promptEx, detailEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { copyToClipboard, formatSize } from '../utils/helpers.js';
+import { netdiskRename, netdiskRemovePaths } from './netdisk-ops.js';
 
 /** Register every netdisk command. */
 export function registerAllNetdiskCommands() {
 
   registerCommand({
     id: 'netdisk-link',
-    label: '直链',
+    label: '复制直链',
     icon: 'LINK',
     needsSingle: true,
     async run(ctx) {
       const d = await apiPost(API.BRIDGE.NETDISK_LINK, { path: ctx.keys[0] });
       await copyToClipboard(d.url || '');
-      toast('直链已复制', 'success');
+      toast('网盘直链已复制', 'success');
     },
     keepSelection: true,
   });
 
   registerCommand({
     id: 'netdisk-download',
-    label: '下载',
+    label: '浏览器打开直链',
     icon: 'DOWNLOAD',
     needsSingle: true,
     async run(ctx) {
@@ -53,10 +55,7 @@ export function registerAllNetdiskCommands() {
         value: ctx.rows[0]?.name || '',
       });
       if (!name) return;
-      await apiPost(API.BRIDGE.RENAME, {
-        path: ctx.keys[0],
-        name,
-      });
+      await netdiskRename(ctx.keys[0], name);
       toast('重命名成功', 'success');
     },
     refresh: 'netdisk',
@@ -85,9 +84,9 @@ export function registerAllNetdiskCommands() {
     danger: true,
     confirm: (count) => `确定删除 ${count} 个网盘文件？`,
     async run(ctx) {
-      for (const key of ctx.keys) {
-        const dir = key.replace(/\/[^/]+$/, '') || '/';
-        await apiPost(API.BRIDGE.REMOVE, { dir, names: [key.split('/').pop()] });
+      const { done, failed } = await netdiskRemovePaths(ctx.keys);
+      if (failed.length) {
+        throw new Error(`成功 ${done}，失败 ${failed.length}：${String(failed[0]).slice(0, 80)}`);
       }
       toast('删除成功', 'success');
     },

@@ -1,8 +1,8 @@
 /**
- * Tabs - the seven top-level tabs (D-2, ADR-0007 T-0).
+ * Tabs - the seven top-level tabs .
  *
- * Order is fixed by the owner spec: 【文件】【相册】【精华】【网盘】
- * 【任务】【群组】【配置】. The active tab mirrors router state.
+ * Order is fixed by the owner spec: files, albums, essence, netdisk,
+ * tasks, groups, config. The active tab mirrors router state.
  *
  * @module components/tabs
  */

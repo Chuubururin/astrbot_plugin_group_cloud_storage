@@ -1,5 +1,5 @@
 /**
- * Tasks view (T-5) - task ledger + four actions + operation history.
+ * Tasks view  - task ledger + four actions + operation history.
  *
  * Shows the OpQueue ledger with a state filter and per-row controls:
  * continue (resume), pause, interrupt, undo (reversible-matrix only -
@@ -17,7 +17,7 @@ import { formatTimeFull, escapeHtml } from '../utils/helpers.js';
 import { confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 
-/** 可撤销操作类型（与 task_control._REVERSIBLE_KINDS 对齐）。 */
+/** Undoable operation kinds (aligned with task_control._REVERSIBLE_KINDS). */
 const REVERSIBLE_KINDS = new Set(['move_file', 'replace_name', 'tags']);
 
 const STATE_FILTERS = [
@@ -49,7 +49,7 @@ const STATE_CLASS = {
   cancelled: 'st-failed',
 };
 
-/** 人类可读的 kind 标签。 */
+/** Human-readable kind labels. */
 const KIND_LABEL = {
   move_file: '移动文件',
   replace_name: '改名',
@@ -61,7 +61,7 @@ const KIND_LABEL = {
   video_album: '视频相册',
   image_album: '图片相册',
   fetch: '抓取',
-  essence_save: '精华入库',
+  essence_save: '精华保存',
   essence_delete: '精华删除',
   netdisk_index: '网盘索引',
   tags: '标签',
@@ -78,7 +78,7 @@ export function initTasksView(container) {
       <div class="toolbar-left">
         <select id="task-state-filter">${STATE_FILTERS.map((f) =>
           `<option value="${f.value}">${f.label}</option>`).join('')}</select>
-        <button id="task-refresh" class="icon-btn" title="刷新台账">${getIcon('REFRESH', 14)}</button>
+        <button id="task-refresh" class="icon-btn" title="刷新列表">${getIcon('REFRESH', 14)}</button>
       </div>
       <div class="toolbar-right">
         <span id="task-count" class="count-badge"></span>
@@ -122,13 +122,13 @@ async function loadTasks() {
     renderTasks(data.tasks || []);
   } catch (e) {
     console.error('[tasks] load failed:', e);
-    toast('加载任务台账失败', 'error');
+    toast('加载任务记录失败', 'error');
   } finally {
     set('loading', false);
   }
 }
 
-/** 从 task 构建人类可读的详情摘要。 */
+/** Build a human-readable detail summary from a task. */
 function taskSummary(t) {
   const p = t.payload || {};
   const kind = t.kind || '';

@@ -2,9 +2,9 @@
 
 Provides:
 - ExternalApiError / OpenListApiError: cross-service error hierarchy
-- ErrorKind / classify_error: error classification for degradation (REQ-05)
-- validate_base_url: SSRF protection (REQ-11)
-- normalize_task_state: state normalization (REQ-05)
+- ErrorKind / classify_error: error classification for degradation 
+- validate_base_url: SSRF protection 
+- normalize_task_state: state normalization 
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class OpenListApiError(ExternalApiError):
 
 
 class ErrorKind(Enum):
-    """Error classification for degradation decisions (REQ-05)."""
+    """Error classification for degradation decisions ."""
 
     UNSUPPORTED = "unsupported"
     TIMEOUT = "timeout"
@@ -64,7 +64,7 @@ def classify_error(exc: Exception) -> ErrorKind:
     return ErrorKind.REMOTE_ERROR
 
 
-# Restricted address ranges for SSRF protection (REQ-11)
+# Restricted address ranges for SSRF protection 
 _RESTRICTED_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),  # loopback
     ipaddress.ip_network("10.0.0.0/8"),  # private class A
@@ -84,7 +84,7 @@ _ALLOWED_SCHEMES = {"http", "https"}
 
 
 def validate_base_url(url: str, *, allow_private: bool = False) -> str:
-    """Validate and normalize base URL with SSRF protection (REQ-11).
+    """Validate and normalize base URL with SSRF protection .
 
     Checks:
     1. Scheme whitelist (http/https only)
@@ -133,7 +133,10 @@ def validate_base_url(url: str, *, allow_private: bool = False) -> str:
 
 
 def _check_ip_address(
-    ip: ipaddress.IPv4Address | ipaddress.IPv6Address, allow_private: bool, url: str
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    allow_private: bool,
+    url: str,
+    hint: str = "openlist_allow_private_address",
 ) -> None:
     """Check if IP address is in restricted range."""
     if allow_private:
@@ -143,12 +146,14 @@ def _check_ip_address(
             raise ExternalApiError(
                 "openlist",
                 f"URL resolves to restricted address {ip}. "
-                f"Set openlist_allow_private_address=true to allow. "
+                f"Set {hint}=true to allow. "
                 f"Received: {url}",
             )
 
 
-def _check_dns(hostname: str, url: str) -> None:
+def _check_dns(
+    hostname: str, url: str, hint: str = "openlist_allow_private_address"
+) -> None:
     """Perform DNS resolution and check resulting addresses."""
     try:
         # Blocking DNS resolution; callers should use asyncio.to_thread
@@ -157,7 +162,7 @@ def _check_dns(hostname: str, url: str) -> None:
             ip_str = sockaddr[0]
             try:
                 ip = ipaddress.ip_address(ip_str)
-                _check_ip_address(ip, False, url)
+                _check_ip_address(ip, False, url, hint)
             except ValueError:
                 continue
     except socket.gaierror as e:
@@ -166,10 +171,49 @@ def _check_dns(hostname: str, url: str) -> None:
         )
 
 
-# State normalization map (REQ-05)
-# 统一使用 core.domain.enums.BridgeTaskState.from_external() 映射
-# 保留此函数作为向后兼容入口
-_STATE_MAP = None  # 已迁移至 BridgeTaskState.from_external()
+def assert_fetch_url_allowed(
+    url: str,
+    *,
+    allow_private: bool = False,
+    hint: str = "fetch_allow_private_address",
+) -> str:
+    """SSRF validation for server-side fetch URLs (shared by the fetch pipeline).
+
+    - Scheme whitelist: http/https only (ftp/smb go through their own
+      adapters and never pass through this function)
+    - Rejects loopback/private/link-local/reserved/multicast addresses
+      (same restricted-range table as validate_base_url)
+    - Hostnames are DNS-resolved and every resolved address is re-checked
+      (blocking call; async callers should wrap it in asyncio.to_thread)
+
+    allow_private=True skips the address checks (config key
+    fetch_allow_private_address, same semantics as
+    openlist_allow_private_address). Returns the original URL unchanged.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ExternalApiError(
+            "openlist",
+            f"URL scheme '{parsed.scheme}' not allowed (only http/https). "
+            f"Received: {url}",
+        )
+    hostname = parsed.hostname
+    if not hostname:
+        raise ExternalApiError("openlist", f"URL has no hostname: {url}")
+    try:
+        ip = ipaddress.ip_address(hostname)
+        _check_ip_address(ip, allow_private, url, hint)
+    except ValueError:
+        # Not a literal IP: resolve DNS and re-check each resolved address
+        if not allow_private:
+            _check_dns(hostname, url, hint)
+    return url
+
+
+# State normalization map
+# Mapping is centralized in core.domain.enums.BridgeTaskState.from_external()
+# This function is kept as a backward-compatible entry point.
+_STATE_MAP = None  # Unused; mapping lives in BridgeTaskState.from_external()
 
 
 def normalize_task_state(state: str) -> str:

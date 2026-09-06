@@ -1,5 +1,5 @@
 /**
- * Bridge panel - OpenList transfer task management (T-4, merged from the
+ * Bridge panel - OpenList transfer task management (merged from the
  * former standalone bridge view).
  *
  * Renders the bridge status strip, the transfer-task table with
@@ -14,13 +14,16 @@ import { API, apiGet, apiPost, BRIDGE_STATE_LABELS } from '../api.js';
 import { BRIDGE_STATES } from '../constants.js';
 import { getIcon } from '../icons.js';
 import { formatTimeFull, escapeHtml } from '../utils/helpers.js';
+import { mutate } from '../utils/mutate.js';
 import { showFormModal } from './modal.js';
 import { toast } from './toast.js';
 
 const CONFIG_FIELDS = [
-  { name: 'openlist_base_url', label: 'OpenList 地址', placeholder: 'http://host:5244' },
-  { name: 'openlist_username', label: '用户名', placeholder: 'admin' },
-  { name: 'openlist_password', label: '密码', type: 'password', placeholder: '密码' },
+  // base_url/username/password have no defaults: the bridge cannot run
+  // without them, so they are marked as required. dst_dir falls back to "/".
+  { name: 'openlist_base_url', label: 'OpenList 地址', required: true, placeholder: 'http://host:5244' },
+  { name: 'openlist_username', label: '用户名', required: true, placeholder: 'admin' },
+  { name: 'openlist_password', label: '密码', required: true, type: 'password', placeholder: '密码' },
   { name: 'openlist_dst_dir', label: '目标目录', placeholder: '/smb' },
   { name: 'openlist_allow_private_address', label: '允许私有地址', type: 'select',
     options: [{ value: 'false', label: '否' }, { value: 'true', label: '是' }] },
@@ -142,24 +145,20 @@ function renderBridgeTasks() {
     tbody.appendChild(tr);
   }
 
-  tbody.querySelectorAll('.btn-retry').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      try {
-        await apiPost(API.BRIDGE.RETRY, { task_id: btn.dataset.taskId });
-        toast('重试已提交', 'success');
-      } catch (e) { toast('重试失败', 'error'); }
-      loadBridgeTasks(getState().currentBridgeDirection || 'out');
+    tbody.querySelectorAll('.btn-retry').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await mutate('重试', API.BRIDGE.RETRY, { task_id: btn.dataset.taskId },
+          { successText: '重试已提交' });
+        loadBridgeTasks(getState().currentBridgeDirection || 'out');
+      });
     });
-  });
-  tbody.querySelectorAll('.btn-cancel').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      try {
-        await apiPost(API.BRIDGE.CANCEL, { task_id: btn.dataset.taskId });
-        toast('已取消', 'success');
-      } catch (e) { toast('取消失败', 'error'); }
-      loadBridgeTasks(getState().currentBridgeDirection || 'out');
+    tbody.querySelectorAll('.btn-cancel').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await mutate('取消', API.BRIDGE.CANCEL, { task_id: btn.dataset.taskId },
+          { successText: '已取消' });
+        loadBridgeTasks(getState().currentBridgeDirection || 'out');
+      });
     });
-  });
 }
 
 async function openBridgeConfig() {

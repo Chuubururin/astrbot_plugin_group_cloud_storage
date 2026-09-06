@@ -1,10 +1,10 @@
 /**
- * Breadcrumb + tag cloud (N-08 file-manager paradigm).
+ * Breadcrumb + tag cloud (file-manager paradigm).
  *
  * The list views follow the file-manager convention: a breadcrumb strip
  * at the top renders the folder chain (group files: flat single-level
  * folders; netdisk: arbitrary path segments), plus a tag cloud used by
- * the files/albums/essence tabs for custom-tag filtering (N-04/N-05).
+ * the files/albums/essence tabs for custom-tag filtering .
  *
  * @module components/breadcrumb
  */
