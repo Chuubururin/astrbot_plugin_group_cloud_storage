@@ -132,33 +132,32 @@ class GroupsMixin(StorePart):
         await self._conn.exec(_do)
 
     async def set_groups_managed(self, group_ids: list[str], managed: int) -> None:
+        if not group_ids:
+            return
+
         def _do(conn: sqlite3.Connection):
-            conn.execute("BEGIN")
-            try:
-                for gid in group_ids:
-                    conn.execute(
-                        "UPDATE groups SET managed=? WHERE group_id=?", (managed, gid)
-                    )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+            # Single batched UPDATE (was one statement per group_id).
+            marks = ",".join("?" * len(group_ids))
+            conn.execute(
+                f"UPDATE groups SET managed=? WHERE group_id IN ({marks})",
+                (managed, *group_ids),
+            )
+            conn.commit()
 
         await self._conn.exec(_do)
 
     async def reorder_groups(self, ordered_ids: list[str]) -> None:
+        if not ordered_ids:
+            return
+
         def _do(conn: sqlite3.Connection):
-            conn.execute("BEGIN")
-            try:
-                for i, gid in enumerate(ordered_ids):
-                    conn.execute(
-                        "UPDATE groups SET sort_order=? WHERE group_id=?",
-                        (i + 1, gid),
-                    )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+            # executemany: one prepared statement, per-row values differ
+            # (sort_order = position), so a single UPDATE ... IN is not possible.
+            conn.executemany(
+                "UPDATE groups SET sort_order=? WHERE group_id=?",
+                [(i + 1, gid) for i, gid in enumerate(ordered_ids)],
+            )
+            conn.commit()
 
         await self._conn.exec(_do)
 

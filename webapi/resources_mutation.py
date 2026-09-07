@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 try:
     from astrbot.api.web import _request_var as _web_request_var, PluginRequest as _PluginRequest
@@ -189,8 +190,9 @@ async def api_file_link(s: Services) -> dict:
         # not-found -> 404, volume guard -> 400
         return error_response(str(e), status_code=404 if "not found" in str(e) else 400)
     except Exception as e:
+        logger.warning(f"[webapi] 直链获取失败: {e}", exc_info=True)
         return error_response(
-            f"直链获取失败（上游可能暂时不可用，可改用「下载」/「转存到网盘」或本机下载服务）: {e}",
+            "直链获取失败（上游可能暂时不可用，可改用「下载」/「转存到网盘」或本机下载服务）",
             502,
         )
     return json_response(
@@ -264,7 +266,8 @@ async def api_folder_delete(s: Services) -> dict:
     try:
         await s.api.delete_group_file_folder(group, folder_id)
     except Exception as e:
-        return error_response(f"delete folder failed: {e}", status_code=502)
+        logger.warning(f"[webapi] delete folder failed: {e}", exc_info=True)
+        return error_response("delete folder failed", status_code=502)
     return json_response({"ok": True, "group": group, "folder_id": folder_id})
 
 
@@ -280,7 +283,8 @@ async def api_folder_rename(s: Services) -> dict:
     try:
         await s.api.rename_group_file_folder(group, folder_id, name)
     except Exception as e:
-        return error_response(f"rename folder failed: {e}", status_code=502)
+        logger.warning(f"[webapi] rename folder failed: {e}", exc_info=True)
+        return error_response("rename folder failed", status_code=502)
     return json_response({"ok": True, "group": group, "folder_id": folder_id, "name": name})
 
 
@@ -546,5 +550,6 @@ async def api_files_links(s: Services) -> dict:
             url, name = await s.ops.direct_link(gid, fid)
             links.append({"id": fid, "name": name, "url": url})
         except Exception as e:
-            errors.append(f"id={fid}: {e}")
+            logger.warning(f"[webapi] direct_link id={fid}: {e}", exc_info=True)
+            errors.append(f"id={fid}: link failed")
     return json_response({"links": links, "errors": errors})

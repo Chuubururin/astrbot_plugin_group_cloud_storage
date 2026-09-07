@@ -77,6 +77,7 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         self._ops_by_id: dict[str, Op] = {}
         self._paused: dict[str, Op | None] = {}  # pause holds (None placeholder = still in queue)
         self._workers: list[asyncio.Task] = []
+        self._shutting_down = False
         self._running: dict[str, Op] = {}
         self._recent: deque[dict] = deque(maxlen=20)
         self._lock = asyncio.Lock()

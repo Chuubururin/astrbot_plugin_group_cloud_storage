@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 MIGRATIONS: dict[int, list[str]] = {
     # Initial five tables (resources/snapshots/sync_logs/groups/schema_version)
@@ -331,6 +331,12 @@ MIGRATIONS: dict[int, list[str]] = {
     27: [
         "ALTER TABLE groups ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;",
     ],
+    # Bridge polling looks rows up by task_id (get_archive_map_by_task /
+    # update_archive_state_by_task); without this index every poll tick was a
+    # full table scan.
+    28: [
+        "CREATE INDEX IF NOT EXISTS idx_archive_map_task ON archive_map(task_id);",
+    ],
 }
 
 
@@ -342,6 +348,9 @@ def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
     one incompatible statement (e.g. an index over a column this lineage
     never had) must not abort the chain before the schema extensions this
     runtime depends on (v27 ``groups.removed``) get applied.
+
+    On partial failure the recorded version is the last fully-applied step
+    (not SCHEMA_VERSION), so failed statements are retried on next startup.
     """
     has_sv = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
@@ -353,14 +362,19 @@ def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
         ).fetchone()
         cur = row[0] if row else 0
 
+    last_ok = cur
     for v in sorted(MIGRATIONS):
         if v > cur and v <= SCHEMA_VERSION:
+            step_ok = True
             for sql in MIGRATIONS[v]:
                 try:
                     conn.executescript(sql)
                 except sqlite3.Error as e:
+                    step_ok = False
                     if on_skip is not None:
                         on_skip(v, e)
+            if step_ok:
+                last_ok = v
 
     # Post-migration backfill of the ext column.
     if cur < 10:
@@ -406,6 +420,6 @@ def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
     )
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
-        (SCHEMA_VERSION,),
+        (last_ok,),
     )
-    return SCHEMA_VERSION
+    return last_ok

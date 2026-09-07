@@ -59,7 +59,10 @@ def build_components(
     for key, msg in cfg.validate():
         logger.warning(f"[group_cloud_storage] config warning: {key} {msg}")
 
-    interval = float(cfg.get("request_interval_ms", 500)) / 1000.0
+    from core.application.files import consts as files_consts
+    files_consts.configure(cfg)
+
+    interval = float(cfg.get("request_interval_ms", 1000)) / 1000.0
 
     store = SqliteMetaStore(data_dir / "meta.db")
     database_admin = DatabaseAdminService(

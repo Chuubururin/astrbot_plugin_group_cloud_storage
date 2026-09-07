@@ -19,7 +19,31 @@ from .op import BULK_KINDS, Op, OpCancelError, OpPausedError
 class ExecutionMixin:
     # ---------- Lifecycle ----------
 
+    def _respawn_worker(self, task: asyncio.Task) -> None:
+        """Auto-respawn a worker that terminated unexpectedly (crash or
+        unhandled exception). Skip during shutdown (workers cancelled
+        intentionally)."""
+        if self._shutting_down:
+            return
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(f"[queue] worker {task.get_name()} crashed: {exc}")
+        name = task.get_name()
+        try:
+            self._workers.remove(task)
+        except ValueError:
+            pass
+        if "hi" in name:
+            new = asyncio.create_task(self._worker_loop_hi(), name="op-queue-hi")
+        else:
+            new = asyncio.create_task(self._worker_loop(), name="op-queue")
+        self._workers.append(new)
+        new.add_done_callback(self._respawn_worker)
+
     async def start(self) -> None:
+        self._shutting_down = False
         # Worker pool: high-priority and normal workers consume concurrently
         # across accounts
         hi = (self._slots + 1) // 2
@@ -28,17 +52,18 @@ class ExecutionMixin:
         for _ in range(
             hi - len([t for t in self._workers if t.get_name() == "op-queue-hi"])
         ):
-            self._workers.append(
-                asyncio.create_task(self._worker_loop_hi(), name="op-queue-hi")
-            )
+            t = asyncio.create_task(self._worker_loop_hi(), name="op-queue-hi")
+            self._workers.append(t)
+            t.add_done_callback(self._respawn_worker)
         for _ in range(
             normal - len([t for t in self._workers if t.get_name() == "op-queue"])
         ):
-            self._workers.append(
-                asyncio.create_task(self._worker_loop(), name="op-queue")
-            )
+            t = asyncio.create_task(self._worker_loop(), name="op-queue")
+            self._workers.append(t)
+            t.add_done_callback(self._respawn_worker)
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         for w in self._workers:
             w.cancel()
         for w in self._workers:
@@ -81,6 +106,7 @@ class ExecutionMixin:
         shared).
         """
         keep_index = False
+        released = False
         if op.task_id in self._cancelled:
             self._cancelled.discard(op.task_id)
             self._push(
@@ -203,6 +229,11 @@ class ExecutionMixin:
                     }
                 )
                 await self._ledger_state(op, "retry", str(e))
+                # Release resources BEFORE backoff sleep so other workers
+                # can acquire them during the cooldown period
+                if bulk:
+                    self._bulk.release()
+                released = True
                 await asyncio.sleep(backoff)
                 if high:
                     await self._q_hi.put(op)  # retry keeps its priority (high-priority queue)
@@ -224,7 +255,7 @@ class ExecutionMixin:
                 self._record(op, "failed", str(e))
                 await self._ledger_state(op, "failed", str(e))
         finally:
-            if bulk:
+            if bulk and not released:
                 self._bulk.release()
             self._running.pop(op.task_id, None)
             self._cancelled.discard(op.task_id)

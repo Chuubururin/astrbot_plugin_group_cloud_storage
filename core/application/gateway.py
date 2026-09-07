@@ -48,8 +48,11 @@ class StorageGateway:
 
     async def write(
         self, group_id: str, staged_path: str, name: str, folder_id: str | None = None
-    ) -> int:
-        """Write: unified upload entry (volume splitting is automatic)."""
+    ) -> str:
+        """Write: unified upload entry (volume splitting is automatic).
+
+        Returns the queue task_id (str), like every other submit path.
+        """
         if self.fileops is None:
             raise RuntimeError("gateway fileops not wired")
         return await self.fileops.submit_upload(group_id, staged_path, name, folder_id)

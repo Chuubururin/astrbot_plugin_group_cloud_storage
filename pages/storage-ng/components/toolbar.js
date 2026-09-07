@@ -102,8 +102,8 @@ export function initFilesToolbar(container) {
     <span class="toolbar-menu">
       <button id="btn-refresh-menu">${getIcon('REFRESH', 13)} 刷新 ${getIcon('CHEVRON_DOWN', 10)}</button>
       <div class="menu-box hidden" id="refresh-menu">
-        <button class="menu-item" data-act="scan-all">清空并重新获取全部列表</button>
-        <button class="menu-item" data-act="scan-current">清空并重新获取当前群列表</button>
+        <button class="menu-item" data-act="scan-all">同步全部群列表</button>
+        <button class="menu-item" data-act="scan-current">同步当前群列表</button>
       </div>
     </span>
     <div id="type-chips" class="type-chips"></div>

@@ -51,8 +51,6 @@ class VideoMixin:
         under the plugin tmp cache dir) so the written path is never
         caller/URL-controlled.
         """
-        import httpx
-
         safe_key = re.fullmatch(r"[0-9a-f]{8,64}", str(cache_key))
         if not safe_key:
             raise ValueError("invalid video preview cache key")
@@ -278,6 +276,18 @@ class VideoMixin:
         # Long video: split storage (single logical resource + part volumes)
         parent_id = f"vidgroup:{uuid.uuid4().hex[:10]}"
         parent_key = f"{op.target}:file:{parent_id}"
+
+        def _hash_source() -> str:
+            h = hashlib.sha256()
+            with open(src, "rb") as fh:
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+
+        total_sha_hex = await asyncio.to_thread(_hash_source)
         await self.store.upsert_resources(
             [
                 Resource(
@@ -287,7 +297,12 @@ class VideoMixin:
                     source_ref=parent_id,
                     size=size,
                     created_at=int(time.time()),
-                    meta={"volumes": True, "kind": "video", "total_seconds": dur},
+                    meta={
+                        "volumes": True,
+                        "kind": "video",
+                        "total_seconds": dur,
+                        "total_sha256": total_sha_hex,
+                    },
                 )
             ]
         )
@@ -299,17 +314,18 @@ class VideoMixin:
         total = len(segments)
         for seq, seg in enumerate(segments, 1):
             part_name = f"{stem}.part{seq:02d}.mp4"
+            data = seg.read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
             await self.api.upload_group_file(
                 op.target, seg.as_posix(), part_name, folder_id=folder
             )
-            sha = hashlib.sha256(seg.read_bytes()).hexdigest()
             await self.store.insert_volumes(
                 [
                     VolumeInfo(
                         parent_resource_id=parent_key,
                         seq=seq,
                         part_name=part_name,
-                        size=seg.stat().st_size,
+                        size=len(data),
                         sha256=sha,
                         status="uploaded",
                     )

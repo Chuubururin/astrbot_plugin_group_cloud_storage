@@ -1,0 +1,132 @@
+"""TransferService 测试（v2.13：导出链路已切除，仅导入拉取管线）。
+
+ftp/smb 库层打桩；http 用本地 HTTP 服务器实测（GET）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
+from core.domain.enums import ResourceType  # noqa: E402
+from core.domain.resource import Resource  # noqa: E402
+from core.application.queue import OpQueue  # noqa: E402
+from core.application.transfer import TransferService  # noqa: E402
+
+
+@pytest.fixture
+async def env(tmp_path):
+    store = SqliteMetaStore(tmp_path / "meta.db")
+    await store.init()
+    queue = OpQueue(lambda op: None, interval=0.0)
+    await queue.start()
+    svc = TransferService(store, queue, tmp_path / "tmp", config={
+        "fetch_max_bytes": 10 * 1024 * 1024, "fetch_timeout_sec": 10,
+        "transfer_timeout_sec": 10,
+        # 本地 mock 服务器监听 127.0.0.1，需显式放行私有地址（生产默认拒绝）
+        "fetch_allow_private_address": True,
+    })
+    yield tmp_path, store, queue, svc
+    await queue.shutdown()
+    await store.close()
+
+
+# ---------- URL 解析 ----------
+
+def test_parse_target():
+    t = TransferService.parse_target("ftp://user:p%40ss@host:2121/pub/a.bin")
+    assert t["scheme"] == "ftp" and t["host"] == "host" and t["port"] == 2121
+    assert t["user"] == "user" and t["password"] == "p@ss" and t["path"] == "/pub/a.bin"
+    t = TransferService.parse_target("smb://host/share/dir/f.txt")
+    assert t["scheme"] == "smb" and t["host"] == "host"
+    assert t["path"] == "/share/dir/f.txt"
+
+
+# ---------- ingress：多协议拉取 ----------
+
+def test_download_to_http(env):
+    tmp_path, store, queue, svc = env
+    payload = b"HTTP-RELAY-DATA" * 100
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        dest = tmp_path / "dl.bin"
+        n = asyncio.run(svc.download_to(
+            f"http://127.0.0.1:{srv.server_port}/x.bin", dest))
+        assert n == len(payload) and dest.read_bytes() == payload
+    finally:
+        srv.shutdown()
+
+
+def test_download_to_ftp_stub(env, monkeypatch):
+    tmp_path, store, queue, svc = env
+    captured = {}
+
+    class FakeFTPS:
+        # FTPS-only 适配器：ftp:// 一律经显式 TLS（AUTH TLS + PROT P），
+        # 明文 ftplib.FTP 已按安全策略移除。
+        def __init__(self, context=None): pass
+        def connect(self, host, port, timeout): captured["host"] = host
+        def login(self, u, p): captured["user"] = u
+        def prot_p(self): pass
+        def retrbinary(self, cmd, cb, blocksize):
+            captured["cmd"] = cmd
+            cb(b"FTPDATA")
+        def quit(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("ftplib.FTP_TLS", FakeFTPS)
+    dest = tmp_path / "f.bin"
+    n = asyncio.run(svc.download_to("ftp://u:p@h/file.bin", dest))
+    assert n == 7 and dest.read_bytes() == b"FTPDATA"
+    assert captured["cmd"] == "RETR /file.bin"
+
+
+def test_download_to_smb_stub(env, monkeypatch):
+    # 插件零第三方依赖（HL-12）：smb 适配器库层惰性导入；打桩测试在宿主
+    # 未装 pysmb 时跳过（smb 导入需要宿主自装 pysmb，运行时才激活）
+    pytest.importorskip("smb")
+    tmp_path, store, queue, svc = env
+    captured = {}
+
+    class FakeConn:
+        def __init__(self, *a, **kw): pass
+        def connect(self, host, port, timeout): captured["host"] = host; return True
+        def retrieveFile(self, share, path, fh, timeout):
+            captured["share"] = share; captured["path"] = path
+            fh.write(b"SMBDATA")
+        def close(self): pass
+
+    monkeypatch.setattr("smb.SMBConnection.SMBConnection", FakeConn)
+    dest = tmp_path / "s.bin"
+    n = asyncio.run(svc.download_to("smb://u:p@h/share/dir/f.bin", dest))
+    assert n == 7 and dest.read_bytes() == b"SMBDATA"
+    assert captured == {"host": "h", "share": "share", "path": "dir/f.bin"}
+
+
+def test_download_unsupported_scheme(env):
+    tmp_path, store, queue, svc = env
+    with pytest.raises(ValueError):
+        asyncio.run(svc.download_to("sftp://h/x", tmp_path / "x"))
+
+

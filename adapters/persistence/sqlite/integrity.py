@@ -1,18 +1,16 @@
-"""Integrity -- database integrity checking and reset/rebuild.
+"""Integrity -- database integrity checking.
 
 Provides:
+- IntegrityMixin.backup()/restore(): online SQLite backup API
 - check_integrity(): run integrity checks on the database
-- reset_and_rebuild(): stop-write window + create temp empty db +
-  integrity check + atomic replace
+
+(The reset/rebuild path lives in SqliteMetaStore.reset_and_rebuild.)
 """
 from __future__ import annotations
 
-import os
+import asyncio
 import sqlite3
-import shutil
 from pathlib import Path
-
-from core.log import logger
 
 from .state import StorePart
 
@@ -34,7 +32,7 @@ class IntegrityMixin(StorePart):
                 src.backup(dst)
             finally:
                 dst.close(); src.close()
-        await __import__('asyncio').to_thread(_copy)
+        await asyncio.to_thread(_copy)
         return {"ok": True, "path": str(destination)}
 
     async def restore(self, source):
@@ -48,7 +46,7 @@ class IntegrityMixin(StorePart):
                 src.backup(dst)
             finally:
                 dst.close(); src.close()
-        await __import__('asyncio').to_thread(_copy)
+        await asyncio.to_thread(_copy)
         return {"ok": True, "path": str(self._db_path)}
 
 
@@ -95,84 +93,3 @@ async def check_integrity(db_path: str | Path) -> dict:
 
     return {"ok": len(errors) == 0, "errors": errors, "warnings": warnings}
 
-
-async def reset_and_rebuild(
-    db_path: str | Path,
-    migrations: dict[int, list[str]],
-    schema_version: int,
-) -> bool:
-    """Reset database: stop writes → create temp empty db → init schema → integrity check → atomic replace.
-
-    Returns:
-        True if rebuild succeeded
-    """
-    db_path = Path(db_path)
-    backup_path = db_path.with_suffix(".db.bak")
-    tmp_path = db_path.with_suffix(".db.tmp")
-
-    logger.info(f"[group_cloud_storage] reset_and_rebuild: starting for {db_path}")
-
-    try:
-        # Step 1: Backup current database
-        if db_path.exists():
-            shutil.copy2(db_path, backup_path)
-            logger.info(f"[group_cloud_storage] reset: backup created at {backup_path}")
-
-        # Step 2: Create temporary empty database with full schema
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-        tmp_conn = sqlite3.connect(str(tmp_path))
-        try:
-            # Execute all migrations to build complete schema
-            for v in sorted(migrations.keys()):
-                for sql in migrations[v]:
-                    tmp_conn.executescript(sql)
-                tmp_conn.execute(
-                    "INSERT OR REPLACE INTO schema_version(version) VALUES (?)", (v,)
-                )
-            tmp_conn.commit()
-
-            # Step 3: Integrity check on new database
-            result = tmp_conn.execute("PRAGMA integrity_check").fetchone()
-            if result[0] != "ok":
-                raise RuntimeError(f"integrity check failed: {result[0]}")
-
-            logger.info("[group_cloud_storage] reset: new database integrity OK")
-
-        finally:
-            tmp_conn.close()
-
-        # Step 4: Atomic replace
-        if os.name == "nt":
-            # Windows: can't atomically rename over existing file
-            if db_path.exists():
-                db_path.unlink()
-        tmp_path.rename(db_path)
-
-        # Step 5: WAL sidecar cleanup
-        for suffix in ("-wal", "-shm"):
-            sidecar = db_path.with_suffix(db_path.suffix + suffix)
-            if sidecar.exists():
-                sidecar.unlink()
-
-        logger.info("[group_cloud_storage] reset_and_rebuild: completed successfully")
-        return True
-
-    except Exception as e:
-        logger.error(f"[group_cloud_storage] reset_and_rebuild failed: {e}")
-        # Rollback: restore from backup
-        if backup_path.exists():
-            if tmp_path.exists():
-                tmp_path.unlink()
-            shutil.copy2(backup_path, db_path)
-            logger.info("[group_cloud_storage] reset: restored from backup")
-        return False
-
-    finally:
-        # Cleanup backup
-        if backup_path.exists():
-            try:
-                backup_path.unlink()
-            except Exception:
-                pass

@@ -1,7 +1,6 @@
 """Search domain — FTS5 matching and tag cloud."""
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 
@@ -89,26 +88,29 @@ class SearchMixin(StorePart):
             return cache[1]
 
         def _do(conn: sqlite3.Connection):
-            sql = (
-                "SELECT tags FROM resources WHERE status='active' "
-                "AND tags IS NOT NULL AND tags != '' AND tags != '[]'"
+            # json_each expands the tags JSON array inside SQLite: one
+            # aggregate query instead of loading every row's tags into
+            # Python. The inner subquery filters to json_valid rows before
+            # json_each runs (a table-valued function over a malformed value
+            # raises, and SQLite does not guarantee WHERE-before-join order).
+            inner = (
+                "SELECT tags FROM resources"
+                "  WHERE status='active' AND tags IS NOT NULL"
+                "    AND tags != '' AND json_valid(tags)"
             )
             params: list = []
             if kind:
-                sql += " AND type=?"
+                inner += " AND type=?"
                 params.append(kind)
+            sql = (
+                "SELECT j.value AS tag, COUNT(*) AS cnt FROM ("
+                + inner
+                + ") r, json_each(r.tags) j "
+                "WHERE j.type IN ('text','string')"
+                " GROUP BY j.value ORDER BY cnt DESC, tag ASC"
+            )
             rows = conn.execute(sql, params).fetchall()
-            counts: dict[str, int] = {}
-            for r in rows:
-                try:
-                    for t in json.loads(r[0] or "[]"):
-                        counts[t] = counts.get(t, 0) + 1
-                except ValueError:
-                    continue
-            result = [
-                {"tag": k, "count": v}
-                for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0]))
-            ]
+            result = [{"tag": r[0], "count": r[1]} for r in rows]
             self._tag_cloud_cache[key] = (now, result)
             return result
 

@@ -13,6 +13,15 @@ from core.domain.sync import SyncLog, SyncResult, Snapshot
 if TYPE_CHECKING:
     from .connection import ConnectionManager
 
+# Append-only history retention: keep the newest N rows and drop anything
+# older than the cutoff (both conditions must hold, so a burst of writes
+# never deletes the recent window). Without this the tables grew unbounded
+# across restarts.
+SYNC_LOG_KEEP = 5000
+SNAPSHOT_KEEP = 2000
+SYNC_LOG_MAX_AGE_S = 30 * 86400
+SNAPSHOT_MAX_AGE_S = 90 * 86400
+
 
 class SyncMixin(StorePart):
     """Sync log and snapshot operations."""
@@ -26,6 +35,14 @@ class SyncMixin(StorePart):
             cur = conn.execute(
                 "INSERT INTO sync_logs (group_id, kind, status, start_at) VALUES (?,?,?,?)",
                 (gid, log.kind.value, log.status.value, log.start_at),
+            )
+            cutoff = int(time.time()) - SYNC_LOG_MAX_AGE_S
+            conn.execute(
+                "DELETE FROM sync_logs WHERE start_at < ? AND id <= ?",
+                (
+                    cutoff,
+                    cur.lastrowid - SYNC_LOG_KEEP,
+                ),
             )
             conn.commit()
             return cur.lastrowid
@@ -73,6 +90,12 @@ class SyncMixin(StorePart):
                     json.dumps(snap.detail, ensure_ascii=False),
                     snap.taken_at,
                 ),
+            )
+            cutoff = int(time.time()) - SNAPSHOT_MAX_AGE_S
+            conn.execute(
+                "DELETE FROM snapshots WHERE taken_at < ? AND id <= "
+                "(SELECT COALESCE(MAX(id), 0) - ? FROM snapshots)",
+                (cutoff, SNAPSHOT_KEEP),
             )
             conn.commit()
 

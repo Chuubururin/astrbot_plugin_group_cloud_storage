@@ -141,10 +141,15 @@ class ResourcesMixin(StorePart):
                     "(name LIKE ? OR path LIKE ? OR folder_name LIKE ? "
                     "OR mime LIKE ? OR uploader_name LIKE ? OR uploader_id LIKE ? "
                     "OR sha256 LIKE ? OR source_ref LIKE ? "
-                    "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) LIKE ? )"
+                    "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) LIKE ? "
+                    "OR group_id LIKE ? "
+                    "OR group_id IN ("
+                    "  SELECT g.group_id FROM groups g "
+                    "  WHERE g.group_name LIKE ?"
+                    "))"
                 )
                 keyword_like = f"%{q.keyword}%"
-                params.extend([keyword_like] * 9)
+                params.extend([keyword_like] * 11)
             if q.uploader_id:
                 where.append("uploader_id = ?")
                 params.append(q.uploader_id)

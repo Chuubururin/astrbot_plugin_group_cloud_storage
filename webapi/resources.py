@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 from astrbot.api.web import PluginUploadFile
 
@@ -447,7 +448,8 @@ async def api_file_upload(s: Services, token: str) -> dict:
         try:
             text = dest.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
-            return error_response(f"text read failed: {e}", status_code=400)
+            logger.warning(f"[webapi] text read failed: {e}", exc_info=True)
+            return error_response("text read failed", status_code=400)
         if len(text) > 2 * 1024 * 1024:
             return error_response("text file exceeds 2MB", status_code=400)
         dest.unlink(missing_ok=True)

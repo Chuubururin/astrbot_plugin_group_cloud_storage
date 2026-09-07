@@ -44,6 +44,35 @@ from core.log import logger
 from ports.meta_store import MetaStorePort
 from ports.onebot_api import OneBotApiPort
 
+# Candidate TrueType paths for text->image rendering, tried in order
+# (cross-platform; the essence text is usually CJK, so CJK-capable fonts come
+# first). Falls back to Pillow's built-in bitmap font when none is present.
+_FONT_CANDIDATES = (
+    # Linux (common distros)
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    # Windows
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+)
+
+
+def _load_render_font(ImageFont, size: int):
+    """First available candidate TrueType font, else Pillow's default."""
+    for p in _FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(p, size)
+        except (OSError, IOError):
+            continue
+    return ImageFont.load_default()
+
+
 # File extension sets (aligned with cloud_ingest; used for album entrance
 # type checks)
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -357,10 +386,7 @@ class DistributorService:
         img_height = max(100, len(lines) * line_height + padding * 2)
         img = Image.new("RGB", (img_width, img_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+        font = _load_render_font(ImageFont, font_size)
         y = padding
         for line in lines[:200]:  # cap at 200 lines
             draw.text((padding, y), line[:200], fill=(0, 0, 0), font=font)

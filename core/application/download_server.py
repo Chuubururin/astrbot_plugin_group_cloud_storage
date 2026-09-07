@@ -20,19 +20,26 @@ Semantics (distinct from "egress = push to an external target"):
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urlparse, quote as urlquote
 
 from core.config import PluginConfig
 from core.log import logger
 from ports.meta_store import MetaStorePort
 
 _STREAM_CHUNK = 1 << 16
+
+
+def _safe_header_name(name: str) -> str:
+    """Strip CR/LF from filenames to prevent HTTP header injection."""
+    return name.replace("\r", "").replace("\n", "")
 
 
 class DownloadServerService:
@@ -59,7 +66,7 @@ class DownloadServerService:
         self._smb_thread: threading.Thread | None = None
         self._smb_server = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._ftp_auth = ("cloud", self.token or "cloud")
+        self._ftp_auth = ("cloud", self.token)
         self._cache_dir = Path(tempfile.gettempdir()) / "cloudftp"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._smb_dir = Path(tempfile.gettempdir()) / "cloudsmb"
@@ -91,10 +98,16 @@ class DownloadServerService:
         p = Path(path)
         token = uuid.uuid4().hex[:10]
         self._staged[token] = {"path": str(p), "name": name or p.name, "ts": time.time()}
-        # Keep the registry bounded: drop entries older than 24h
+        # Keep the registry bounded: drop entries older than 24h and unlink
+        # orphaned temp files so they don't accumulate on disk.
         now = time.time()
         for k in [k for k, v in self._staged.items() if now - v["ts"] > 86400]:
-            self._staged.pop(k, None)
+            entry = self._staged.pop(k, None)
+            if entry is not None:
+                try:
+                    Path(entry["path"]).unlink(missing_ok=True)
+                except OSError:
+                    pass
         info: dict = {
             "token": token,
             "http_url": (
@@ -168,7 +181,6 @@ class DownloadServerService:
             "host": self.host,
             "port": self.ftp_port,
             "user": self._ftp_auth[0],
-            "password": self._ftp_auth[1],
         }
 
     # ---------- Cross-thread calls (FTP thread -> plugin main loop) ----------
@@ -188,9 +200,17 @@ class DownloadServerService:
         if not self.enabled:
             logger.info("[dlserver] disabled by config")
             return
+        if not self.token:
+            logger.warning(
+                "[dlserver] download_server_enabled=true but download_token is "
+                "empty — download service disabled (fail-closed). "
+                "Set download_token in plugin config to enable."
+            )
+            self.enabled = False
+            return
         if self.http_port > 0:
             self._http_server = await asyncio.start_server(
-                self._handle_http, "0.0.0.0", self.http_port
+                self._handle_http, self.host, self.http_port
             )
             logger.info(f"[dlserver] http download on :{self.http_port}")
         if self.ftp_port > 0:
@@ -237,7 +257,7 @@ class DownloadServerService:
             if parsed.path != "/download" or method != "GET":
                 await self._reply(writer, 404, b"not found")
                 return
-            if self.token and q.get("token", [""])[0] != self.token:
+            if not self.token or q.get("token", [""])[0] != self.token:
                 await self._reply(writer, 401, b"unauthorized")
                 return
             group = q.get("group", [""])[0]
@@ -245,7 +265,7 @@ class DownloadServerService:
             staged = q.get("staged", [""])[0]
             if staged:
                 # Staged artifact (e.g. essence text export)
-                if self.token and q.get("token", [""])[0] != self.token:
+                if not self.token or q.get("token", [""])[0] != self.token:
                     await self._reply(writer, 401, b"unauthorized")
                     return
                 entry = self._staged.get(staged)
@@ -253,7 +273,7 @@ class DownloadServerService:
                     await self._reply(writer, 404, b"staged file not found")
                     return
                 src_path = Path(entry["path"])
-                name = entry["name"]
+                name = _safe_header_name(entry["name"])
                 total = src_path.stat().st_size
                 from urllib.parse import quote as _q
 
@@ -261,7 +281,7 @@ class DownloadServerService:
                     "HTTP/1.1 200 OK\r\n"
                     "Content-Type: text/plain; charset=utf-8\r\n"
                     f"Content-Length: {total}\r\n"
-                    f"Content-Disposition: attachment; filename*=UTF-8''{_q(name)}\r\n"
+                    f"Content-Disposition: attachment; filename*=UTF-8''{urlquote(name)}\r\n"
                     "Connection: close\r\n\r\n"
                 ).encode("latin-1")
                 writer.write(head)
@@ -277,6 +297,7 @@ class DownloadServerService:
                 await self._reply(writer, 400, b"bad request")
                 return
             src, name = await self._download_info(group, int(rid))
+            name = _safe_header_name(name)
             src_path = Path(src)
             if not src_path.exists():
                 # Single file: 302 redirect to the QQ CDN direct link
@@ -295,7 +316,7 @@ class DownloadServerService:
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/octet-stream\r\n"
                 f"Content-Length: {total}\r\n"
-                f'Content-Disposition: attachment; filename="{name}"\r\n'
+                f"Content-Disposition: attachment; filename*=UTF-8''{urlquote(name)}\r\n"
                 "Connection: close\r\n\r\n"
             ).encode("latin-1")
             writer.write(head)
@@ -449,13 +470,35 @@ class DownloadServerService:
                     import httpx as _hx
 
                     def _fetch():
-                        resp = _hx.get(src, follow_redirects=True, timeout=180.0)
-                        resp.raise_for_status()
-                        cache.write_bytes(resp.content)
+                        # Stream to a temp file + atomic rename: resp.content
+                        # would hold a whole (possibly multi-GB) file in RAM,
+                        # and a partial cache must never be served.
+                        tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
+                        try:
+                            with _hx.stream(
+                                "GET", src, follow_redirects=True, timeout=180.0
+                            ) as resp:
+                                resp.raise_for_status()
+                                with tmp.open("wb") as fh:
+                                    for chunk in resp.iter_bytes(
+                                        chunk_size=_STREAM_CHUNK
+                                    ):
+                                        fh.write(chunk)
+                            os.replace(tmp, cache)
+                        finally:
+                            tmp.unlink(missing_ok=True)
 
                     svc._run_in_loop(asyncio.to_thread(_fetch))
                 else:
-                    cache.write_bytes(sp.read_bytes())
+                    # Stream the local copy too (read_bytes/write_bytes would
+                    # hold the whole file in RAM).
+                    tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
+                    try:
+                        with sp.open("rb") as fin, tmp.open("wb") as fout:
+                            shutil.copyfileobj(fin, fout, _STREAM_CHUNK)
+                        os.replace(tmp, cache)
+                    finally:
+                        tmp.unlink(missing_ok=True)
                 return cache.open("rb")
 
         authorizer = DummyAuthorizer()
@@ -465,7 +508,7 @@ class DownloadServerService:
         handler.abstracted_fs = CloudFS
         handler.banner = "AstrBot cloud download service"
         try:
-            self._ftp_server = FTPServer(("0.0.0.0", self.ftp_port), handler)
+            self._ftp_server = FTPServer((self.host, self.ftp_port), handler)
             self._ftp_thread = threading.Thread(
                 target=self._ftp_server.serve_forever,
                 kwargs={"timeout": 1, "blocking": True},
@@ -500,7 +543,7 @@ class DownloadServerService:
                 from impacket.smbserver import SimpleSMBServer
 
                 server = SimpleSMBServer(
-                    listenAddress="0.0.0.0", listenPort=svc.smb_port
+                    listenAddress=svc.host, listenPort=svc.smb_port
                 )
                 server.addShare(
                     svc.smb_share(), svc._smb_dir.as_posix(), "cloud download share"

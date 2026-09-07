@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 from core.api_validate import json_body, pick
 from commands.handlers import Services
@@ -106,7 +107,8 @@ async def api_bridge_netdisk(s: Services) -> dict:
         data = await s.netdisk.browse(path, max(1, page), max(1, min(page_size, 500)))
         return json_response(data)
     except Exception as e:
-        return error_response(f"list dir failed: {e}", status_code=502)
+        logger.warning(f"[webapi] list dir failed: {e}", exc_info=True)
+        return error_response("list dir failed", status_code=502)
 
 
 async def api_bridge_archived(s: Services) -> dict:
@@ -154,4 +156,5 @@ async def api_netdisk_link(s: Services) -> dict:
     try:
         return json_response({"url": await s.netdisk.direct_link(path)})
     except Exception as e:
-        return error_response(f"get link failed: {e}", status_code=502)
+        logger.warning(f"[webapi] get link failed: {e}", exc_info=True)
+        return error_response("get link failed", status_code=502)

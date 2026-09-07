@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from adapters.external.base import ExternalApiError
+from adapters.external.base import ExternalApiError, normalize_task_state
 from core.domain.enums import BridgeTaskState
 from core.log import logger
 from core.application.bridge import _now, _split_ext, _short_suffix
@@ -159,15 +159,16 @@ class PollingMixin:
                         # Double list missing -> backoff probe 
                         n = backoff.get(row["task_id"], 0)
                         backoff[row["task_id"]] = n + 1
+                        # Poll ticks are ~10s apart; probe stat() only every
+                        # 3rd miss so the remote check runs at ~30s intervals
+                        # (10s -> 30s -> capped), not on every tick.
                         if n % 3:
-                            continue  # 10s->30s->60s cap, skip
+                            continue
                         stat = await self._client.stat(row["remote_path"])
                         if not stat:
                             continue
                         state = "done"  # Remote exists but task gone -> done
                     else:
-                        from adapters.external.base import normalize_task_state
-
                         state = normalize_task_state(task.state)
 
                     # Rename the UUID filename to the intended name on completion

@@ -7,6 +7,7 @@ service binding, and route capture.  The public names remain available from
 from __future__ import annotations
 
 import functools
+from astrbot.api import logger
 from astrbot.api.web import error_response
 from commands.handlers import Services
 from core.api_validate import ApiValidationError
@@ -38,13 +39,32 @@ class Bound:
     def __init__(self, s: Services, fn):
         self._s, self._fn = s, fn
     async def __call__(self, **kwargs):
-        if self._s.ready is not None:
-            await self._s.ready()
         try:
+            if self._s.ready is not None:
+                await self._s.ready()
             return await self._fn(self._s, **kwargs)
         except ApiValidationError as exc:
             return error_response(str(exc), status_code=400)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        except PermissionError as exc:
+            return error_response(str(exc) or "forbidden", status_code=403)
+        except FileNotFoundError as exc:
+            return error_response(str(exc) or "not found", status_code=404)
         except Exception as exc:
-            return error_response(str(exc), status_code=500)
+            logger.warning(f"[webapi] unhandled: {exc}", exc_info=True)
+            return error_response("internal server error", status_code=500)
 
-__all__ = ["PLUGIN_NAME", "Bound", "compat_handler", "bind_request_helper"]
+__all__ = ["PLUGIN_NAME", "Bound", "compat_handler", "bind_request_helper", "handle_api_error"]
+
+
+def handle_api_error(e: Exception, *, label: str = "operation") -> dict:
+    """Sanitize exception for user-facing error response.
+
+    ValueError → 400 with message (user-facing validation).
+    Other exceptions → 500 with generic message; details logged only.
+    """
+    if isinstance(e, ValueError):
+        return error_response(str(e), status_code=400)
+    logger.warning(f"[webapi] {label} failed: {e}", exc_info=True)
+    return error_response(f"{label} failed", status_code=500)

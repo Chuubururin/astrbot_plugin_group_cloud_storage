@@ -1,13 +1,3 @@
-# 非运行态文件（工具脚本、文档）
-docs/
-tools/
-scripts/
-pages/storage-ng/README.md
-*.pyc
-__pycache__/
-.pytest_cache/
-*.bak
-
 # 运行时数据（插件运行时生成）
 data/
 *.db
@@ -16,13 +6,7 @@ data/
 *.zip
 
 # 开发配置
-pytest.ini
 .env
-
-# 运行态代码边界：测试、开发文档不进入源码工作树
-tests/
-docs-public/
-pages/storage-ng/testing/
 
 # 本地工具与运行环境（会话工具、浏览器自动化、Node 依赖）
 .mimosa/
@@ -32,8 +16,6 @@ pages/storage-ng/testing/
 .video_agent/
 .zcode/
 node_modules/
-package.json
-package-lock.json
 
 # IDE / OS
 .vscode/
@@ -43,3 +25,9 @@ package-lock.json
 *~
 .DS_Store
 Thumbs.db
+
+# Cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

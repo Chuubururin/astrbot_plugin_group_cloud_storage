@@ -37,45 +37,58 @@ class VolumeMixin:
         meta.total_sha256 covers the reassembled original content.
         """
         import hashlib
+        import zipfile
 
-        total_sha = hashlib.sha256()
+        # Pass 1: split the raw source into slices (CPU-bound: offload to thread)
+        def _split_source() -> tuple[list[tuple[int, Path, int, str]], str]:
+            total_sha = hashlib.sha256()
+            cut_dir_local = self.tmp_dir / f"vol_{parent_id}"
+            cut_dir_local.mkdir(parents=True, exist_ok=True)
+            slices_local: list[tuple[int, Path, int, str]] = []
+            with src.open("rb") as fh:
+                seq = 1
+                while True:
+                    chunk = fh.read(consts.VOLUME_SIZE_BYTES)
+                    if not chunk:
+                        break
+                    total_sha.update(chunk)
+                    raw = cut_dir_local / f".raw_{seq:04d}"
+                    raw.write_bytes(chunk)
+                    slices_local.append((seq, raw, len(chunk), hashlib.sha256(chunk).hexdigest()))
+                    seq += 1
+            return slices_local, total_sha.hexdigest()
+
+        slices, total_sha_hex = await asyncio.to_thread(_split_source)
+
         # The volumes primary key matches resources: the full resource_id
         # (download/backfill queries by detail)
         parent_key = op.payload.get("parent_resource_id_full") or parent_id
         cut_dir = self.tmp_dir / f"vol_{parent_id}"
-        cut_dir.mkdir(parents=True, exist_ok=True)
-        # Pass 1: split the raw source into slices (split before compression)
-        slices: list[tuple[int, Path, int, str]] = []
-        with src.open("rb") as fh:
-            seq = 1
-            while True:
-                chunk = fh.read(consts.VOLUME_SIZE_BYTES)
-                if not chunk:
-                    break
-                total_sha.update(chunk)
-                raw = cut_dir / f".raw_{seq:04d}"
-                raw.write_bytes(chunk)
-                slices.append((seq, raw, len(chunk), hashlib.sha256(chunk).hexdigest()))
-                seq += 1
         total_count = len(slices)
         stem = Path(name).stem or "file"
         volumes: list[VolumeInfo] = []
-        import zipfile
 
         for seq, raw, raw_size, _raw_sha in slices:
             part_name = f"{stem}.part{seq:02d}of{total_count:02d}.zip"
             zpath = cut_dir / part_name
-            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(raw, arcname=f"{stem}.part{seq:02d}of{total_count:02d}")
-            raw.unlink(missing_ok=True)
-            zsize = zpath.stat().st_size
+
+            # Compress + hash (CPU-bound: offload to thread)
+            def _compress_and_hash(_raw: Path = raw, _zpath: Path = zpath) -> tuple[int, str]:
+                with zipfile.ZipFile(_zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(_raw, arcname=f"{stem}.part{seq:02d}of{total_count:02d}")
+                _raw.unlink(missing_ok=True)
+                zsize = _zpath.stat().st_size
+                sha = hashlib.sha256(_zpath.read_bytes()).hexdigest()
+                return zsize, sha
+
+            zsize, vol_sha = await asyncio.to_thread(_compress_and_hash)
             volumes.append(
                 VolumeInfo(
                     parent_resource_id=parent_key,
                     seq=seq,
                     part_name=part_name,
                     size=zsize,
-                    sha256=hashlib.sha256(zpath.read_bytes()).hexdigest(),
+                    sha256=vol_sha,
                     status="pending",
                 )
             )
@@ -135,9 +148,9 @@ class VolumeMixin:
             )
             if op.payload.get("original_size"):
                 meta["original_size"] = int(op.payload["original_size"])
-            meta["total_sha256"] = total_sha.hexdigest()
+            meta["total_sha256"] = total_sha_hex
             meta["composition"] = encode_composition(
-                "volumes", total_count, "binary", total_sha.hexdigest()
+                "volumes", total_count, "binary", total_sha_hex
             )
             await self.store.update_resource_fields(
                 detail["id"], meta=json.dumps(meta, ensure_ascii=False)

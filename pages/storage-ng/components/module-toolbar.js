@@ -13,7 +13,7 @@
 import { getState, set, refresh, subscribe } from '../store.js';
 import { API } from '../api.js';
 import { getIcon } from '../icons.js';
-import { debounce } from '../utils/helpers.js';
+import { debounce, escapeHtml } from '../utils/helpers.js';
 import { mutate } from '../utils/mutate.js';
 import { attachMenu } from './menu.js';
 import { toast } from './toast.js';
@@ -130,7 +130,7 @@ function renderGroupFocus(selectEl, mod) {
   selectEl.disabled = false;
   selectEl.innerHTML = '<option value="">全部群（聚合）</option>' + groups.map((g) =>
     `<option value="${g.group_id}" ${g.group_id === cur ? 'selected' : ''}>` +
-    `${g.group_name || g.group_id} (${g.group_id})</option>`).join('');
+    `${escapeHtml(g.group_name || String(g.group_id))} (${g.group_id})</option>`).join('');
   selectEl.onchange = () => {
     set(mod.groupKey, selectEl.value);
     set(mod.id === 'album' ? 'albumPage' : 'essencePage', 1);

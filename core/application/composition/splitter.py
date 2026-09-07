@@ -1,7 +1,5 @@
 """splitter — split into volumes: large-file volumes / video segments / text chunks.
 
-- split_volume: fixed-size binary splitting (WinRAR-style .partNN naming),
-  returns part paths and per-part hashes
 - split_video: lossless video segmentation via ffmpeg stream copy (-c copy,
   cut points snap to keyframes, target <= max_sec)
 - split_text: long text split at line boundaries / sentence punctuation with
@@ -11,49 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from core.application.composition.integrity import sha256_bytes
-
-SPLIT_VOLUME_BYTES = 95 * 1024 * 1024  # per-volume cap (95MB; QQ single-file direct-upload limit)
-
 ESSENCE_CHUNK_MAX_CHARS = 4500
 _PART_MARK = "[云盘|{title}|{seq}/{total}]"
-
-
-def split_volume(
-    src: str | Path,
-    out_dir: str | Path,
-    stem: str,
-    part_bytes: int = SPLIT_VOLUME_BYTES,
-) -> list[dict]:
-    """Binary volume splitting: returns [{seq, part_name, path, size,
-    sha256}] (parts written to disk).
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    parts: list[dict] = []
-    with Path(src).open("rb") as fh:
-        seq = 1
-        while True:
-            chunk = fh.read(part_bytes)
-            if not chunk:
-                break
-            part_name = f"{stem}.part{seq:02d}"
-            (out_dir / part_name).write_bytes(chunk)
-            parts.append(
-                {
-                    "seq": seq,
-                    "part_name": part_name,
-                    "path": out_dir / part_name,
-                    "size": len(chunk),
-                    "sha256": sha256_bytes(chunk),
-                }
-            )
-            seq += 1
-    return parts
 
 
 def effective_chunk_limit(title: str, total: int, base: int) -> int:
@@ -63,8 +25,6 @@ def effective_chunk_limit(title: str, total: int, base: int) -> int:
     marker = _PART_MARK.format(title=title, seq=total, total=total)
     return max(100, base - len(marker) - 2)
 
-
-import re
 
 # Structural cut points (priority over plain lines): markdown headings and
 # Chinese ordinals (一、/（一）/1. style section headers)

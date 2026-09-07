@@ -14,6 +14,7 @@ from .webapi_base import (
     _param,
 )
 from astrbot.api.star import Context
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 from core.api_validate import json_body
 from commands.handlers import Services
@@ -69,6 +70,9 @@ async def api_files_distribute(s: Services) -> dict:
         out = await s.distributor.distribute_file(group, rid, target)
     except ValueError as e:
         return error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.warning(f"[webapi] distribute file failed: {e}", exc_info=True)
+        return error_response("distribute failed", status_code=500)
     return json_response(out)
 
 
@@ -91,6 +95,9 @@ async def api_albums_distribute(s: Services) -> dict:
         out = await s.distributor.distribute_album(group, album_id, name, target)
     except ValueError as e:
         return error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.warning(f"[webapi] distribute album failed: {e}", exc_info=True)
+        return error_response("distribute failed", status_code=500)
     return json_response(out)
 
 
@@ -108,6 +115,9 @@ async def api_essence_distribute(s: Services) -> dict:
         out = await s.distributor.distribute_essence(group, rid, target)
     except ValueError as e:
         return error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.warning(f"[webapi] distribute essence failed: {e}", exc_info=True)
+        return error_response("distribute failed", status_code=500)
     return json_response(out)
 
 
@@ -144,4 +154,7 @@ async def api_netdisk_distribute(s: Services) -> dict:
         )
     except ValueError as e:
         return error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.warning(f"[webapi] distribute netdisk failed: {e}", exc_info=True)
+        return error_response("distribute failed", status_code=500)
     return json_response(out)

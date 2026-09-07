@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 from core.api_validate import json_body, pick
 from commands.handlers import Services
@@ -54,7 +55,8 @@ async def api_bridge_transfer(s: Services) -> dict:
             )
             results.append({"resource_id": rid_int, "task_id": task_id})
         except Exception as e:
-            errors.append(f"resource_id={rid}: {e}")
+            logger.warning(f"[webapi] submit_out resource_id={rid}: {e}", exc_info=True)
+            errors.append(f"resource_id={rid}: transfer failed")
 
     return json_response({"results": results, "errors": errors})
 
@@ -157,7 +159,8 @@ async def api_bridge_transfer_in(s: Services) -> dict:
             }
         )
     except Exception as e:
-        return error_response(f"transfer failed: {e}", status_code=500)
+        logger.warning(f"[webapi] transfer failed: {e}", exc_info=True)
+        return error_response("transfer failed", status_code=500)
 
 
 async def api_netdisk_index(s: Services) -> dict:
@@ -171,4 +174,5 @@ async def api_netdisk_index(s: Services) -> dict:
         task_id = await s.netdisk.submit_index(path)
         return json_response({"task_id": task_id, "path": path})
     except Exception as e:
-        return error_response(f"submit index failed: {e}", status_code=502)
+        logger.warning(f"[webapi] submit index failed: {e}", exc_info=True)
+        return error_response("submit index failed", status_code=502)

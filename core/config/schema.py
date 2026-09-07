@@ -10,7 +10,8 @@ from .defaults import DEFAULTS
 
 
 def validate_config(data: dict) -> list[tuple[str, str]]:
-    """Returns [(key, message)] warnings; one each for unknown keys and conversion failures."""
+    """Returns [(key, message)] warnings; one each for unknown keys, conversion
+    failures, and semantic misconfiguration."""
     warnings: list[tuple[str, str]] = []
     for key in data:
         if key not in DEFAULTS:
@@ -19,5 +20,41 @@ def validate_config(data: dict) -> list[tuple[str, str]]:
         if key in data and not isinstance(data[key], list):
             warnings.append(
                 (key, f"期望 list，实际 {type(data[key]).__name__}")
+            )
+    # Semantic: download server enabled without token → auth bypass
+    enabled = data.get("download_server_enabled", False)
+    token = str(data.get("download_token", "") or "")
+    if enabled and not token:
+        warnings.append(
+            (
+                "download_token",
+                "download_server_enabled=true 但 download_token 为空——"
+                "下载服务将以无认证模式运行（不安全）。"
+                "已启用 fail-closed 保护：服务实际不会启动。"
+                "请设置 download_token 后重载。",
+            )
+        )
+    # Semantic: database admin token empty → falls back to Page session auth
+    db_token = str(data.get("database_admin_token", "") or "")
+    if not db_token:
+        warnings.append(
+            (
+                "database_admin_token",
+                "database_admin_token 为空——数据库管理接口将沿用面板管理权限。"
+                "建议设置独立令牌以获得更细粒度的访问控制。",
+            )
+        )
+    # Semantic: volume_threshold_mb must be a positive integer >= 10
+    vtb = data.get("volume_threshold_mb")
+    if vtb is not None:
+        try:
+            vtb_int = int(vtb)
+            if vtb_int < 10:
+                warnings.append(
+                    ("volume_threshold_mb", f"阈值过小（{vtb_int}MB），已回退为默认 95MB")
+                )
+        except (TypeError, ValueError):
+            warnings.append(
+                ("volume_threshold_mb", f"期望 int，实际 {type(vtb).__name__}，已回退为默认 95MB")
             )
     return warnings

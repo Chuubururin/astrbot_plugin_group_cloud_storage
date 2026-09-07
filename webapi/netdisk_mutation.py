@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 from core.api_validate import json_body, pick
 from commands.handlers import Services
@@ -78,7 +79,8 @@ async def api_bridge_config_save(s: Services) -> dict:
             }
         )
     except Exception as e:
-        return error_response(f"保存配置失败: {e}")
+        logger.warning(f"[webapi] 保存配置失败: {e}", exc_info=True)
+        return error_response("保存配置失败")
 
 
 # --- Netdisk file operations ---
@@ -137,7 +139,8 @@ async def api_netdisk_mkdir(s: Services) -> dict:
         await s.bridge.mkdir(path)
         return json_response({"ok": True, "path": path})
     except Exception as e:
-        return error_response(f"mkdir failed: {e}", status_code=500)
+        logger.warning(f"[webapi] mkdir failed: {e}", exc_info=True)
+        return error_response("mkdir failed", status_code=500)
 
 
 async def api_netdisk_rename(s: Services) -> dict:
@@ -159,7 +162,8 @@ async def api_netdisk_rename(s: Services) -> dict:
         await s.bridge.rename(path, name)
         return json_response({"ok": True, "path": path, "new_name": name})
     except Exception as e:
-        return error_response(f"rename failed: {e}", status_code=500)
+        logger.warning(f"[webapi] rename failed: {e}", exc_info=True)
+        return error_response("rename failed", status_code=500)
 
 
 async def api_netdisk_remove(s: Services) -> dict:
@@ -181,7 +185,8 @@ async def api_netdisk_remove(s: Services) -> dict:
         await s.bridge.remove(dir_path, names)
         return json_response({"ok": True, "dir": dir_path, "removed": names})
     except Exception as e:
-        return error_response(f"remove failed: {e}", status_code=500)
+        logger.warning(f"[webapi] remove failed: {e}", exc_info=True)
+        return error_response("remove failed", status_code=500)
 
 
 async def api_netdisk_move(s: Services) -> dict:
@@ -207,7 +212,8 @@ async def api_netdisk_move(s: Services) -> dict:
             {"ok": True, "src_dir": src_dir, "dst_dir": dst_dir, "moved": names}
         )
     except Exception as e:
-        return error_response(f"move failed: {e}", status_code=500)
+        logger.warning(f"[webapi] move failed: {e}", exc_info=True)
+        return error_response("move failed", status_code=500)
 
 
 async def api_netdisk_copy(s: Services) -> dict:
@@ -233,7 +239,8 @@ async def api_netdisk_copy(s: Services) -> dict:
             {"ok": True, "src_dir": src_dir, "dst_dir": dst_dir, "copied": names}
         )
     except Exception as e:
-        return error_response(f"copy failed: {e}", status_code=500)
+        logger.warning(f"[webapi] copy failed: {e}", exc_info=True)
+        return error_response("copy failed", status_code=500)
 
 
 async def api_netdisk_remove_empty_dirs(s: Services) -> dict:
@@ -255,7 +262,8 @@ async def api_netdisk_remove_empty_dirs(s: Services) -> dict:
         await s.bridge.remove_empty_dirs(src_dir, names)
         return json_response({"ok": True, "src_dir": src_dir, "removed": names})
     except Exception as e:
-        return error_response(f"remove_empty_dirs failed: {e}", status_code=500)
+        logger.warning(f"[webapi] remove_empty_dirs failed: {e}", exc_info=True)
+        return error_response("remove_empty_dirs failed", status_code=500)
 
 
 async def api_netdisk_recursive_move(s: Services) -> dict:
@@ -281,7 +289,8 @@ async def api_netdisk_recursive_move(s: Services) -> dict:
             {"ok": True, "src_dir": src_dir, "dst_dir": dst_dir, "moved": names}
         )
     except Exception as e:
-        return error_response(f"recursive_move failed: {e}", status_code=500)
+        logger.warning(f"[webapi] recursive_move failed: {e}", exc_info=True)
+        return error_response("recursive_move failed", status_code=500)
 
 
 async def api_netdisk_rename_batch(s: Services) -> dict:
@@ -309,6 +318,7 @@ async def api_netdisk_rename_batch(s: Services) -> dict:
             await s.bridge.rename(path, name)
             results.append({"path": path, "new_name": name})
         except Exception as e:
-            errors.append(f"rename {path}: {e}")
+            logger.warning(f"[webapi] rename {path}: {e}", exc_info=True)
+            errors.append(f"rename {path}: failed")
 
     return json_response({"ok": len(errors) == 0, "results": results, "errors": errors})

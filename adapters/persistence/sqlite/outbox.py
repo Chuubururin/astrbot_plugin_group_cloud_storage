@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
+from datetime import datetime, timezone
 
 from .state import StorePart
 from typing import TYPE_CHECKING
@@ -15,7 +15,10 @@ LEDGER_BREAKPOINT_KINDS = ("convert_volumes", "video_upload", "netdisk_index")
 
 
 def _now_ts() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+    # UTC ISO-8601, the store-wide standard (see archive.py / common.utc_now_iso).
+    # Older rows may carry the legacy local-time "%Y-%m-%d %H:%M:%S" format;
+    # readers (frontend formatTimeFull) accept both.
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class OutboxMixin(StorePart):

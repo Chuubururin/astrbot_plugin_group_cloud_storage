@@ -100,8 +100,6 @@ class DownloadMixin:
         the cloud / backfill pending), reassemble the available parts instead
         of failing; the total sha256 check is skipped for a partial result.
         """
-        import hashlib
-
         detail = await self.store.get_resource_detail(group_id, id)
         if not detail:
             raise ValueError(f"resource {id} not found in group {group_id}")
@@ -134,7 +132,8 @@ class DownloadMixin:
                     f"视频分片缺失 {missing}，无法无损重组（视频不支持不完整下载）"
                 )
             return await self._recon_video(
-                group_id, name, ready, detail.get("folder_id") or None
+                group_id, name, ready, detail.get("folder_id") or None,
+                (detail.get("meta") or {}).get("total_sha256"),
             )
         compression = (detail.get("meta") or {}).get("compression")
         out = self.tmp_dir / f"recon_{uuid.uuid4().hex[:10]}_{name}"
@@ -211,7 +210,8 @@ class DownloadMixin:
                 out.unlink(missing_ok=True)
 
     async def _recon_video(
-        self, group_id: str, name: str, vols, folder: str | None = None
+        self, group_id: str, name: str, vols, folder: str | None = None,
+        total_sha256: str | None = None,
     ) -> tuple[str, str]:
         """Reassembly of losslessly segmented video: fetch each segment
         (sha256 verified) -> merge via ffmpeg concat. Returns (path, name).
@@ -266,6 +266,10 @@ class DownloadMixin:
             import asyncio as _aio
 
             await _aio.to_thread(_concat)
+            if total_sha256:
+                actual = hashlib.sha256(out.read_bytes()).hexdigest()
+                if actual != total_sha256:
+                    raise ValueError("video total sha256 mismatch")
             return out.as_posix(), name
         finally:
             for f in seg_dir.glob("*"):

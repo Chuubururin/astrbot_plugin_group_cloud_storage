@@ -7,6 +7,7 @@ conformance is structural (no Protocol base class).
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import os
 import sqlite3
@@ -64,6 +65,9 @@ class SqliteMetaStore:
         for attr, part_cls in _PARTS:
             setattr(self, attr, part_cls(self._state))
         self._state.owner = self  # entry point for cross-part call resolution
+        # Serializes reset_and_rebuild: two concurrent rebuilds would race on
+        # close -> mkstemp -> os.replace and can corrupt the database file.
+        self._rebuild_lock = asyncio.Lock()
 
     def iter_parts(self):
         """Yield (attr name, part instance) in declaration order, used for
@@ -129,6 +133,10 @@ class SqliteMetaStore:
 
     async def reset_and_rebuild(self) -> None:
         """Atomically replace this database with an empty, validated schema."""
+        async with self._rebuild_lock:
+            await self._reset_and_rebuild_locked()
+
+    async def _reset_and_rebuild_locked(self) -> None:
         await self.close()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{self._db_path.name}.", suffix=".rebuild", dir=self._db_path.parent)

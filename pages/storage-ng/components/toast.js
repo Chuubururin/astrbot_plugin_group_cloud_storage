@@ -30,10 +30,18 @@ export function toast(message, variant = 'info', duration = TOAST_DURATION) {
   ensure();
   const el = document.createElement('div');
   el.className = `toast toast-${variant}`;
+
   const iconMap = { info: 'INFO', success: 'CHECK', warn: 'ALERT', error: 'X' };
-  el.innerHTML =
-    `<span class="toast-icon">${getIcon(iconMap[variant] || 'INFO', 14)}</span>` +
-    `<span class="toast-msg">${message}</span>`;
+  const iconSpan = document.createElement('span');
+  iconSpan.className = 'toast-icon';
+  iconSpan.innerHTML = getIcon(iconMap[variant] || 'INFO', 14);
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'toast-msg';
+  msgSpan.textContent = message;
+
+  el.appendChild(iconSpan);
+  el.appendChild(msgSpan);
   container.appendChild(el);
 
   requestAnimationFrame(() => el.classList.add('toast-show'));

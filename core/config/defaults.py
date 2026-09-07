@@ -17,6 +17,7 @@ DEFAULTS: dict = {
     "page_size": 10,
     "essence_chunk_size": 4000,
     "video_segment_seconds": 599,
+    "volume_threshold_mb": 95,
     "fetch_max_bytes": 2147483648,
     "fetch_timeout_sec": 180,
     # Fetch pipeline SSRF gate: deny loopback/private/reserved addresses by

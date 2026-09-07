@@ -1,6 +1,9 @@
 """Capacity use cases shared by operation orchestration."""
 from __future__ import annotations
+
+from core.application.common import compute_capacity
 from core.log import logger
+
 
 class CapacityMixin:
     async def refresh_capacity(self, group_id: str) -> None:
@@ -28,19 +31,5 @@ class CapacityMixin:
             logger.debug(f"[group-scan] capacity refresh failed for {group_id}: {e}")
 
     async def capacity_of(self, group_id: str) -> tuple[int, int, int, int] | None:
-        """Unified capacity policy.
-
-        fs success -> returns the 4-tuple (used/count fall back to field-level
-        local index aggregates).
-        fs failure or total=0 -> returns None (the caller skips the write and
-        keeps the last values).
-        """
-        try:
-            fs = await self.api.get_group_fs_info(group_id)
-        except Exception:
-            return None
-        if not fs.total_space:
-            return None
-        used = fs.used_space or await self.store.sum_resource_sizes(group_id)
-        count = fs.file_count or await self.store.count_active(group_id)
-        return used, fs.total_space, count, fs.limit_count
+        """Unified capacity policy (shared with the group scanner)."""
+        return await compute_capacity(self.api, self.store, group_id)

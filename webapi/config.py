@@ -159,7 +159,7 @@ async def api_config_save(s: Services) -> dict:
     except Exception:
         schema = {}
     saved: list[str] = []
-    masked_keys = {"openlist_password", "openlist_token", "download_token"}
+    masked_keys = {"openlist_password", "openlist_token", "download_token", "database_admin_token"}
     normalized: dict = {}
     for key, value in values.items():
         if key not in schema:

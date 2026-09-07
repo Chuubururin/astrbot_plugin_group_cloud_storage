@@ -1,7 +1,7 @@
 """RecoveryMixin — retry, cancel, and recovery methods."""
 from __future__ import annotations
 
-from adapters.external.base import ExternalApiError
+from adapters.external.base import ExternalApiError, normalize_task_state
 from core.domain.enums import BridgeTaskState
 from core.log import logger
 
@@ -44,8 +44,6 @@ class RecoveryMixin:
                         else BridgeTaskState.FAILED.value
                     )
                 else:
-                    from adapters.external.base import normalize_task_state
-
                     state = normalize_task_state(task.state)
 
                 await self._store.update_archive_state(row, state)

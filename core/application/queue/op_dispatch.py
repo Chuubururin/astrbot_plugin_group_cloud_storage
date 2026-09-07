@@ -467,75 +467,69 @@ class OpDispatcher(CapacityMixin):
         consecutive = 0
         last_pub = 0.0
         last_log = 0.0
-        for i, gid in enumerate(targets, 1):
-            # The group is now being processed: release the chained-scan
-            # dedupe entry so a later group scan can queue it again
-            self._chained_file_scan_groups.discard(str(gid))
-            # Cooperative checkpoint: cancel/interrupt and pause take effect
-            # between groups
-            await self.queue.pause_check(op)
-            # Rate-limit before each per-group call (3x the base interval)
-            await self.queue.acquire(mult=3.0)
-            # Route this group's sync to the account that owns it
-            with account_scope(await self._account_of(gid)):
-                lock = self.services.lock_for(gid)
-                result = await self.sync.run_full_sync(gid, lock)
-                await self.refresh_capacity(gid)
-                # No automatic volume conversion here: converting existing
-                # cloud files re-uploads and deletes them, so it is strictly a
-                # user decision (files/convert-volumes / the 分卷 action).
-                # Uploads of over-threshold files keep their mandatory
-                # built-in volume pipeline (files/crud).
-            now = time.monotonic()
-            if not result.ok and result.error:
-                failed += 1
-                consecutive += 1
-                last_fail = last_fail or str(result.error)
-                # Bulk remote failures log at debug; a warning summary every
-                # 20 groups
-                logger.debug(f"[file-scan] {gid} failed: {result.error}")
-                if (failed % 20 == 0) or (now - last_log > 30):
-                    logger.warning(
-                        f"[file-scan] {failed}/{i} groups failed so far "
-                        f"(e.g. {last_fail[:80]})"
-                    )
-                    last_log = now
-                # Rate-control cooldown: 10 consecutive failures -> cool down
-                # 60s (QQ rate-limit recovery window)
-                if consecutive >= 10:
-                    logger.warning(
-                        f"[file-scan] {consecutive} consecutive failures; "
-                        f"cooling 60s (risk control)"
-                    )
-                    await asyncio.sleep(60)
+        try:
+            for i, gid in enumerate(targets, 1):
+                # The group is now being processed: release the chained-scan
+                # dedupe entry so a later group scan can queue it again
+                self._chained_file_scan_groups.discard(str(gid))
+                # Cooperative checkpoint: cancel/interrupt and pause take effect
+                # between groups
+                await self.queue.pause_check(op)
+                # Rate-limit before each per-group call (3x the base interval)
+                await self.queue.acquire(mult=3.0)
+                # Route this group's sync to the account that owns it
+                with account_scope(await self._account_of(gid)):
+                    lock = self.services.lock_for(gid)
+                    result = await self.sync.run_full_sync(gid, lock)
+                    await self.refresh_capacity(gid)
+                now = time.monotonic()
+                if not result.ok and result.error:
+                    failed += 1
+                    consecutive += 1
+                    last_fail = last_fail or str(result.error)
+                    logger.debug(f"[file-scan] {gid} failed: {result.error}")
+                    if (failed % 20 == 0) or (now - last_log > 30):
+                        logger.warning(
+                            f"[file-scan] {failed}/{i} groups failed so far "
+                            f"(e.g. {last_fail[:80]})"
+                        )
+                        last_log = now
+                    if consecutive >= 10:
+                        logger.warning(
+                            f"[file-scan] {consecutive} consecutive failures; "
+                            f"cooling 60s (risk control)"
+                        )
+                        await asyncio.sleep(60)
+                        consecutive = 0
+                        last_log = now
+                else:
                     consecutive = 0
-                    last_log = now
-            else:
-                consecutive = 0
-            # Progress publish throttling (>=2s interval or every 10 groups)
-            if (now - last_pub >= 2.0) or (i % 10 == 0):
-                self.queue.publish(
-                    {
-                        "type": "progress",
-                        "kind": "file_scan",
-                        "target": gid,
-                        "i": i,
-                        "n": total,
-                        "detail": f"群 {gid}",
-                    }
-                )
-                # Refresh while scanning: file lists and capacity become
-                # visible as the scan progresses
-                self.queue.publish(
-                    {
-                        "type": "data_changed",
-                        "kind": "file_scan",
-                        "target": "*" if op.payload.get("mode") == "all" else gid,
-                        "i": i,
-                        "n": total,
-                    }
-                )
-                last_pub = now
+                # Progress publish throttling (>=2s interval or every 10 groups)
+                if (now - last_pub >= 2.0) or (i % 10 == 0):
+                    self.queue.publish(
+                        {
+                            "type": "progress",
+                            "kind": "file_scan",
+                            "target": gid,
+                            "i": i,
+                            "n": total,
+                            "detail": f"群 {gid}",
+                        }
+                    )
+                    self.queue.publish(
+                        {
+                            "type": "data_changed",
+                            "kind": "file_scan",
+                            "target": "*" if op.payload.get("mode") == "all" else gid,
+                            "i": i,
+                            "n": total,
+                        }
+                    )
+                    last_pub = now
+        finally:
+            # On cancel/error: release any remaining chained-scan entries
+            for gid in targets:
+                self._chained_file_scan_groups.discard(str(gid))
         # Scan complete: invalidate affected group indexes (lazy rebuild) +
         # dynamic refresh event
         if self.services.searchkv is not None:

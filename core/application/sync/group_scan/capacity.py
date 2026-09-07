@@ -1,5 +1,7 @@
+"""Scan-side capacity policy (delegates to the shared implementation)."""
 from __future__ import annotations
 
+from core.application.common import compute_capacity
 
 
 class CapacityMixin:
@@ -12,13 +14,4 @@ class CapacityMixin:
         fs failure or total=0 -> returns None (the caller skips the capacity
         write and keeps the previous values).
         """
-        _api = api or self.api
-        try:
-            fs = await _api.get_group_fs_info(group_id)
-        except Exception:
-            return None
-        if not fs.total_space:
-            return None
-        used = fs.used_space or await self.store.sum_resource_sizes(group_id)
-        count = fs.file_count or await self.store.count_active(group_id)
-        return used, fs.total_space, count, fs.limit_count
+        return await compute_capacity(api or self.api, self.store, group_id)

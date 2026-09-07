@@ -64,20 +64,27 @@ def classify_error(exc: Exception) -> ErrorKind:
     return ErrorKind.REMOTE_ERROR
 
 
-# Restricted address ranges for SSRF protection 
-_RESTRICTED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),  # loopback
-    ipaddress.ip_network("10.0.0.0/8"),  # private class A
-    ipaddress.ip_network("172.16.0.0/12"),  # private class B
-    ipaddress.ip_network("192.168.0.0/16"),  # private class C
-    ipaddress.ip_network("169.254.0.0/16"),  # link-local
-    ipaddress.ip_network("0.0.0.0/8"),  # unspecified
-    ipaddress.ip_network("224.0.0.0/4"),  # multicast
-    ipaddress.ip_network("::1/128"),  # loopback IPv6
-    ipaddress.ip_network("fc00::/7"),  # unique local IPv6
-    ipaddress.ip_network("fe80::/10"),  # link-local IPv6
-    ipaddress.ip_network("::ffff:127.0.0.0/104"),  # IPv4-mapped loopback
-]
+def _is_restricted_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Check if IP address is in a restricted range using attribute checks.
+
+    Covers: loopback, private, link-local, reserved, multicast, unspecified,
+    and IPv6 unique-local addresses (fc00::/7). IPv4-mapped IPv6 addresses
+    are recursively checked via .ipv4_mapped.
+    """
+    if ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        return True
+    if isinstance(ip, ipaddress.IPv4Address):
+        return ip.is_private
+    if isinstance(ip, ipaddress.IPv6Address):
+        # unique-local addresses (fc00::/7)
+        if ip.packed[0] & 0xfe == 0xfc:
+            return True
+        # IPv4-mapped IPv6 addresses
+        mapped = ip.ipv4_mapped
+        if mapped is not None and _is_restricted_ip(mapped):
+            return True
+    return False
+
 
 # Allowed schemes for outbound requests
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -141,14 +148,13 @@ def _check_ip_address(
     """Check if IP address is in restricted range."""
     if allow_private:
         return
-    for network in _RESTRICTED_NETWORKS:
-        if ip in network:
-            raise ExternalApiError(
-                "openlist",
-                f"URL resolves to restricted address {ip}. "
-                f"Set {hint}=true to allow. "
-                f"Received: {url}",
-            )
+    if _is_restricted_ip(ip):
+        raise ExternalApiError(
+            "openlist",
+            f"URL resolves to restricted address {ip}. "
+            f"Set {hint}=true to allow. "
+            f"Received: {url}",
+        )
 
 
 def _check_dns(
@@ -208,6 +214,68 @@ def assert_fetch_url_allowed(
         if not allow_private:
             _check_dns(hostname, url, hint)
     return url
+
+
+def resolve_and_pin_ip(
+    url: str,
+    *,
+    allow_private: bool = False,
+    hint: str = "fetch_allow_private_address",
+) -> tuple[str, str | None]:
+    """SSRF-safe DNS resolution: validate + return a pinned IP for connection.
+
+    Returns (url, pinned_ip_or_None). If the hostname is already a literal
+    IP, returns (url, None) — callers should use the original URL. If DNS
+    resolved, returns (url_with_ip, original_hostname) so the caller can
+    connect to the IP and set the Host header to the original hostname.
+
+    Raises ExternalApiError if any resolved address is restricted.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ExternalApiError("openlist", f"URL has no hostname: {url}")
+    # Literal IP: no DNS rebinding risk
+    try:
+        ip = ipaddress.ip_address(hostname)
+        _check_ip_address(ip, allow_private, url, hint)
+        return url, None
+    except ValueError:
+        pass
+    # Hostname: resolve, validate all results, pin to the first safe address
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ExternalApiError(
+            "openlist", f"DNS resolution failed for {hostname}: {e}. Received: {url}"
+        )
+    pinned_ip: str | None = None
+    for family, _, _, _, sockaddr in infos:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            _check_ip_address(ip, allow_private, url, hint)
+            if pinned_ip is None:
+                pinned_ip = ip_str
+        except ValueError:
+            continue
+    if pinned_ip is None:
+        raise ExternalApiError(
+            "openlist",
+            f"DNS resolution for {hostname} returned no valid addresses. Received: {url}",
+        )
+    # Rebuild URL with pinned IP; preserve port
+    port = parsed.port
+    pinned_host = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip
+    if port:
+        pinned_url = f"{parsed.scheme}://{pinned_host}:{port}{parsed.path or ''}"
+        if parsed.query:
+            pinned_url += f"?{parsed.query}"
+    else:
+        pinned_url = f"{parsed.scheme}://{pinned_host}{parsed.path or ''}"
+        if parsed.query:
+            pinned_url += f"?{parsed.query}"
+    return pinned_url, hostname
 
 
 # State normalization map

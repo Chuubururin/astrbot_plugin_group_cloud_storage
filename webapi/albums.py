@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 
 from commands.handlers import Services
@@ -100,9 +101,8 @@ async def api_album_media(s: Services) -> dict:
                 timeout=CLOUD_MEDIA_TIMEOUT,
             )
         except Exception as e2:
-            return error_response(
-                f"album media unavailable: {str(e2) or str(e)}", status_code=502
-            )
+            logger.warning(f"[webapi] album media unavailable: {e2}", exc_info=True)
+            return error_response("album media unavailable", status_code=502)
         album_id = retry_id
     else:
         # A stale album ID yields an empty list instead of an error, so an
@@ -201,7 +201,8 @@ async def api_album_media_delete(s: Services) -> dict:
             return error_response(
                 "协议端（SnowLuma/NapCat）未实现「删除相册媒体」扩展接口", status_code=501
             )
-        return error_response(f"delete album media failed: {e}", status_code=502)
+        logger.warning(f"[webapi] delete album media failed: {e}", exc_info=True)
+        return error_response("delete album media failed", status_code=502)
     return json_response({"status": "ok", "album_id": album_id, "lloc": lloc})
 
 
@@ -226,7 +227,8 @@ async def api_album_media_comment(s: Services) -> dict:
             return error_response(
                 "协议端（SnowLuma/NapCat）未实现「相册评论」扩展接口", status_code=501
             )
-        return error_response(f"album comment failed: {e}", status_code=502)
+        logger.warning(f"[webapi] album comment failed: {e}", exc_info=True)
+        return error_response("album comment failed", status_code=502)
     return json_response({"status": "ok", "album_id": album_id, "lloc": lloc})
 
 
@@ -253,7 +255,8 @@ async def api_album_create(s: Services) -> dict:
                 "请在 QQ 客户端中手动创建相册后刷新本页",
                 status_code=501,
             )
-        return error_response(f"create album failed: {e}", status_code=502)
+        logger.warning(f"[webapi] create album failed: {e}", exc_info=True)
+        return error_response("create album failed", status_code=502)
     return json_response({"group": group, "album_name": name, "album_desc": desc, "result": result})
 
 

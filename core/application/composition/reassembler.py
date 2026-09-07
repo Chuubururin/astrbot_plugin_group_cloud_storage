@@ -5,11 +5,17 @@ reconstruction (with integrity checks).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
 
-from core.application.composition.integrity import sha256_bytes, verify_part, verify_total
+from core.application.composition.integrity import verify_part, verify_total
+
+# Memory safety limit: reject reassembly of files larger than 4 GB to
+# prevent memory exhaustion from loading entire files into RAM for SHA-256
+# verification.
+_MAX_REASSEMBLY_BYTES = 4 * 1024**3
 
 
 def reassemble_volumes(
@@ -21,6 +27,15 @@ def reassemble_volumes(
     parts: [{path|data?, sha256}]; returns the whole-file sha256.
     """
     dest = Path(dest)
+    total_size = sum(
+        len(p["data"]) if p.get("data") is not None else Path(p["path"]).stat().st_size
+        for p in parts
+    )
+    if total_size > _MAX_REASSEMBLY_BYTES:
+        raise ValueError(
+            f"reassembled size {total_size} exceeds safety limit "
+            f"({_MAX_REASSEMBLY_BYTES} bytes)"
+        )
     with dest.open("wb") as of:
         for p in parts:
             data = (
@@ -35,7 +50,12 @@ def reassemble_volumes(
     if not verify_total(dest, total_sha256):
         dest.unlink(missing_ok=True)
         raise ValueError("total sha256 mismatch")
-    return sha256_bytes(dest.read_bytes())
+    # Stream hash instead of reading entire file into memory
+    sha = hashlib.sha256()
+    with dest.open("rb") as f:
+        while chunk := f.read(1 << 16):
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 async def reassemble_video(seg_paths: list[str | Path], dest: str | Path) -> str:

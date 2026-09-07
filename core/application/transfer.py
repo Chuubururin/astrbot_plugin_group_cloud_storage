@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlsplit, unquote
 
 import httpx
 
-from adapters.external.base import assert_fetch_url_allowed
+from adapters.external.base import assert_fetch_url_allowed, resolve_and_pin_ip
 from core.application.queue import OpQueue
 from core.config import PluginConfig
 from core.log import logger
@@ -50,9 +50,10 @@ class ProtocolAdapter:
 
     scheme = ""
 
-    def __init__(self, max_bytes: int, timeout: float):
+    def __init__(self, max_bytes: int, timeout: float, allow_private: bool = False):
         self.max_bytes = max_bytes
         self.timeout = timeout
+        self._allow_private = allow_private
 
     async def get(self, target: dict, dest: Path) -> int:
         raise NotImplementedError
@@ -62,30 +63,36 @@ class HttpAdapter(ProtocolAdapter):
     scheme = "http"
 
     def __init__(self, max_bytes: int, timeout: float, allow_private: bool = False):
-        super().__init__(max_bytes, timeout)
-        # SSRF gate (fetch_allow_private_address): validate the host before
-        # each hop
-        self._allow_private = allow_private
+        super().__init__(max_bytes, timeout, allow_private)
 
-    def _validate_url(self, url: str) -> None:
-        """http/https + private/reserved address validation (blocking DNS
-        resolution, invoked via to_thread)."""
+    def _resolve_url(self, url: str) -> tuple[str, str | None]:
+        """SSRF validation + DNS pinning (blocking, invoked via to_thread).
+
+        Returns (pinned_url, original_hostname_or_None). The caller connects
+        to pinned_url and sets Host: original_hostname to prevent DNS rebinding.
+        """
         try:
-            assert_fetch_url_allowed(url, allow_private=self._allow_private)
+            return resolve_and_pin_ip(url, allow_private=self._allow_private)
         except Exception as e:
             raise ValueError(f"fetch url rejected: {e}") from e
 
     async def get(self, target: dict, dest: Path) -> int:
         total = 0
         url = target["url"]
-        # Manual redirect loop: every hop is re-validated against private and
-        # reserved address ranges so a 302 redirect cannot reach the intranet
+        # Manual redirect loop: every hop is re-validated + pinned against
+        # private and reserved address ranges so a 302 redirect cannot reach
+        # the intranet (DNS rebinding protection).
         async with httpx.AsyncClient(
             follow_redirects=False, timeout=self.timeout
         ) as client:
             for _hop in range(_HTTP_REDIRECT_MAX + 1):
-                await asyncio.to_thread(self._validate_url, url)
-                async with client.stream("GET", url) as resp:
+                pinned_url, original_host = await asyncio.to_thread(
+                    self._resolve_url, url
+                )
+                headers = {}
+                if original_host:
+                    headers["Host"] = original_host
+                async with client.stream("GET", pinned_url, headers=headers) as resp:
                     if resp.is_redirect and resp.has_redirect_location:
                         if _hop == _HTTP_REDIRECT_MAX:
                             raise ValueError(
@@ -117,6 +124,10 @@ class FtpAdapter(ProtocolAdapter):
         host = target["host"]
         user = target["user"] or "anonymous"
         password = target["password"] if target["user"] else "anonymous@"
+
+        # SSRF protection: validate host before connecting
+        if not self._allow_private:
+            assert_fetch_url_allowed(f"ftp://{host}", allow_private=False)
 
         # FTPS-only (explicit TLS): AUTH TLS on the control channel plus
         # PROT P on the data channel, so credentials and payloads are never
@@ -168,6 +179,11 @@ class SmbAdapter(ProtocolAdapter):
         share, _, _ = target["path"].lstrip("/").partition("/")
         if not share:
             raise ValueError("smb url needs share: smb://host/share/path")
+
+        # SSRF protection: validate host before connecting
+        if not self._allow_private:
+            assert_fetch_url_allowed(f"smb://{target['host']}", allow_private=False)
+
         conn = SMBConnection(
             target["user"] or "guest",
             target["password"] or "",
@@ -221,8 +237,8 @@ class TransferService:
         self._adapters: dict[str, ProtocolAdapter] = {
             "http": HttpAdapter(fetch_max, fetch_timeout, allow_private),
             "https": HttpAdapter(fetch_max, fetch_timeout, allow_private),
-            "ftp": FtpAdapter(fetch_max, fetch_timeout),
-            "smb": SmbAdapter(fetch_max, fetch_timeout),
+            "ftp": FtpAdapter(fetch_max, fetch_timeout, allow_private),
+            "smb": SmbAdapter(fetch_max, fetch_timeout, allow_private),
         }
 
     @staticmethod
@@ -247,5 +263,5 @@ class TransferService:
         if t["scheme"] in ("http", "https"):
             adapter = self._adapter(t, _INGRESS_SCHEMES)
             if isinstance(adapter, HttpAdapter):
-                await asyncio.to_thread(adapter._validate_url, t["url"])
+                await asyncio.to_thread(adapter._resolve_url, t["url"])
         return await self._adapter(t, _INGRESS_SCHEMES).get(t, dest)

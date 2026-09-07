@@ -112,6 +112,10 @@ class PluginConfig:
         return self._as("video_segment_seconds", int, DEFAULTS["video_segment_seconds"])
 
     @property
+    def volume_threshold_mb(self) -> int:
+        return self._as("volume_threshold_mb", int, DEFAULTS["volume_threshold_mb"])
+
+    @property
     def fetch_max_bytes(self) -> int:
         return self._as("fetch_max_bytes", int, DEFAULTS["fetch_max_bytes"])
 
