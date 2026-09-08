@@ -12,16 +12,19 @@ sys.path.insert(0, _PLUGIN_DIR)
 # never touches — stale bytecode would survive every reload. Evict any
 # top-level modules that resolve back into this plugin directory before
 # the imports below run, so a reload always picks up fresh code.
-_TOP_LEVEL_PKGS = ("commands", "core", "webapi", "adapters", "ports", "bootstrap")
-for _pkg in _TOP_LEVEL_PKGS:
-    for _key in [k for k in sys.modules if k == _pkg or k.startswith(_pkg + ".")]:
-        _mod = sys.modules.get(_key)
-        _file = getattr(_mod, "__file__", None) or ""
-        if _file and os.path.realpath(os.path.dirname(_file)).startswith(
-            os.path.realpath(_PLUGIN_DIR)
-        ):
-            del sys.modules[_key]
-del _pkg, _key, _mod, _file
+def _evict_stale_plugin_modules() -> None:
+    _plugin_dir = os.path.realpath(_PLUGIN_DIR)
+    _top_pkgs = ("commands", "core", "webapi", "adapters", "ports", "bootstrap")
+    for _pkg in _top_pkgs:
+        for _key in [k for k in sys.modules if k == _pkg or k.startswith(_pkg + ".")]:
+            _mod = sys.modules.get(_key)
+            _file = getattr(_mod, "__file__", None) or ""
+            if _file and os.path.realpath(os.path.dirname(_file)).startswith(_plugin_dir):
+                del sys.modules[_key]
+
+
+_evict_stale_plugin_modules()
+del _evict_stale_plugin_modules
 
 from astrbot.api.event import AstrMessageEvent, filter  # noqa: E402  (after sys.path bootstrap)
 from astrbot.api.star import Context, Star  # noqa: E402
