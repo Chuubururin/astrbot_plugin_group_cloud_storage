@@ -96,20 +96,24 @@ jobs:
           number="${{ steps.pr.outputs.number }}"
           deadline=$(( $(date +%s) + 900 ))
           while :; do
-            out="$(gh pr checks "$number" 2>&1)" && state="ok" || state="pending"
+            # gh pr checks 对任何 pending 检查都返回非零——包括 promote 自身
+            # （本循环就跑在 promote job 里，它始终 pending，按整体退出码判断
+            # 会永远等下去）。所以不看退出码，只按检查名逐行判断：只认
+            # ci.yml 的四个必过检查，promote 行与后续轮次的 stale 行忽略。
+            out="$(gh pr checks "$number" 2>&1 || true)"
             echo "$out"
-            if [[ "$state" == "ok" ]]; then
-              if echo "$out" | grep -qE '\bfail\b'; then
-                echo "::error::PR #$number 存在失败检查，保留 PR 供排查"
-                exit 1
-              fi
-              echo "全部检查通过"
-              exit 0
-            fi
-            # pending 状态：区分「尚无检查上报」与「有检查失败」
-            if echo "$out" | grep -qE '\bfail\b'; then
-              echo "::error::PR #$number 存在失败检查，保留 PR 供排查"
+            relevant="$(echo "$out" | grep -E '^(lint|python-tests|frontend-tests|contract-checks)\s' || true)"
+            latest="$(echo "$relevant" | awk -F'\t' '!seen[$1]++' || true)"
+            failed="$(echo "$latest" | grep -E '\bfail\b' || true)"
+            pending="$(echo "$latest" | grep -E '\bpending\b' || true)"
+            all_pass="$(echo "$latest" | grep -cE '\bpass\b' || true)"
+            if [[ -n "$failed" ]]; then
+              echo "::error::PR #$number 存在失败检查：$failed"
               exit 1
+            fi
+            if [[ "$all_pass" == "4" && -z "$pending" ]]; then
+              echo "四个必过检查全部通过"
+              exit 0
             fi
             if (( $(date +%s) > deadline )); then
               echo "::error::等待检查超时（15 分钟），保留 PR 供排查"
