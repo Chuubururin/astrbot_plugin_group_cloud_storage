@@ -1,0 +1,127 @@
+name: Promote dev to main
+
+# dev 上的发布提交（chore(release): vX.Y.Z）或手动触发时，
+# 自动建/复用 dev→main PR，等待 CI 全绿后合并。
+# GITHUB_TOKEN 建的 PR 不触发 pull_request 事件，但 ci.yml 同时监听
+# push: dev，同 SHA 的检查运行会被分支保护识别，因此无需 App/PAT。
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      merge_method:
+        description: "合并方式"
+        type: choice
+        default: merge
+        options: [merge, squash, rebase]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: promote-dev-to-main
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 判断是否需要 promote
+        id: decide
+        run: |
+          set -euo pipefail
+          method="${{ inputs.merge_method || 'merge' }}"
+          echo "merge_method=$method" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # push 到 dev：只对发布提交与显式同步提交流转，其余提交静默跳过
+          subject="$(git log -1 --pretty=%s origin/dev)"
+          echo "dev head subject: $subject"
+          if echo "$subject" | grep -qiE '^chore\(release\):|^\[merge\]'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 复用或创建 dev→main PR
+        if: steps.decide.outputs.run == 'true'
+        id: pr
+        run: |
+          set -euo pipefail
+          ahead="$(git rev-list --count origin/main..origin/dev)"
+          if [[ "$ahead" == "0" ]]; then
+            echo "dev 与 main 无差异，跳过"
+            echo "number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          existing="$(gh pr list --base main --head dev --state open \
+            --json number --jq '.[0].number' || true)"
+          if [[ -n "$existing" ]]; then
+            echo "复用已有 PR #$existing"
+            echo "number=$existing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          body="## 变更内容
+
+          本 PR 由 promote workflow 自动创建，将 \`dev\` 的提交同步到 \`main\`。
+
+          - 提交清单见 Commits 标签页
+          - CI 由 \`push: dev\` 触发（与 head 同 SHA），全绿后自动合并"
+          number="$(printf '%s\n' "$body" | gh pr create --base main --head dev \
+            --title "chore: promote dev → main ($(git rev-parse --short origin/dev))" \
+            --body-file - \
+            --jq '.number')"
+          echo "创建 PR #$number"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: 等待 PR 检查全绿
+        if: steps.decide.outputs.run == 'true' && steps.pr.outputs.number != ''
+        run: |
+          set -euo pipefail
+          number="${{ steps.pr.outputs.number }}"
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            out="$(gh pr checks "$number" 2>&1)" && state="ok" || state="pending"
+            echo "$out"
+            if [[ "$state" == "ok" ]]; then
+              if echo "$out" | grep -qE '\bfail\b'; then
+                echo "::error::PR #$number 存在失败检查，保留 PR 供排查"
+                exit 1
+              fi
+              echo "全部检查通过"
+              exit 0
+            fi
+            # pending 状态：区分「尚无检查上报」与「有检查失败」
+            if echo "$out" | grep -qE '\bfail\b'; then
+              echo "::error::PR #$number 存在失败检查，保留 PR 供排查"
+              exit 1
+            fi
+            if (( $(date +%s) > deadline )); then
+              echo "::error::等待检查超时（15 分钟），保留 PR 供排查"
+              exit 1
+            fi
+            sleep 20
+          done
+
+      - name: 合并 PR
+        if: steps.decide.outputs.run == 'true' && steps.pr.outputs.number != ''
+        run: |
+          set -euo pipefail
+          gh pr merge "${{ steps.pr.outputs.number }}" \
+            --merge --delete-branch=false
+          echo "dev → main 合并完成"
