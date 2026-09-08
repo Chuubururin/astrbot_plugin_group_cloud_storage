@@ -149,7 +149,6 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
         """Send group notification for completed tasks."""
         try:
             gid = row.get("group_id", "")
-            rid = row.get("resource_id", 0)
             direction = row.get("direction", "out")
             remote_path = row.get("remote_path", "")
 

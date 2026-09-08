@@ -23,12 +23,12 @@ for _pkg in _TOP_LEVEL_PKGS:
             del sys.modules[_key]
 del _pkg, _key, _mod, _file
 
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star
-from commands.handlers import (handle_csarchive, handle_csbridge, handle_csfetch, handle_cssave, handle_csfile, handle_csfiles, handle_cssync, handle_cshelp)
-from core.runtime.adapter import RuntimeAdapter
-from core.runtime.commands import strip_command_params
-from core.runtime.events import handle_aiocqhttp_event
+from astrbot.api.event import AstrMessageEvent, filter  # noqa: E402  (after sys.path bootstrap)
+from astrbot.api.star import Context, Star  # noqa: E402
+from commands.handlers import (handle_csarchive, handle_csbridge, handle_csfetch, handle_cssave, handle_csfile, handle_csfiles, handle_cssync, handle_cshelp)  # noqa: E402
+from core.runtime.adapter import RuntimeAdapter  # noqa: E402
+from core.runtime.commands import strip_command_params  # noqa: E402
+from core.runtime.events import handle_aiocqhttp_event  # noqa: E402
 
 class Main(RuntimeAdapter, Star):
     """Group cloud storage manager.

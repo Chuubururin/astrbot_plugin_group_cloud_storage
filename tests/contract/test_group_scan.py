@@ -146,7 +146,6 @@ async def test_pick_group_owned_first_and_capacity(env):
     """上传自动选群：owned 优先 + 余量不足跳过（溢出切换依据）。"""
     store, api, svc = env
     from core.application.catalog import StoragePlanner
-    from core.domain.resource import GroupMember as _gm
 
     planner = StoragePlanner(store)
     # 无容量数据时按 owned 优先

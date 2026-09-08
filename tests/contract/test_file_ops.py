@@ -173,10 +173,9 @@ async def test_replace_name_rejects_volumes(env):
 @pytest.mark.asyncio
 async def test_convert_volumes_flow(env, monkeypatch):
     """化整为零（v2.8）：云端大文件 → 分卷上传 → 删原件 → 索引原位转换。"""
-    from core.application.composition.spec import decode_composition
 
     tmp_path, store, api, queue, ops = env
-    big = b"Z" * (200 * 1024)  # 200KB（阈值由 CHUNK_THRESHOLD_BYTES 控制，测试用小文件模拟需放宽）
+    # 200KB（阈值由 CHUNK_THRESHOLD_BYTES 控制，测试用小文件模拟需放宽）
     # 分卷阈值 95MB，200KB 无法触发 → 直接打桩 _do_volume_upload 校验编排？改为验证拒绝路径+阈值
     res = Resource(group_id="g1", type=ResourceType.FILE, name="big.bin",
                    source_ref="f1", size=200 * 1024, busid=102, created_at=1,

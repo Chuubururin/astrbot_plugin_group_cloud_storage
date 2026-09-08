@@ -133,7 +133,7 @@ async def test_files_default_scope_online_accounts_only(monkeypatch):
     """未指定群/账号 → 仅聚合在线账号所属群（离线账号 acc2 的 g2 排除）。"""
     _patch_request(monkeypatch, {})
     svc = _make_services(_groups(), online_ids={"acc1"})
-    result = await api_files(svc)
+    await api_files(svc)
     rq = svc.query.seen[0]
     assert sorted(rq.groups) == ["g1", "g3"]
 
@@ -143,7 +143,7 @@ async def test_files_account_filter_single_account(monkeypatch):
     """指定 account → 仅该账号的群（不再叠加在线过滤）。"""
     _patch_request(monkeypatch, {"account": "acc2"})
     svc = _make_services(_groups(), online_ids={"acc1"})
-    result = await api_files(svc)
+    await api_files(svc)
     rq = svc.query.seen[0]
     assert rq.groups == ["g2"]
 
@@ -153,7 +153,7 @@ async def test_files_explicit_group_keeps_single_scope(monkeypatch):
     """指定群 → 单群查询（groups 聚合条件不启用）。"""
     _patch_request(monkeypatch, {"group": "g2"})
     svc = _make_services(_groups(), online_ids=set())
-    result = await api_files(svc)
+    await api_files(svc)
     rq = svc.query.seen[0]
     assert rq.group_id == "g2"
     assert rq.groups is None
@@ -164,7 +164,7 @@ async def test_files_unknown_online_set_keeps_owned_groups(monkeypatch):
     """在线集合未知（回调未接线）→ 仅保留无账号归属的群（不误隐藏 owned 群）。"""
     _patch_request(monkeypatch, {})
     svc = _make_services(_groups(), online_ids=set())
-    result = await api_files(svc)
+    await api_files(svc)
     rq = svc.query.seen[0]
     assert rq.groups == []
 

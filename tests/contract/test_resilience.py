@@ -23,8 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adapters.limiter.interval import IntervalLimiter  # noqa: E402
 from adapters.onebot.napcat import NapCatApiAdapter  # noqa: E402
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
-from core.domain.enums import CapabilityState, OneBotApiError, OneBotErrorKind, SyncKind, SyncStatus  # noqa: E402
-from core.domain.resource import GroupFile, GroupFileList, GroupFolder  # noqa: E402
+from core.domain.enums import CapabilityState, OneBotApiError, OneBotErrorKind, SyncStatus  # noqa: E402
+from core.domain.resource import GroupFileList  # noqa: E402
 from core.application.sync import ResourceSyncService  # noqa: E402
 from tests.fixtures.fake_onebot import FakeOneBotApi  # noqa: E402
 

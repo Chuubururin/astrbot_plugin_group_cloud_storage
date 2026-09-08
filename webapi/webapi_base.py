@@ -180,4 +180,4 @@ def _normalize_convert_to(value) -> str:
 
 
 # Compatibility exports retained for older imports.
-from .compatibility import Bound as _Bound
+from .compatibility import Bound as _Bound  # noqa: F401  (re-export)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from core.domain.enums import SyncStatus
 from core.application.policies import PermissionService
@@ -11,6 +12,24 @@ from core.application.catalog import ResourceQueryService, StatsService
 from core.application.sync import ResourceSyncService
 from ports.meta_store import MetaStorePort
 from ports.onebot_api import OneBotApiPort
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from core.application.bridge.service import BridgeService
+    from core.application.catalog.storage_planner import StoragePlanner
+    from core.application.catalog.search_kv import SearchKV
+    from core.application.distributor import DistributorService
+    from core.application.download_server import DownloadServerService
+    from core.application.files.converter import ConverterService
+    from core.application.files.service import FileOpsService
+    from core.application.gateway import StorageGateway
+    from core.application.ingest.service import CloudIngestService
+    from core.application.netdisk import NetdiskService
+    from core.application.queue.op_queue import OpQueue
+    from core.application.queue.task_control import TaskControlService
+    from core.application.sync.group_scan.service import GroupScanService
+    from core.application.transfer import TransferService
 
 
 @dataclass
@@ -217,7 +236,6 @@ async def handle_csbridge(
     event, services: Services, action: str = "", task_id: str = ""
 ) -> str:
     """Bridge task management (status/cancel/retry)."""
-    actual_group = event.get_group_id()
     if not services.bridge:
         return _err("Bridge service not configured (openlist_enabled=false).")
 

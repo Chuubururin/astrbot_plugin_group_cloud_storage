@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.domain.enums import CapabilityState
 from core.domain.resource import FileSystemInfo, GroupFileList, GroupMember
 
 

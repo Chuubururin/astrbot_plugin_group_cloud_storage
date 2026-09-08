@@ -12,11 +12,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.application.distributor import DISTRIBUTE_TARGETS, DistributorService  # noqa: E402
+from core.application.distributor import DISTRIBUTE_TARGETS  # noqa: E402
 
 
 # ---------- 目标白名单验证 ----------

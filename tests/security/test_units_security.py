@@ -18,7 +18,6 @@ Run: pytest tests/security/test_units_security.py -v
 
 from __future__ import annotations
 
-import math
 import sys
 import time
 from pathlib import Path
@@ -287,6 +286,6 @@ class TestConfigKeyDoS:
         }))
         elapsed = time.perf_counter() - t0
         assert elapsed < 1.0, f"validate_config took {elapsed:.2f}s on {val[:20]!r}"
-        for key, msg in warnings.items():
+        for _key, msg in warnings.items():
             assert isinstance(msg, str)
             assert len(msg) < 500

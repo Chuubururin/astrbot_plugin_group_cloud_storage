@@ -280,7 +280,6 @@ async def test_scan_chaining_dedupes_repeated_groups(store):
 @pytest.mark.asyncio
 async def test_scan_chaining_skips_undetermined_new_group(store):
     """新群角色未判定（judge 失败）→ 不接续 file_scan（可能属于其他账号）。"""
-    from core.domain.resource import GroupMember
 
     api = FakeOneBotApi(
         tree={None: ([], [])},

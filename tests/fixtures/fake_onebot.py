@@ -265,7 +265,7 @@ def build_tree(file_total: int, folder_total: int, files_per_folder: int = 20):
     for i in range(folder_total):
         fid = f"folder_{i}"
         files = []
-        for j in range(files_per_folder):
+        for _j in range(files_per_folder):
             seq += 1
             files.append(
                 dict(

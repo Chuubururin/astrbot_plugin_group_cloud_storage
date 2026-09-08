@@ -371,11 +371,11 @@ class DistributorService:
         img_path = self.tmp_dir / f"ess_{group_id}_{rid}_{int(time.time())}.png"
         try:
             from PIL import Image, ImageDraw, ImageFont
-        except ImportError:
+        except ImportError as e:
             raise RuntimeError(
                 "Pillow (PIL) is required for rendering essence text to image. "
                 "Install it with: pip install Pillow"
-            )
+            ) from e
         # Compute the canvas size dynamically
         lines = text.split("\n")
         font_size = 16

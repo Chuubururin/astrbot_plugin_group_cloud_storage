@@ -29,7 +29,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import parse_qs, urlparse, quote as urlquote
+from urllib.parse import parse_qs, quote, urlparse
 
 from core.config import PluginConfig
 from core.log import logger
@@ -284,13 +284,12 @@ class DownloadServerService:
                 src_path = Path(entry["path"])
                 name = _safe_header_name(entry["name"])
                 total = src_path.stat().st_size
-                from urllib.parse import quote as _q
 
                 head = (
                     "HTTP/1.1 200 OK\r\n"
                     "Content-Type: text/plain; charset=utf-8\r\n"
                     f"Content-Length: {total}\r\n"
-                    f"Content-Disposition: attachment; filename*=UTF-8''{urlquote(name)}\r\n"
+                    f"Content-Disposition: attachment; filename*=UTF-8''{quote(name)}\r\n"
                     "Connection: close\r\n\r\n"
                 ).encode("latin-1")
                 writer.write(head)
@@ -325,7 +324,7 @@ class DownloadServerService:
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/octet-stream\r\n"
                 f"Content-Length: {total}\r\n"
-                f"Content-Disposition: attachment; filename*=UTF-8''{urlquote(name)}\r\n"
+                f"Content-Disposition: attachment; filename*=UTF-8''{quote(name)}\r\n"
                 "Connection: close\r\n\r\n"
             ).encode("latin-1")
             writer.write(head)

@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -17,8 +16,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
-from core.domain.enums import ResourceType  # noqa: E402
-from core.domain.resource import Resource  # noqa: E402
 from core.application.queue import OpQueue  # noqa: E402
 from core.application.transfer import TransferService  # noqa: E402
 
@@ -79,6 +76,9 @@ def test_download_to_http(env):
 
 
 def test_download_to_sftp_stub(env, monkeypatch):
+    # 插件零第三方依赖：sftp 适配器库层惰性导入 paramiko；打桩测试在宿主
+    # 未装 paramiko 时跳过（与 test_download_to_smb_stub 的 importorskip 一致）
+    pytest.importorskip("paramiko")
     tmp_path, store, queue, svc = env
     captured = {}
 
@@ -93,7 +93,8 @@ def test_download_to_sftp_stub(env, monkeypatch):
         def load_system_host_keys(self): pass
         def set_missing_host_key_policy(self, policy): pass
         def connect(self, host, port, username, password, timeout, **kw):
-            captured["host"] = host; captured["port"] = port
+            captured["host"] = host
+            captured["port"] = port
         def open_sftp(self): return FakeSFTPClient()
         def close(self): pass
 
@@ -101,7 +102,7 @@ def test_download_to_sftp_stub(env, monkeypatch):
     monkeypatch.setattr(paramiko, "SSHClient", FakeSSHClient)
     dest = tmp_path / "f.bin"
     dest.write_bytes(b"SFTPDATA")
-    n = asyncio.run(svc.download_to(
+    asyncio.run(svc.download_to(
         "sftp://u:p@127.0.0.1:2222/file.bin", dest))
     assert captured["host"] == "127.0.0.1" and captured["port"] == 2222
 
@@ -115,9 +116,12 @@ def test_download_to_smb_stub(env, monkeypatch):
 
     class FakeConn:
         def __init__(self, *a, **kw): pass
-        def connect(self, host, port, timeout): captured["host"] = host; return True
+        def connect(self, host, port, timeout):
+            captured["host"] = host
+            return True
         def retrieveFile(self, share, path, fh, timeout):
-            captured["share"] = share; captured["path"] = path
+            captured["share"] = share
+            captured["path"] = path
             fh.write(b"SMBDATA")
         def close(self): pass
 

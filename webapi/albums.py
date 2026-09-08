@@ -93,7 +93,7 @@ async def api_album_media(s: Services) -> dict:
             return error_response(
                 "云端相册媒体拉取超时（QQ 会话退化或网络波动），请稍后重试", status_code=504
             )
-        except Exception as e:
+        except Exception:
             # One self-heal attempt: refresh the album ID from the live list
             # (stale meta) and retry once with the corrected or existing ID.
             fresh = await _refresh_album_id(s, group, row, album_id)

@@ -150,10 +150,10 @@ class VideoMixin:
                 self.api.get_group_album_media_list(group_id, album_id),
                 timeout=CLOUD_CALL_TIMEOUT,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             raise TimeoutError(
                 "云端相册媒体拉取超时（QQ 会话退化或网络波动），请稍后重试"
-            )
+            ) from e
 
         entry = None
         if name:

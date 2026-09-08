@@ -36,7 +36,6 @@ class VolumeMixin:
         per-volume sha256 covers the uploaded (zipped) bytes and
         meta.total_sha256 covers the reassembled original content.
         """
-        import hashlib
         import zipfile
 
         # Pass 1: split the raw source into slices (CPU-bound: offload to thread)
@@ -68,14 +67,15 @@ class VolumeMixin:
         stem = Path(name).stem or "file"
         volumes: list[VolumeInfo] = []
 
-        for seq, raw, raw_size, _raw_sha in slices:
+        for seq, raw, _raw_size, _raw_sha in slices:
             part_name = f"{stem}.part{seq:02d}of{total_count:02d}.zip"
             zpath = cut_dir / part_name
 
-            # Compress + hash (CPU-bound: offload to thread)
-            def _compress_and_hash(_raw: Path = raw, _zpath: Path = zpath) -> tuple[int, str]:
+            # Compress + hash (CPU-bound: offload to thread). seq/stem/total_count
+            # are bound via default args so the closure sees this iteration's values.
+            def _compress_and_hash(_raw: Path = raw, _zpath: Path = zpath, _seq: int = seq) -> tuple[int, str]:
                 with zipfile.ZipFile(_zpath, "w", zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(_raw, arcname=f"{stem}.part{seq:02d}of{total_count:02d}")
+                    zf.write(_raw, arcname=f"{stem}.part{_seq:02d}of{total_count:02d}")
                 _raw.unlink(missing_ok=True)
                 zsize = _zpath.stat().st_size
                 sha = hashlib.sha256(_zpath.read_bytes()).hexdigest()

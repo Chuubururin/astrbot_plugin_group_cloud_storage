@@ -5,7 +5,6 @@ DistributorService 统一分发编排（文件/相册/精华/网盘 × 目标）
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 

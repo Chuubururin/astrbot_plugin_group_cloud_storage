@@ -92,7 +92,7 @@ class StorageGateway:
         """Capability description (programmatic self-description)."""
         return {
             "cloud": "OneBot/NapCat（会话句柄转义 + 能力探测 + OpQueue 限速）",
-            "local": f"SQLite schema v10（path/ext 文件系统化 + v_resources 视图）",
+            "local": "SQLite schema v10（path/ext 文件系统化 + v_resources 视图）",
             "external": {
                 "egress": ["http-put", "sftp", "smb"] if self.transfer else [],
                 "http_download": bool(self.dlserver and self.dlserver.http_port),

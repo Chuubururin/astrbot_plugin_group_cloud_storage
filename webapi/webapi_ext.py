@@ -9,7 +9,6 @@ from __future__ import annotations
 from .webapi_base import (
     PLUGIN_NAME,
     _Bound,
-    _ensure_ready,
     _group_open_error,
     _normalize_convert_to,
     _param,

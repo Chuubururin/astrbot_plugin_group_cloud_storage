@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,7 +87,7 @@ async def test_deep_index_recursive_and_progress(env):
     async def _handler(op):
         await ns.netdisk.handle_index(op)
 
-    seen_ops: list = []
+    _seen_ops: list = []
 
     class _Op:
         kind = "netdisk_index"

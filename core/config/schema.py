@@ -47,7 +47,7 @@ def validate_config(data: dict) -> list[tuple[str, str]]:
         )
     # Semantic: string-unit size keys must parse ("95MB", "2GB", base 1000);
     # bare numbers are read as MB. Unparseable values warn (never block).
-    for key, floor_hint in (
+    for key, _floor_hint in (
         ("volume_threshold", "10MB"),
         ("fetch_max_size", "1MB"),
         ("bridge_min_size", None),

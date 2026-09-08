@@ -79,7 +79,7 @@ class NetdiskService:
             m["remote_path"]: m for m in await self._store.get_netdisk_meta(prefix)
         }
         items = []
-        for f, row in zip(files, rows):
+        for f, row in zip(files, rows, strict=False):
             meta = metas.get(row["remote_path"], {})
             items.append(
                 {

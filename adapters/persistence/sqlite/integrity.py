@@ -31,7 +31,8 @@ class IntegrityMixin(StorePart):
             try:
                 src.backup(dst)
             finally:
-                dst.close(); src.close()
+                dst.close()
+                src.close()
         await asyncio.to_thread(_copy)
         return {"ok": True, "path": str(destination)}
 
@@ -45,7 +46,8 @@ class IntegrityMixin(StorePart):
             try:
                 src.backup(dst)
             finally:
-                dst.close(); src.close()
+                dst.close()
+                src.close()
         await asyncio.to_thread(_copy)
         return {"ok": True, "path": str(self._db_path)}
 

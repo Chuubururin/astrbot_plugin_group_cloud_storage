@@ -739,7 +739,6 @@ class TestArchiveMapMigration:
         s = SqliteMetaStore(tmp_path / "meta.db")
         await s.init()
 
-        import sqlite3
         conn = sqlite3.connect(tmp_path / "meta.db")
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -758,7 +757,6 @@ class TestArchiveMapMigration:
         from adapters.persistence.sqlite import SqliteMetaStore
         from adapters.persistence.sqlite.migrations import MIGRATIONS as _MIGRATIONS, SCHEMA_VERSION as _SCHEMA_VERSION
 
-        import sqlite3
 
         db = tmp_path / "meta.db"
         conn = sqlite3.connect(db)
@@ -797,7 +795,6 @@ class TestArchiveMapMigration:
         await s.init()
         await s.init()  # Second init should not fail
 
-        import sqlite3
         conn = sqlite3.connect(tmp_path / "meta.db")
         ver = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert ver == _SCHEMA_VERSION

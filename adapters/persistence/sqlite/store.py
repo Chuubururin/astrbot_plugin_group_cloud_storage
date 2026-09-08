@@ -15,7 +15,6 @@ import tempfile
 import time
 
 from core.log import logger
-from ports.meta_store import MetaStorePort
 
 from .connection import ConnectionManager
 from .state import SharedState

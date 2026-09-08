@@ -66,7 +66,7 @@ for _name, _module in (
 ):
     sys.modules.setdefault(_name, _module)
 
-import pytest
+import pytest  # noqa: E402  (after the stub modules above)
 
 pytest_plugins = []
 

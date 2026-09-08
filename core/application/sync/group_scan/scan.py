@@ -15,8 +15,8 @@ class ScanMixin:
         stall the whole scan round (surfaces as a TimeoutError)."""
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"call timeout after {timeout}s")
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"call timeout after {timeout}s") from e
 
     async def scan_owned(
         self,
@@ -349,6 +349,7 @@ class ScanMixin:
                         used_space=cap_used,
                         total_space=cap_total,
                         file_count=cap_count,
+                        limit_count=cap_limit,
                         album_count=album_c if need else prev.album_count,
                         essence_count=essence_c if need else prev.essence_count,
                         account_id=me,

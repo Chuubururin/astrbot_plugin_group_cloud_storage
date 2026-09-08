@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from commands.handlers import Services
+    pass
 
 
 # Type alias for the command handler services

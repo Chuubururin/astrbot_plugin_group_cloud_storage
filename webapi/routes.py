@@ -8,8 +8,8 @@ from __future__ import annotations
 PLUGIN_NAME = "astrbot_plugin_group_cloud_storage"
 
 # Route definitions: (suffix, methods, handler, description, auth)
-from dataclasses import dataclass
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable  # noqa: E402  (constants first for readability)
+from dataclasses import dataclass  # noqa: E402
 
 
 @dataclass(frozen=True)

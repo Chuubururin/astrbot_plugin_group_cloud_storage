@@ -8,7 +8,6 @@ Run: pytest tests/contract/test_webapi_tasks.py -v
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,9 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import webapi  # noqa: E402
-import webapi.webapi as _wp  # noqa: E402
 import core.api_validate as _av  # noqa: E402
-from core.api_validate import ApiValidationError  # noqa: E402
 from webapi.tasks import (
     api_tasks,
     api_tasks_queue,
@@ -188,7 +185,7 @@ class TestApiTasks:
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
             {"state": "running", "kind": "move_file", "limit": 10, "offset": 5}
         ))
-        result = await api_tasks(svc)
+        await api_tasks(svc)
         call_kw = svc.task_control.calls[-1][1]
         assert call_kw["state"] == "running"
         assert call_kw["kind"] == "move_file"
@@ -319,7 +316,7 @@ class TestApiTasksUndo:
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
             {"group_id": "g1", "id": 42}
         ))
-        result = await api_tasks_undo(svc)
+        await api_tasks_undo(svc)
         call_kw = [c for c in svc.task_control.calls if c[0] == "undo"][-1][1]
         assert call_kw["group_id"] == "g1"
         assert call_kw["resource_id"] == 42

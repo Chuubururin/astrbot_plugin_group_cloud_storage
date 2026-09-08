@@ -200,7 +200,7 @@ class PlatformBotResolver:
                 except Exception:
                     # account_id could not be fetched for this stale bot
                     logger.debug(
-                        f"[group_cloud_storage] cannot get account_id for stale bot"
+                        "[group_cloud_storage] cannot get account_id for stale bot"
                     )
         self.bots = alive
         # Also clean up the preferred/last references

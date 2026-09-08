@@ -164,7 +164,7 @@ def _check_dns(
     try:
         # Blocking DNS resolution; callers should use asyncio.to_thread
         infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        for family, _, _, _, sockaddr in infos:
+        for _family, _, _, _, sockaddr in infos:
             ip_str = sockaddr[0]
             try:
                 ip = ipaddress.ip_address(ip_str)
@@ -174,7 +174,7 @@ def _check_dns(
     except socket.gaierror as e:
         raise ExternalApiError(
             "openlist", f"DNS resolution failed for {hostname}: {e}. Received: {url}"
-        )
+        ) from e
 
 
 def assert_fetch_url_allowed(
@@ -248,9 +248,9 @@ def resolve_and_pin_ip(
     except socket.gaierror as e:
         raise ExternalApiError(
             "openlist", f"DNS resolution failed for {hostname}: {e}. Received: {url}"
-        )
+        ) from e
     pinned_ip: str | None = None
-    for family, _, _, _, sockaddr in infos:
+    for _family, _, _, _, sockaddr in infos:
         ip_str = sockaddr[0]
         try:
             ip = ipaddress.ip_address(ip_str)

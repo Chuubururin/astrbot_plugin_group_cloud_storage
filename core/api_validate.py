@@ -90,8 +90,8 @@ def pick(
     else:
         try:
             converted = cast(value)
-        except (TypeError, ValueError):
-            raise ApiValidationError(f"{prefix} 无效: 期望 {cast.__name__}")
+        except (TypeError, ValueError) as e:
+            raise ApiValidationError(f"{prefix} 无效: 期望 {cast.__name__}") from e
 
     if not empty_allowed and isinstance(converted, (str, list)) and not converted:
         raise ApiValidationError(f"{prefix} 无效: 不能为空")
@@ -111,5 +111,5 @@ def qi(value, field: str = "id", default: int = 0) -> int:
         return default
     try:
         return int(text)
-    except (TypeError, ValueError):
-        raise ApiValidationError(f"字段 '{field}' 无效: 期望整数")
+    except (TypeError, ValueError) as e:
+        raise ApiValidationError(f"字段 '{field}' 无效: 期望整数") from e

@@ -11,9 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from adapters.persistence.sqlite.migrations import SCHEMA_VERSION as _SCHEMA_VERSION  # noqa: E402
-from core.domain.enums import ResourceStatus, ResourceType, SyncKind, SyncStatus  # noqa: E402
+from core.domain.enums import ResourceType, SyncKind, SyncStatus  # noqa: E402
 from core.domain.resource import Resource  # noqa: E402
-from core.domain.sync import ResourceQuery, Snapshot, SyncLog, SyncResult  # noqa: E402
+from core.domain.sync import ResourceQuery, SyncLog, SyncResult  # noqa: E402
 
 
 @pytest.fixture

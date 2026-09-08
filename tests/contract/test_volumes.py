@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import os
 import sys
 import time
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -20,10 +18,6 @@ from core.domain.enums import ResourceType  # noqa: E402
 from core.domain.resource import Resource  # noqa: E402
 from core.domain.sync import GroupInfo  # noqa: E402
 from core.application.files import FileOpsService  # noqa: E402
-from core.application.files.consts import (  # noqa: E402
-    CHUNK_THRESHOLD_BYTES,
-    VOLUME_SIZE_BYTES,
-)
 from core.application.queue import OpQueue  # noqa: E402
 from core.application.sync import ResourceSyncService  # noqa: E402
 from core.application.catalog import StoragePlanner  # noqa: E402
@@ -82,7 +76,6 @@ async def test_volume_upload_cut_and_upload(env, monkeypatch):
     assert len(vol_calls) == 4, vol_calls
     assert all(c.endswith(".zip") for c in vol_calls)
     # volumes 表注册 + uploaded
-    from core.domain.sync import VolumeInfo
 
     # 通过资源查询父 resource_id
     page = await store.query_resources(
@@ -158,7 +151,6 @@ async def test_volume_download_recombine(env, monkeypatch):
 async def test_backfill_volume_refs(env):
     """同步后按 part 文件名回填卷 source_ref（上传接口不返回 file_id）。"""
     tmp_path, store, api, queue, ops = env
-    from core.domain.sync import ResourceQuery
 
     # 模拟：父资源 + 两卷已上传；同步后 resources 中出现 part 文件（fake 树）
     parent = "g1:file:volgroup:test"
@@ -188,7 +180,7 @@ async def test_backfill_volume_refs(env):
 async def test_event_driven_volume_backfill(env):
     """group_upload 事件驱动：part 文件事件自动回填未就绪分卷引用。"""
     tmp_path, store, api, queue, ops = env
-    from core.domain.sync import VolumeInfo, ResourceQuery
+    from core.domain.sync import VolumeInfo
     from core.application.sync import ResourceSyncService
 
     parent = "g1:file:volgroup:evt"
@@ -306,7 +298,6 @@ def test_capacity_stats_aggregate():
 async def test_folders_persist_and_searchkv(tmp_path):
     from adapters.persistence.sqlite import SqliteMetaStore
     from core.application.catalog import SearchKV
-    from core.domain.sync import ResourceQuery
 
     store = SqliteMetaStore(tmp_path / "f.db")
     await store.init()
@@ -446,7 +437,7 @@ async def test_convert_volumes_payload_always_zip(env, monkeypatch):
     src = tmp_path / "big.bin"
     src.write_bytes(b"x" * 12000)
     payloads = []
-    orig = ops.queue.submit
+    _orig = ops.queue.submit
 
     async def _capture(kind, target="", payload=None, account=None):
         payloads.append(payload or {})
@@ -505,7 +496,7 @@ async def test_sweep_convert_volumes_submits_over_threshold(env, monkeypatch):
         ]
     )
     page = await store.query_resources(ResourceQuery(group_id="g1", page_size=5))
-    big_id = next(i.id for i in page.items if i.name == "big.bin")
+    _big_id = next(i.id for i in page.items if i.name == "big.bin")
 
     n = await ops.sweep_convert_volumes("g1")
     assert n == 1  # 仅 big.bin（small 低于阈值；vol.7z 已是组合形态）

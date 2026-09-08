@@ -12,7 +12,6 @@ import re
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -161,7 +160,7 @@ class TestFrontendBackendContract:
             if path not in routes and not any(r.startswith(path + '/') for r in routes):
                 missing.append(f"{name} -> '{path}'")
         assert not missing, (
-            f"Frontend constants with no backend route:\n"
+            "Frontend constants with no backend route:\n"
             + "\n".join(missing)
         )
 
@@ -183,7 +182,7 @@ class TestFrontendBackendContract:
         if missing:
             # Only fail if more than expected internal routes are missing
             assert len(missing) <= 15, (
-                f"Backend routes with no frontend constant (>5):\n"
+                "Backend routes with no frontend constant (>5):\n"
                 + "\n".join(missing[:10])
             )
 
@@ -234,7 +233,6 @@ class TestFrontendBackendContract:
 
     def test_files_endpoints_contract(self):
         """Files API constants must match backend registration."""
-        consts = _parse_api_constants_v2()
         routes = _collect_routes()
         expected_files = [
             'files', 'files/detail', 'files/upload/prepare', 'files/upload/<token>',
@@ -250,7 +248,6 @@ class TestFrontendBackendContract:
 
     def test_groups_endpoints_contract(self):
         """Groups API constants must match backend registration."""
-        consts = _parse_api_constants_v2()
         routes = _collect_routes()
         expected_groups = [
             'groups', 'groups/scan', 'groups/batch', 'groups/batch-ops',
@@ -261,7 +258,6 @@ class TestFrontendBackendContract:
 
     def test_bridge_endpoints_contract(self):
         """Bridge/Netdisk API constants must match backend registration."""
-        consts = _parse_api_constants_v2()
         routes = _collect_routes()
         expected_bridge = [
             'bridge/status', 'bridge/transfer', 'bridge/transfer-in',

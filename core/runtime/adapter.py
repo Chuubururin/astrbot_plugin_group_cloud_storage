@@ -41,11 +41,13 @@ class RuntimeAdapter:
         components = build_components(bind_call_action=self._bind_call_action, run_handler=self._op_handler,
             ready=self._ensure_init, config=self.config, data_dir=self.data_dir,
             on_account_resolved=self._on_account_resolved, get_online_account_ids=self._get_online_account_ids)
-        for key, value in components.items(): setattr(self, key, value)
+        for key, value in components.items():
+            setattr(self, key, value)
         self._runtime_kernel = RuntimeKernel(self.services)
         required = ("store", "api", "sync", "queue", "scan", "ops", "transfer", "ingest", "dlserver", "gateway", "task_control", "services", "auto_scan_hours")
         missing = [key for key in required if not hasattr(self, key)]
-        if missing: raise RuntimeError(f"bootstrap components missing: {missing}")
+        if missing:
+            raise RuntimeError(f"bootstrap components missing: {missing}")
         self._lifecycle = LifecycleManager(self._runtime_kernel, resolver=self._resolver, store=self.store, queue=self.queue,
             dlserver=self.dlserver, bridge=getattr(self, "bridge", None), openlist_client=getattr(self, "openlist_client", None),
             config=self.config, auto_scan_hours=self.auto_scan_hours, platform_bots_ref=self._platform_bots)
@@ -64,8 +66,11 @@ class RuntimeAdapter:
         logger.info("[group_cloud_storage] page apis registered (storage)")
 
     def _create_runtime_task(self, coro, *, name):
-        task = asyncio.create_task(coro, name=name); self._tasks.add(task); task.add_done_callback(self._tasks.discard)
-        if self._runtime_kernel: self._runtime_kernel.track_task(task)
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        if self._runtime_kernel:
+            self._runtime_kernel.track_task(task)
         return task
 
     async def _ensure_init(self):
@@ -80,17 +85,22 @@ class RuntimeAdapter:
             or self._resolver.bot_for_account(account_var.get())
             or self._resolver.best_bot()
         )
-        if bot is None: raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, action, "no onebot bot in current context")
+        if bot is None:
+            raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, action, "no onebot bot in current context")
         await self._api_limiter.acquire(mult=interval_mult(action), account=str(id(bot)))
         return await bot.call_action(action, **params)
 
     @contextlib.asynccontextmanager
     async def _bot_scope(self, event):
         bot = getattr(event, "bot", None)
-        if bot is not None: self._last_bot = bot; self._resolver.register_bot(bot)
+        if bot is not None:
+            self._last_bot = bot
+            self._resolver.register_bot(bot)
         token = _bot_var.set(bot)
-        try: yield
-        finally: _bot_var.reset(token)
+        try:
+            yield
+        finally:
+            _bot_var.reset(token)
 
     def _get_online_account_ids(self): return self._resolver.get_online_account_ids()
 
@@ -113,7 +123,12 @@ class RuntimeAdapter:
             except Exception as e:
                 logger.debug(f"[group_cloud_storage] post-online rescan queue failed: {e}")
 
-    async def _op_handler(self, op): await self._dispatch.handle(op)
+    async def _op_handler(self, op):
+        await self._dispatch.handle(op)
+
     async def _ensure_ready(self):
-        if not self._lifecycle._inited: await self._ensure_init()
-    async def terminate(self): await self._lifecycle.terminate()
+        if not self._lifecycle._inited:
+            await self._ensure_init()
+
+    async def terminate(self):
+        await self._lifecycle.terminate()

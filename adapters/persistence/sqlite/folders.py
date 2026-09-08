@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sqlite3
-import time
 from typing import TYPE_CHECKING
 
 from .state import StorePart
@@ -18,8 +17,8 @@ class FoldersMixin(StorePart):
     """Folder and album/essence operations."""
 
     if TYPE_CHECKING:
-        _conn: "ConnectionManager"
-        upsert_resources: "method"
+        _conn: ConnectionManager
+        upsert_resources: object  # provided by ResourcesMixin at runtime
 
     async def upsert_folders(self, group_id: str, folders) -> None:
         def _do(conn: sqlite3.Connection):

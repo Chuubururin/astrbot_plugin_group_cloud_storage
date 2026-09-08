@@ -19,11 +19,8 @@ import httpx
 from core.log import logger
 
 from .base import (
-    ErrorKind,
     ExternalApiError,
     OpenListApiError,
-    classify_error,
-    normalize_task_state,
     validate_base_url,
 )
 
@@ -267,7 +264,7 @@ class OpenListClient:
                     "openlist",
                     f"Re-login and retry failed: {e}",
                     code=resp.status_code,
-                )
+                ) from e
 
         # Check HTTP status
         if resp.status_code >= 400:
@@ -280,7 +277,7 @@ class OpenListClient:
         try:
             data = resp.json()
         except Exception as e:
-            raise OpenListApiError(f"Invalid JSON response: {e}")
+            raise OpenListApiError(f"Invalid JSON response: {e}") from e
 
         # Check envelope code
         code = data.get("code")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -14,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.application.composition import (  # noqa: E402
     decode_composition, encode_composition, is_composite,
-    reassemble_text, reassemble_volumes, sha256_bytes, split_text)
+    reassemble_text, split_text)
 
 
 # ---------- spec ----------

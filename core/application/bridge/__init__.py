@@ -13,9 +13,9 @@ from __future__ import annotations
 import secrets
 import string
 
-from core.application.common import path_basename as _basename
-from core.application.common import split_ext as _split_ext
-from core.application.common import utc_now_iso as _now
+from core.application.common import path_basename as _basename  # noqa: F401  (re-export)
+from core.application.common import split_ext as _split_ext  # noqa: F401  (re-export)
+from core.application.common import utc_now_iso as _now  # noqa: F401  (re-export)
 
 
 def _short_suffix() -> str:
@@ -23,10 +23,10 @@ def _short_suffix() -> str:
     return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(4))
 
 
-from .submit import SubmitMixin
-from .inbound import InboundMixin
-from .polling import PollingMixin
-from .recovery import RecoveryMixin
-from .service import BridgeService
+from .inbound import InboundMixin  # noqa: E402  (needs the aliases above)
+from .polling import PollingMixin  # noqa: E402
+from .recovery import RecoveryMixin  # noqa: E402
+from .service import BridgeService  # noqa: E402
+from .submit import SubmitMixin  # noqa: E402
 
 __all__ = ["SubmitMixin", "InboundMixin", "PollingMixin", "RecoveryMixin", "BridgeService"]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -343,7 +342,6 @@ async def test_video_recon_concat(env, monkeypatch):
     from core.domain.resource import Resource
     from core.domain.enums import ResourceType as RT
     from core.domain.sync import VolumeInfo
-    import json
 
     await store.upsert_resources([Resource(
         group_id="g1", type=RT.FILE, name="movie.mp4",
@@ -362,7 +360,6 @@ async def test_video_recon_concat(env, monkeypatch):
                    sha256=_h2.sha256(b"BBBB").hexdigest(),
                    status="uploaded", source_ref="f2", busid=1),
     ])
-    import hashlib as _hl
 
     detail = await store.get_resource_detail("g1", 1)
     assert detail and detail["resource_id"] == "g1:file:vidgroup:x"
@@ -577,7 +574,7 @@ async def test_video_album_splits_and_uploads(env):
         capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0
     tid = await ingest.submit_video_album("g1", src.as_posix(), "v.mp4", "测试相册")
-    await drain_op(queue := ingest.queue, tid)
+    await drain_op(ingest.queue, tid)
     assert len(api.album_uploads) >= 1
     assert api.album_uploads[0]["album_name"] == "测试相册"
     assert "get_qun_album_list" in " ".join(api.calls)
@@ -591,7 +588,7 @@ async def test_image_album_single_upload(env):
     src = tmp_path / "pic.png"
     src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
     tid = await ingest.submit_image_album("g1", src.as_posix(), "pic.png", "测试相册")
-    await drain_op(queue := ingest.queue, tid)
+    await drain_op(ingest.queue, tid)
     assert len(api.album_uploads) >= 1
     assert api.album_uploads[0]["album_name"] == "测试相册"
     assert "get_qun_album_list" in " ".join(api.calls)
@@ -609,7 +606,7 @@ async def test_fetch_to_essence_url_doc(env):
 
     ingest.transfer = type("T", (), {"download_to": fake_download})()
     tid = await ingest.submit_fetch("g1", "https://example.com/doc.txt", name="doc.txt", to_essence=True)
-    await drain_op(queue := ingest.queue, tid)
+    await drain_op(ingest.queue, tid)
     # 精华保存后资源目录有 kind=essence 行（name 同步）
     page = await store.query_resources(
         __import__("core.domain.sync", fromlist=["ResourceQuery"]).ResourceQuery(

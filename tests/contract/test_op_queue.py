@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.application.queue import Op, OpCancelError, OpQueue  # noqa: E402
+from core.application.queue import Op, OpQueue  # noqa: E402
 
 
 class _Recorder:
@@ -53,7 +53,7 @@ async def test_rate_limited_execution():
     await _drain(q, 3)
     assert len(rec.times) == 3
     # 相邻执行间隔 ≥ interval（容差 15ms）
-    gaps = [b - a for a, b in zip(rec.times, rec.times[1:])]
+    gaps = [b - a for a, b in zip(rec.times, rec.times[1:], strict=False)]
     assert all(g >= 0.045 for g in gaps), gaps
     await q.shutdown()
 
@@ -128,7 +128,7 @@ async def test_cancel_skips_queued_op():
     rec = _Recorder()
     q = OpQueue(rec.run, interval=0.2)  # 限速让第 2 个任务留在队列
     await q.start()
-    tid1 = await q.submit("first")
+    await q.submit("first")
     tid2 = await q.submit("second")
     # second 已出队进入限速等待（running）→ 取消位生效，等待后跳过执行
     assert q.cancel_task(tid2) is True

@@ -19,7 +19,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import webapi  # noqa: E402
-import core.api_validate as _av  # noqa: E402
 from webapi import webapi as _wp  # noqa: E402
 
 

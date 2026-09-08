@@ -434,8 +434,6 @@ class TestSchemaVersion:
     """Schema version in migrations.py should match expected."""
 
     def test_schema_version(self):
-        migrations = ROOT / "adapters" / "persistence" / "sqlite" / "migrations.py"
-        content = migrations.read_text(encoding="utf-8")
         import importlib
         from adapters.persistence.sqlite import migrations as _m
         importlib.reload(_m)

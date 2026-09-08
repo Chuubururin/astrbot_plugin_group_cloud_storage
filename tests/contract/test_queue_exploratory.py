@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from core.application.queue import Op, OpCancelError, OpPausedError, OpQueue
+from core.application.queue import Op, OpPausedError, OpQueue
 from core.application.queue.op import BULK_KINDS, DEFAULT_HIGH_PRIORITY
 
 
@@ -77,7 +77,7 @@ async def test_i1_concurrent_submit_cancel_interleave():
         term = _Terminal()
         q = _tracking_queue(term)
         ids = []
-        for i in range(30):
+        for _i in range(30):
             tid = await q.submit("scan" if nxt() < 0.7 else "delete")
             ids.append(tid)
             if nxt() < 0.3:
@@ -105,7 +105,7 @@ async def test_i2_cancel_during_pause_suspend_reaches_terminal():
     q.pause_task(tid)  # 排队挂起（同步方法）
     # 等 worker 取出并挂起（占位→真实 Op）
     for _ in range(100):
-        st = await q.status()
+        await q.status()
         if q._paused.get(tid) is not None:
             break
         await asyncio.sleep(0.02)

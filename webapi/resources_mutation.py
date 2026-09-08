@@ -1,7 +1,6 @@
 """Resource mutation and delivery handlers."""
 from __future__ import annotations
 import json
-from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 try:

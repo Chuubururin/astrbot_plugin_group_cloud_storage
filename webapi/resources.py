@@ -25,7 +25,6 @@ from core.api_validate import json_body
 from core.domain.file_type import classify_with_overrides, type_exts_with_overrides
 from core.domain.sync import ResourceQuery
 from .webapi_base import (
-    _normalize_convert_to,
     _param,
     _is_image_name,
     _managed_groups_cached,
@@ -380,7 +379,7 @@ async def api_file_upload_prepare(s: Services) -> dict:
     album_name = str(payload.get("album_name") or "AstrBot云盘").strip()
     # Upload format conversion (convert_to = target extension; empty = keep original)
     convert_to = str(payload.get("convert_to") or "").strip().lstrip(".")
-    if convert_to and not ("." + convert_to).lower() in (
+    if convert_to and ("." + convert_to).lower() not in (
         ".mp4", ".mkv", ".webm", ".png", ".jpg", ".jpeg", ".webp",
     ):
         return error_response(
@@ -428,7 +427,6 @@ async def api_file_upload(s: Services, token: str) -> dict:
     group = meta["group"]
     name = meta["name"]
     folder = meta["folder"]
-    form = await request.form()
     files = await request.files()
     upload: PluginUploadFile | None = files.get("file")
     if not isinstance(upload, PluginUploadFile):
@@ -528,7 +526,7 @@ async def api_file_upload(s: Services, token: str) -> dict:
     if meta.get("mode") == "image":
         if not _is_image_name(name or safe_name):
             return error_response(
-                f"image mode only accepts image extensions", status_code=400
+                "image mode only accepts image extensions", status_code=400
             )
         task_id = await s.ingest.submit_image_album(
             group,
@@ -544,13 +542,3 @@ async def api_file_upload(s: Services, token: str) -> dict:
 
 
 
-from .resources_mutation import (
-    api_file_tags, api_tagcloud, api_file_delete, api_file_replace_name,
-    api_file_convert_volumes,
-    api_file_move, api_file_uri, api_file_link, api_download_address,
-    api_folder_create, api_folder_delete, api_folder_rename,
-    api_file_download, api_files_scan, api_files_sync,
-    api_file_detail,
-    api_files_batch_delete, api_files_batch_move, api_files_batch_tags,
-    api_files_links,
-)
