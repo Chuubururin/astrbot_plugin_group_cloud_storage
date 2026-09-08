@@ -96,20 +96,20 @@ jobs:
           number="${{ steps.pr.outputs.number }}"
           deadline=$(( $(date +%s) + 900 ))
           while :; do
+            # 按名字判断：只关心 ci.yml 的四个必过检查；promote 自身也会
+            # 出现在 gh pr checks 输出里，必须排除，否则自己拦自己。
             out="$(gh pr checks "$number" 2>&1)" && state="ok" || state="pending"
             echo "$out"
-            if [[ "$state" == "ok" ]]; then
-              if echo "$out" | grep -qE '\bfail\b'; then
-                echo "::error::PR #$number 存在失败检查，保留 PR 供排查"
-                exit 1
-              fi
-              echo "全部检查通过"
-              exit 0
-            fi
-            # pending 状态：区分「尚无检查上报」与「有检查失败」
-            if echo "$out" | grep -qE '\bfail\b'; then
-              echo "::error::PR #$number 存在失败检查，保留 PR 供排查"
+            relevant="$(echo "$out" | grep -vE '^promote\b' || true)"
+            failed="$(echo "$relevant" | grep -E '\bfail\b' || true)"
+            pending="$(echo "$relevant" | grep -E '\bpending\b' || true)"
+            if [[ -n "$failed" ]]; then
+              echo "::error::PR #$number 存在失败检查：$failed"
               exit 1
+            fi
+            if [[ "$state" == "ok" && -z "$pending" ]]; then
+              echo "全部必过检查通过"
+              exit 0
             fi
             if (( $(date +%s) > deadline )); then
               echo "::error::等待检查超时（15 分钟），保留 PR 供排查"
