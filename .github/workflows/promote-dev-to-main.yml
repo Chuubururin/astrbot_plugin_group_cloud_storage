@@ -84,8 +84,8 @@ jobs:
           - CI 由 \`push: dev\` 触发（与 head 同 SHA），全绿后自动合并"
           number="$(printf '%s\n' "$body" | gh pr create --base main --head dev \
             --title "chore: promote dev → main ($(git rev-parse --short origin/dev))" \
-            --body-file - \
-            --jq '.number')"
+            --body-file -)"
+          number="${number##*/}"   # gh pr create 输出 PR URL，取末段编号
           echo "创建 PR #$number"
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
