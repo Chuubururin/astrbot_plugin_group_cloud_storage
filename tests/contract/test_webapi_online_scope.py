@@ -100,6 +100,9 @@ def _make_services(groups: list[GroupInfo], online_ids: set[str]) -> SimpleNames
         async def list_archived_done_ids(self, ids, direction=""):
             return set()
 
+        async def find_cross_store_copies(self, rows):
+            return {"album": set(), "essence": set()}
+
         async def tag_cloud(self, kind=None):
             return []
 

@@ -152,3 +152,28 @@ class ArchiveMixin(StorePart):
             return {r[0] for r in rows}
 
         return await self._conn.exec(_do)
+
+    async def find_cross_store_copies(
+        self, rows: list[tuple[int, str, str]]
+    ) -> dict[str, set[int]]:
+        """Cross-existence check for derived status projection: for each
+        (resource_id, group_id, name) row report whether a same-group
+        same-name album/essence counterpart exists (excluding the row
+        itself). Returns {"album": {ids}, "essence": {ids}}.
+        """
+
+        def _do(conn: sqlite3.Connection):
+            out: dict[str, set[int]] = {"album": set(), "essence": set()}
+            for rid, group_id, name in rows:
+                hits = conn.execute(
+                    "SELECT type, COUNT(*) FROM resources "
+                    "WHERE group_id=? AND name=? AND status='active' "
+                    "AND id != ? AND type IN ('album', 'essence') "
+                    "GROUP BY type",
+                    (group_id, name, rid),
+                ).fetchall()
+                for t, _n in hits:
+                    out.setdefault(t, set()).add(rid)
+            return out
+
+        return await self._conn.exec(_do)

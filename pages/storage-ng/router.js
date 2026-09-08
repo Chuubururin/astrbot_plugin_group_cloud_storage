@@ -159,8 +159,46 @@ export function navigate(name, params = {}) {
    * clicking the tab again can never recover. One automatic reload refetches
    * the whole module graph; the sessionStorage guard prevents a reload loop
    * if the server is genuinely down (hint stays visible for that case).
+   *
+   * A reload only helps while the asset token in the iframe URL is still
+   * valid (~60s TTL; the sandboxed iframe never sees the dashboard cookie).
+   * Once it expired every refetch 401s and the reload would just replace the
+   * page with a bare JSON error, so read the exp claim locally and show an
+   * actionable hint instead.
    */
+  const EXPIRED_HINT = '<div class="empty-hint" style="padding:24px;text-align:center">'
+    + '<p>登录状态已过期，页面资源无法加载。</p>'
+    + '<p>请刷新宿主页面（或重新登录 AstrBot 后台）后再点击此标签。</p>'
+    + '<p><button type="button" id="view-reload-retry" class="btn" style="margin-top:8px">重试</button></p>'
+    + '</div>';
+
+  function showExpiredHint(target) {
+    content.innerHTML = EXPIRED_HINT;
+    const btn = document.getElementById('view-reload-retry');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        content.innerHTML = '';
+        attemptViewLoad(0);
+      });
+    }
+    console.warn(`[router] view ${target}: asset token expired, showing re-login hint instead of reload`);
+  }
+
+  function assetTokenExpired() {
+    try {
+      const token = new URL(window.location.href).searchParams.get('asset_token') || '';
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      return typeof payload.exp === 'number' && payload.exp * 1000 <= Date.now();
+    } catch (e) {
+      return false;
+    }
+  }
+
   function reloadAfterImportPoison(target) {
+    if (assetTokenExpired()) {
+      showExpiredHint(target);
+      return;
+    }
     content.innerHTML = '<div class="empty-hint" style="padding:24px">'
       + '视图加载失败，正在自动恢复…</div>';
     const guardKey = 'view-load-reload:' + target;

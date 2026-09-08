@@ -1,10 +1,10 @@
 /**
- * Main entry - shell assembly and initialization .
+ * Main entry - shell assembly and initialization.
  *
- * main.js wires the shell: theme following (host context first,
- * system preference fallback), router with eight lazy views, SSE pipeline
- * with heartbeat watchdog, global error handling and keyboard shortcuts.
- * Views are lazy-loaded via dynamic import; this module stays a shell.
+ * main.js wires the shell: theme following (host context first, system
+ * preference fallback), router with lazy views, SSE pipeline, global error
+ * handling and keyboard shortcuts. Views are lazy-loaded via dynamic import
+ * and preloaded once at init (see the preload note in init()).
  *
  * @module main
  */
@@ -70,10 +70,9 @@ function refreshAllTopics() {
 }
 
 // ---------- data_changed topic refresh coalescing ----------
-// Batch task completion pushes consecutive data_changed events (file_scan
-// per group, batch DONE across multiple tasks): refreshes for the same
-// topic within a 150ms window coalesce into one refresh, avoiding a
-// request storm of concurrent full refetches across topics.
+// Batch task completion pushes consecutive data_changed events: refreshes
+// for the same topic within a 150ms window coalesce into one refresh,
+// avoiding a request storm of concurrent full refetches across topics.
 const _pendingDataRefresh = new Map();
 
 function debouncedTopicRefresh(topics) {
@@ -140,12 +139,8 @@ function initSSE() {
   window.addEventListener('unload', () => sse.stop());
 
   // Visibility staleness guard: after a long time in a hidden tab, missed
-  // SSE events (or silent connection decay) can leave stale rows. When the
-  // tab becomes visible again and the last data refresh is older than
-  // ~60s, do an internal refresh of every data topic. A re-navigation to
-  // the current view additionally re-mounts the view DOM (a frozen-tab
-  // resume can leave a half-torn mount whose data loads were lost, which
-  // shows as an empty content area under a live tab strip).
+  // SSE events (or silent connection decay) can leave stale rows; a re-
+  // navigation re-mounts a view whose DOM was lost to a tab freeze.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (Date.now() - lastDataRefreshAt >= 60_000) {
@@ -184,11 +179,11 @@ function initErrorHandling() {
 
 function initKeyboard() {
   document.addEventListener('keydown', async (e) => {
+    const { sourceFor } = await import('./features/data-sources.js');
+    const source = sourceFor(getState().currentView);
     // Escape: clear the selection of the active resource list.
     if (e.key === 'Escape') {
-      const { selectionFor } = await import('./store.js');
-      const { sourceFor } = await import('./features/data-sources.js');
-      sourceFor(getState().currentView).selection.clear();
+      source.selection.clear();
       return;
     }
     // Ctrl/Cmd+A: select all rows of the active list (not inside inputs).
@@ -196,8 +191,6 @@ function initKeyboard() {
       const tag = e.target?.tagName;
       if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
       e.preventDefault();
-      const { sourceFor } = await import('./features/data-sources.js');
-      const source = sourceFor(getState().currentView);
       const items = getState()[source.itemsKey] || [];
       source.selection.setMany(items.filter((f) => !f.is_dir).map(source.rowKey));
     }
@@ -206,17 +199,16 @@ function initKeyboard() {
 
 // ---------- View loading ----------
 
-// Stale-import guard + retry: after the import resolves, loadView checks the
-// container is still owned by this view via the router generation counter
-// (dataset.routerGen) — a fast tab switch must not let a stale dynamic import
-// write DOM into #content. A failed dynamic import stays cached as a failure
-// for the lifetime of the document (a views/*.js fetch broken mid-flight by a
-// restart/deploy/resume would fail instantly on every retry, leaving a
-// permanent "视图加载失败" tab), so failed attempts are retried with ?retry=N
-// cache-busting specifiers. The dashboard rewrites import specifiers with a
-// regex that only sees string literals — every attempt is therefore a
-// spelled-out literal thunk; a runtime-built specifier would fetch a second,
-// unrewritten module graph with its own store/router.
+// View loading: stale-import guard + retry. After the import resolves,
+// loadView checks the container is still owned by this view via the router
+// generation counter (dataset.routerGen) — a fast tab switch must not let a
+// stale dynamic import write DOM into #content. A failed dynamic import stays
+// cached as a failure for the document's lifetime (a views/*.js fetch broken
+// mid-flight would fail instantly on every retry), so failed attempts are
+// retried with ?retry=N cache-busting specifiers. The dashboard rewrites
+// import specifiers with a regex that only sees string literals — every
+// attempt is therefore a spelled-out literal thunk; a runtime-built specifier
+// would fetch a second, unrewritten module graph with its own store/router.
 async function loadView(attempts, container) {
   const gen = container.dataset.routerGen;
   let mod;
@@ -282,6 +274,15 @@ async function init() {
     registerLazyView(name, exportName, imports);
   }
 
+  // Preload every view module right away (first thunk only; ?retry=N
+  // fallbacks stay unused unless a fetch broke mid-flight). The iframe's
+  // asset_token expires after ~60s and the sandboxed iframe never sees the
+  // dashboard cookie, so module fetches after that window 401 and the tab
+  // dies — imports issued in the fresh window stay cached for the
+  // document's lifetime. API calls are unaffected (host bridge).
+  for (const value of Object.values(VIEW_IMPORTS)) {
+    value[1]().catch(() => { /* loadView retries at click time */ });
+  }
   // classification table preload (drives netdisk local chips).
   import('./api.js').then(async ({ apiGet, API }) => {
     try { set('extTypes', await apiGet(API.META_CLASSIFY)); }

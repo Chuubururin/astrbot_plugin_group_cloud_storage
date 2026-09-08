@@ -171,6 +171,15 @@ class MetaStorePort(Protocol):
         list projections.
         """
 
+    async def find_cross_store_copies(
+        self, rows: list[tuple[int, str, str]]
+    ) -> dict[str, set[int]]:
+        """Cross-existence check for the derived status projection: report for
+        each (resource_id, group_id, name) whether a same-group same-name
+        album/essence counterpart exists (the row itself excluded). Returns
+        {"album": {ids}, "essence": {ids}}.
+        """
+
     async def update_archive_state_by_task(self, task_id: str, state: str) -> None:
         """Update state of an archive map entry by task_id."""
 

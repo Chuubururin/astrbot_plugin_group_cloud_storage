@@ -252,6 +252,13 @@ class ResourcesMixin(StorePart):
                 where.append("folder_name = ?")
                 params.append(q.folder)
             if q.store_status:
+                # Derived cross-reference filters. The Files tab keeps
+                # type='file' rows and asks whether the file also lives in
+                # another store (never returns album/essence rows themselves —
+                # those are the other tabs' content). For album/essence the
+                # id-linkage is absent (distribute pipelines leave no FK), so
+                # the fall-back from the requirement doc applies: a same-name
+                # resource of the target type in the same group.
                 if q.store_status == "netdisk":
                     where.append(
                         "EXISTS (SELECT 1 FROM archive_map am "
@@ -259,14 +266,29 @@ class ResourcesMixin(StorePart):
                         "AND am.direction = 'out' AND am.state = 'done')"
                     )
                 elif q.store_status == "album":
-                    where.append("type = 'album'")
+                    where.append(
+                        "EXISTS (SELECT 1 FROM resources o WHERE o.type = 'album' "
+                        "AND o.group_id = resources.group_id "
+                        "AND o.name = resources.name AND o.status = 'active' "
+                        "AND o.id != resources.id)"
+                    )
                 elif q.store_status == "essence":
-                    where.append("type = 'essence'")
+                    where.append(
+                        "EXISTS (SELECT 1 FROM resources o WHERE o.type = 'essence' "
+                        "AND o.group_id = resources.group_id "
+                        "AND o.name = resources.name AND o.status = 'active' "
+                        "AND o.id != resources.id)"
+                    )
                 elif q.store_status == "none":
                     where.append(
-                        "type NOT IN ('album', 'essence') AND NOT EXISTS ("
+                        "NOT EXISTS ("
                         "SELECT 1 FROM archive_map am WHERE am.resource_id = resources.id "
                         "AND am.direction = 'out' AND am.state = 'done')"
+                        " AND NOT EXISTS ("
+                        "SELECT 1 FROM resources o WHERE o.type IN ('album', 'essence') "
+                        "AND o.group_id = resources.group_id "
+                        "AND o.name = resources.name AND o.status = 'active' "
+                        "AND o.id != resources.id)"
                     )
             if q.exts:
                 ext_where = " OR ".join(["LOWER(name) LIKE ?" for _ in q.exts])

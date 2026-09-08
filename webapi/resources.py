@@ -88,11 +88,10 @@ async def api_files(s: Services) -> dict:
     # override-aware helpers (same source as the netdisk path)
     ext_overrides = s.config.get("type_ext_overrides") or {}
     rq_type = "file" if kind in ("file", "all") else kind
-    # Status filter interacts with the type segment: for album/essence/none statuses
-    # store_status carries the type semantics, so no extra type='file' filter is
-    # applied (otherwise no rows would ever match)
-    if store_status in ("album", "essence", "none"):
-        rq_type = None
+    # Status filter = cross-reference, never a type override: the Files tab
+    # keeps type='file' rows and asks whether they also live in netdisk /
+    # album / essence (SQL EXISTS subqueries in the store layer). Dropping the
+    # type filter here would just mirror the other tabs' listings.
     rq = ResourceQuery(
         group_id=group or "",
         groups=target_groups,
@@ -136,6 +135,21 @@ async def api_files(s: Services) -> dict:
             )
         except Exception:
             archived_ids = set()
+    # Batch cross-existence for this page's rows: same-group same-name
+    # album/essence counterparts (the distribute pipelines keep the original
+    # name on transfer, so name is the linkage channel per the requirement's
+    # "文件名兜底" rule).
+    album_copies: set[int] = set()
+    essence_copies: set[int] = set()
+    if result.items:
+        try:
+            copies = await s.store.find_cross_store_copies(
+                [(it.id, it.group_id, it.name) for it in result.items]
+            )
+            album_copies = copies.get("album", set())
+            essence_copies = copies.get("essence", set())
+        except Exception:
+            album_copies = essence_copies = set()
     # Volume completeness (missing volume -> "incomplete" status + partial download)
     vol_state: dict[int, dict] = {}
     for it in result.items:
@@ -185,11 +199,17 @@ async def api_files(s: Services) -> dict:
                     ),
                     "folder": it.folder_name,
                     "status": "active",
-                    # Derived status: album/essence/netdisk/none (read-only projection)
+                    # Derived status (read-only projection, cross-reference
+                    # semantics): netdisk = archived out+done; album/essence =
+                    # a same-group same-name counterpart exists; else none.
                     "store_status": (
-                        it.type
-                        if it.type in ("album", "essence")
-                        else ("netdisk" if it.id in archived_ids else "none")
+                        "netdisk"
+                        if it.id in archived_ids
+                        else "album"
+                        if it.id in album_copies
+                        else "essence"
+                        if it.id in essence_copies
+                        else "none"
                     ),
                     "group_id": it.group_id,
                     "group_name": gmap.get(it.group_id, ""),
