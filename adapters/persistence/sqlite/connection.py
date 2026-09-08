@@ -53,11 +53,11 @@ class ConnectionManager:
         # (e.g. all connections stuck in long-running FTS queries).
         try:
             return self._pool.get(timeout=30.0)
-        except queue.Empty:
+        except queue.Empty as exc:
             raise TimeoutError(
                 f"connection pool exhausted (size={self._pool_size}); "
                 "all connections are in use"
-            )
+            ) from exc
 
     def _run(self, fn, *args):
         conn = self._acquire()
