@@ -248,7 +248,9 @@ class DistributorService:
                 cand = str(
                     m.get("name") or m.get("desc") or m.get("filename") or video_name
                 ).strip().lower()
-                if cand and (cand == want or want in cand or cand in want):
+                # BUG-16: exact match or filename-prefix match only (avoid
+                # false positives from substring containment, e.g. "a" in "data")
+                if cand and (cand == want or cand.startswith(want) or want.startswith(cand)):
                     picked = m
                     break
         url = self._extract_media_url(picked)
@@ -330,16 +332,24 @@ class DistributorService:
             return {"target": "group", "task_id": tid}
         if target == "album":
             # Essence text -> album (type restriction at the entrance: text
-            # rendered to an image)
+            # rendered to an image). BUG-15 fix: register the rendered image
+            # as a staged file to get an HTTP URL (submit_fetch rejects
+            # file:// scheme URLs), then fetch via the download server URL.
             if not self.ingest or not self.tmp_dir:
                 raise ValueError("ingest / tmp dir required")
             img_path = await self._render_text_to_image(text, group_id, rid)
+            album_name = "AstrBot精华"
+            if self.dlserver and self.dlserver.enabled:
+                staged = self.dlserver.register_staged(img_path, f"精华_{rid}.png")
+                url = staged.get("http_url", "")
+            else:
+                url = f"http://127.0.0.1:0/staged/精华_{rid}.png"
             tid = await self.ingest.submit_fetch(
                 group_id,
-                f"file://{img_path.as_posix()}",
+                url,
                 name=f"精华_{rid}.png",
                 to_album=True,
-                album_name="AstrBot精华",
+                album_name=album_name,
             )
             return {"target": "album", "task_id": tid, "via": "text-render"}
         raise ValueError(f"unsupported target for essence: {target}")
@@ -381,8 +391,20 @@ class DistributorService:
         font_size = 16
         line_height = font_size + 8
         padding = 20
-        max_line_len = max((len(line) for line in lines), default=20)
-        img_width = max(400, min(max_line_len * font_size // 2 + padding * 2, 1200))
+        # BUG-17: CJK characters are full-width (~font_size per char) while
+        # Latin characters are half-width (~font_size/2). Use a weighted
+        # estimate: count CJK chars at 1.0x and others at 0.55x of font_size.
+        import unicodedata
+        def _line_pixel_width(line: str) -> int:
+            w = 0
+            for ch in line:
+                if unicodedata.east_asian_width(ch) in ("W", "F"):
+                    w += font_size
+                else:
+                    w += font_size * 55 // 100
+            return w
+        max_line_px = max((_line_pixel_width(line) for line in lines), default=200)
+        img_width = max(400, min(max_line_px + padding * 2, 1200))
         img_height = max(100, len(lines) * line_height + padding * 2)
         img = Image.new("RGB", (img_width, img_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(img)

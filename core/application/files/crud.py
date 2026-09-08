@@ -47,6 +47,10 @@ class CrudMixin:
         # The caller's group choice is honored unless that group itself cannot
         # fit the file (unknown capacity counts as fitting); only then does
         # the planner pick an overflow group.
+        # BUG-3 note: TOCTOU is theoretically possible (two concurrent uploads
+        # read the same capacity and both switch to the same overflow group),
+        # but QQ group capacity is GB-scale while single files are MB-scale,
+        # making practical overflow extremely unlikely.
         if not op.payload.get("parent_resource_id") and size > 0:
             groups = [
                 g for g in await self.store.list_groups() if getattr(g, "managed", 1)
@@ -69,6 +73,7 @@ class CrudMixin:
                     f"[file-ops] upload target switch {op.target} -> {pick.group_id} "
                     f"(capacity overflow)"
                 )
+                op.payload["switched_from"] = op.target
                 op.target = pick.group_id
         threshold = consts.CHUNK_THRESHOLD_BYTES
         if size > threshold and not op.payload.get("parent_resource_id"):
@@ -272,8 +277,20 @@ class CrudMixin:
         await self.store.update_resource_fields(
             op.payload["id"], name=op.payload["new_name"]
         )
+        # BUG-4 fix: sync with one retry to ensure the new file is indexed.
+        # If sync fails, the new file exists in the cloud and will be picked
+        # up on the next diff/full sync cycle.
         lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
-        await self.sync.run_full_sync(op.target, lock)
+        result = await self.sync.run_full_sync(op.target, lock)
+        if not result.ok:
+            logger.warning(f"[file-ops] replace_name sync failed (retrying): {result.error}")
+            await asyncio.sleep(2.0)
+            result = await self.sync.run_full_sync(op.target, lock)
+        if not result.ok:
+            logger.warning(
+                f"[file-ops] replace_name sync failed after retry: {result.error} "
+                f"(new file will be indexed on next sync cycle)"
+            )
         logger.info(
             f"[file-ops] replaced {op.payload['name']} -> "
             f"{op.payload['new_name']} in {op.target}"

@@ -34,7 +34,7 @@ from tests.fixtures.fake_onebot import FakeOneBotApi  # noqa: E402
 async def _call_impl(err: Exception | None = None, delay: float = 0, calls: list = None):
     """构造 call_action 实现：可注入异常/延迟/记录调用。"""
 
-    async def impl(action: str, params: dict):
+    async def impl(action: str, **params):
         if calls is not None:
             calls.append((action, time.monotonic()))
         if delay:
@@ -89,7 +89,7 @@ async def test_local_error_passthrough_no_broken():
     """本地环境态（无 bot 上下文）：穿透原 kind，不标记 BROKEN、不退避（日志污染修复）。"""
     from core.domain.enums import OneBotErrorKind
 
-    async def impl(action, params):
+    async def impl(action, **params):
         raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, action, "no onebot bot")
 
     api = NapCatApiAdapter(impl, interval=0)

@@ -251,7 +251,11 @@ class DownloadServerService:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            request = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1")
+            # BUG-14: timeout on readuntil prevents slowloris-style connection
+            # holding (client sends headers very slowly or never completes).
+            request = (await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), timeout=30.0
+            )).decode("latin-1")
             line = request.split("\r\n", 1)[0]
             parts = line.split(" ")
             if len(parts) < 2:

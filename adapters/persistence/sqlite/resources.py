@@ -472,7 +472,11 @@ class ResourcesMixin(StorePart):
             return 0
 
         def _do(conn: sqlite3.Connection):
-            conn.execute("BEGIN")
+            # BUG-2 fix: removed explicit BEGIN — Python sqlite3 auto-begins
+            # transactions before DML; an explicit BEGIN would conflict with
+            # any implicit transaction already in progress (OperationalError).
+            # The ConnectionManager._run() rolls back uncommitted transactions
+            # in its finally block, providing the safety net.
             try:
                 conn.execute("CREATE TEMP TABLE sync_source_ids (source_ref TEXT PRIMARY KEY)")
                 conn.executemany(

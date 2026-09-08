@@ -57,7 +57,14 @@ class VolumeMixin:
                     seq += 1
             return slices_local, total_sha.hexdigest()
 
-        slices, total_sha_hex = await asyncio.to_thread(_split_source)
+        try:
+            slices, total_sha_hex = await asyncio.to_thread(_split_source)
+        except Exception:
+            # BUG-12: clean up partial .raw_* files if _split_source fails
+            import shutil
+            cut_dir_cleanup = self.tmp_dir / f"vol_{parent_id}"
+            shutil.rmtree(cut_dir_cleanup, ignore_errors=True)
+            raise
 
         # The volumes primary key matches resources: the full resource_id
         # (download/backfill queries by detail)
@@ -73,9 +80,12 @@ class VolumeMixin:
 
             # Compress + hash (CPU-bound: offload to thread). seq/stem/total_count
             # are bound via default args so the closure sees this iteration's values.
-            def _compress_and_hash(_raw: Path = raw, _zpath: Path = zpath, _seq: int = seq) -> tuple[int, str]:
+            def _compress_and_hash(
+                _raw: Path = raw, _zpath: Path = zpath, _seq: int = seq,
+                _stem: str = stem, _total: int = total_count,
+            ) -> tuple[int, str]:
                 with zipfile.ZipFile(_zpath, "w", zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(_raw, arcname=f"{stem}.part{_seq:02d}of{total_count:02d}")
+                    zf.write(_raw, arcname=f"{_stem}.part{_seq:02d}of{_total:02d}")
                 _raw.unlink(missing_ok=True)
                 zsize = _zpath.stat().st_size
                 sha = hashlib.sha256(_zpath.read_bytes()).hexdigest()
@@ -411,6 +421,27 @@ class VolumeMixin:
             )
         finally:
             src.unlink(missing_ok=True)
+        # BUG-1 fix: record the conversion op before irreversible cloud delete
+        # so the operation log captures the full before/after state. The
+        # "before" records the original file identity; the "after" records
+        # the volume composition that replaces it.
+        await self.queue.record_op(
+            op.task_id,
+            "convert_volumes",
+            before={
+                "group_id": op.target,
+                "name": op.payload["name"],
+                "file_id": op.payload["file_id"],
+                "busid": op.payload["busid"],
+                "resource_id": op.payload.get("resource_id"),
+            },
+            after={
+                "volumes": True,
+                "parent_resource_id_full": op.payload.get("parent_resource_id_full"),
+                "irreversible": True,
+                "note": "original file deleted from cloud; volumes replace it",
+            },
+        )
         # Delete the cloud original (the old file remains after re-upload)
         fresh2 = await self._resolve_file_ref(
             op.target,
@@ -420,10 +451,25 @@ class VolumeMixin:
         )
         fid2, busid2 = fresh2 or (op.payload["file_id"], op.payload["busid"] or 0)
         await self.api.delete_group_file(op.target, fid2, busid2)
+        # Sync the index (with one retry on transient failure). If sync still
+        # fails after retry, log a warning — the new volumes exist in the cloud
+        # and will be picked up by the next diff/full sync cycle; the
+        # backfill_volume_refs step is deferred until sync succeeds.
         lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
         result = await self.sync.run_full_sync(op.target, lock)
+        if not result.ok:
+            logger.warning(
+                f"[file-ops] convert_volumes sync failed (retrying): {result.error}"
+            )
+            await asyncio.sleep(2.0)
+            result = await self.sync.run_full_sync(op.target, lock)
         if result.ok and op.payload.get("parent_resource_id_full"):
             await self.backfill_volume_refs(
                 op.target, op.payload["parent_resource_id_full"]
+            )
+        if not result.ok:
+            logger.warning(
+                f"[file-ops] convert_volumes sync failed after retry: {result.error} "
+                f"(new volumes will be indexed on next sync cycle)"
             )
         logger.info(f"[file-ops] converted {op.payload['name']} to volumes")

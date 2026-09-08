@@ -37,7 +37,7 @@ async def _fake_ready():
 
 
 def _fake_handlers():
-    async def fake_bind(action, params):
+    async def fake_bind(action, **params):
         return {}
 
     async def fake_handler(op):
@@ -53,7 +53,7 @@ def test_build_components_keys_and_wiring(tmp_path, ready_calls):
     async def fake_ready():
         ready_calls["n"] += 1
 
-    async def fake_bind(action, params):
+    async def fake_bind(action, **params):
         return {}
 
     async def fake_handler(op):

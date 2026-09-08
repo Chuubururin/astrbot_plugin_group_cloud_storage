@@ -38,15 +38,34 @@ def reassemble_volumes(
         )
     with dest.open("wb") as of:
         for p in parts:
-            data = (
-                p["data"] if p.get("data") is not None else Path(p["path"]).read_bytes()
-            )
-            if not verify_part(data, p.get("sha256")):
-                dest.unlink(missing_ok=True)
-                raise ValueError(
-                    f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
-                )
-            of.write(data)
+            if p.get("data") is not None:
+                # In-memory data: verify and write directly
+                data = p["data"]
+                if not verify_part(data, p.get("sha256")):
+                    dest.unlink(missing_ok=True)
+                    raise ValueError(
+                        f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
+                    )
+                of.write(data)
+            else:
+                # BUG-7 fix: chunked read-verify-then-write. Reads in 64KB
+                # chunks (memory-bounded) while verifying the full SHA-256
+                # first, then writes the same chunks — keeping verification
+                # atomic (no partial writes on mismatch).
+                part_path = Path(p["path"])
+                sha = hashlib.sha256()
+                chunks_buf: list[bytes] = []
+                with part_path.open("rb") as pf:
+                    while chunk := pf.read(1 << 16):
+                        sha.update(chunk)
+                        chunks_buf.append(chunk)
+                if p.get("sha256") and sha.hexdigest() != p["sha256"]:
+                    dest.unlink(missing_ok=True)
+                    raise ValueError(
+                        f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
+                    )
+                for chunk in chunks_buf:
+                    of.write(chunk)
     if not verify_total(dest, total_sha256):
         dest.unlink(missing_ok=True)
         raise ValueError("total sha256 mismatch")

@@ -419,15 +419,28 @@ class ScanMixin:
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         seq = 0
         filled = 0
+        # BUG-18: dynamic upper bound based on total group count + headroom,
+        # instead of hardcoded 999. This ensures all groups can be labeled
+        # even when existing labels create gaps in the sequence.
+        max_attempts = len(groups) * 2 + 50
         for g in ordered:
             lab = ""
-            for _ in range(999):
-                nxt = str(seq + 1).zfill(2) if use_digits else letters[seq % 26]
+            for _ in range(max_attempts):
+                # When all 26 letters are exhausted (or use_digits is True),
+                # switch to zero-padded numbers to guarantee uniqueness.
+                if use_digits or seq >= 26:
+                    nxt = str(seq + 1).zfill(2)
+                else:
+                    nxt = letters[seq % 26]
                 seq += 1
                 if nxt not in taken:
                     lab = nxt
                     break
             if not lab:
+                logger.warning(
+                    f"[group-scan] auto_fill_labels: exhausted {max_attempts} "
+                    f"candidates for group {g.group_id}; skipping"
+                )
                 continue
             taken.add(lab)
             await self.store.update_group_fields(g.group_id, label=lab)

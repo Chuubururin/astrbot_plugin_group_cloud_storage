@@ -29,15 +29,15 @@ _UNSUPPORTED_HINTS = (
 class NapCatBase:
     def __init__(
         self,
-        call_action: Callable[[str, dict], Awaitable[Any]],
+        call_action: Callable[..., Awaitable[Any]],
         interval: float = 0.5,
     ):
         """Initialize the adapter base.
 
         Args:
-            call_action: async (action, params) -> data, bound to the AstrBot
+            call_action: async (action, **params) -> data, bound to the AstrBot
                 OneBot event; typical implementation:
-                lambda action, p: await bot.call_action(action, **p)
+                lambda action, **p: bot.call_action(action, **p)
             interval: minimum interval between extension API requests (seconds)
         """
         self._call_action = call_action
@@ -77,7 +77,10 @@ class NapCatBase:
             if self._account_bot is not None:
                 data = await self._account_bot.call_action(action, **params)
             else:
-                data = await self._call_action(action, params)
+                # BUG-20 fix: unpack params as keyword arguments to match the
+                # _account_bot path. The constructor doc shows _call_action
+                # should accept (action, **params), not (action, dict).
+                data = await self._call_action(action, **params)
         except OneBotApiError as e:
             if e.kind == OneBotErrorKind.LOCAL_ERROR:
                 raise  # local-side condition: no capability marking; caller decides on retry

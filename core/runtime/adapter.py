@@ -55,7 +55,7 @@ class RuntimeAdapter:
             ingest=self.ingest, transfer=self.transfer, ops=self.ops, queue=self.queue, config=self.config,
             bots_getter=lambda: self._platform_bots, bridge=getattr(self, "bridge", None),
             bot_api_factory=lambda bot, interval: NapCatApiAdapter(
-                lambda action, params: bot.call_action(action, **params), interval=interval))
+                lambda action, **params: bot.call_action(action, **params), interval=interval))
         # Per-group scan chaining: as soon as a group's info is persisted the
         # dispatcher queues that group's file scan (no bulk wait)
         self.scan.on_group_scanned = self._dispatch._on_group_scanned
@@ -77,7 +77,7 @@ class RuntimeAdapter:
         await self._lifecycle.init()
         self._platform_bots[:] = self._lifecycle._platform_bots
 
-    async def _bind_call_action(self, action, params):
+    async def _bind_call_action(self, action, **params):
         # Priority: event bot (chat context) > account-scoped bot (group ops
         # routed to the account that owns the group) > best_bot fallback.
         bot = (

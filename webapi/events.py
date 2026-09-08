@@ -48,7 +48,10 @@ async def api_queue_events(s: Services):
             # Heartbeat window elapsed: drain the receive channel without
             # blocking to spot an already-arrived disconnect message.
             if recv_task.done():
-                msg = recv_task.result()
+                try:
+                    msg = recv_task.result()
+                except Exception:
+                    msg = None
                 if msg and msg.get("type") == "http.disconnect":
                     return "disconnected", None
             recv_task.cancel()

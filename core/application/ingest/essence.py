@@ -94,11 +94,20 @@ class EssenceMixin:
 
     async def _do_essence_save(self, op) -> None:
         title, text = op.payload["title"], op.payload["text"]
-        total = len(split_text(text, self.essence_chunk_chars))
-        # Body limit minus marker overhead: one QQ essence holds <= 4500
-        # chars including the marker; keeps parts below the cloud truncation
-        # point
-        limit = effective_chunk_limit(title, total, self.essence_chunk_chars)
+        # BUG-10 fix: converge the chunk limit with the actual total count.
+        # The marker size depends on the total part count, which in turn
+        # depends on the chunk limit. Iterate until stable. The base is fixed
+        # so limit only shrinks; total only grows; the loop terminates because
+        # marker overhead is bounded and limit has a floor (100 from
+        # effective_chunk_limit).
+        base = self.essence_chunk_chars
+        limit = base
+        total = len(split_text(text, limit))
+        prev_total = -1
+        while total != prev_total and limit > 100:
+            prev_total = total
+            limit = effective_chunk_limit(title, total, base)
+            total = len(split_text(text, limit))
         chunks = split_text(text, limit)
         total = len(chunks)
         parts: list[dict] = []

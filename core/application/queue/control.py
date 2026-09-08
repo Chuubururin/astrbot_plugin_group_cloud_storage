@@ -10,7 +10,19 @@ from __future__ import annotations
 import asyncio
 import time
 
+from core.log import logger
+
 from .op import Op, OpCancelError, OpPausedError
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done-callback for fire-and-forget tasks: log exceptions instead of
+    silently discarding them."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(f"[queue] fire-and-forget task error: {exc}")
 
 
 class TaskControlMixin:
@@ -141,11 +153,14 @@ class TaskControlMixin:
             asyncio.get_running_loop()
         except RuntimeError:
             return
-        asyncio.create_task(
+        # BUG-9 fix: track fire-and-forget task to log exceptions instead of
+        # silently swallowing them ("Task exception was never retrieved").
+        task = asyncio.create_task(
             self._ledger.on_state(
                 op.task_id, op.kind, op.target, op.payload, state, error
             )
         )
+        task.add_done_callback(_log_task_exception)
 
 
 __all__ = ["TaskControlMixin"]
