@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import ast
 import hashlib
+import json
 import re
 import shutil
 import subprocess
 import uuid
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -61,6 +62,24 @@ class VideoMixin:
         dest = (base / f"{safe_key.group(0)}.mp4").resolve()
         if dest.parent != base or dest.name != f"{safe_key.group(0)}.mp4":
             raise ValueError("invalid video preview destination")
+
+        # BUG-21: SSRF defense — block loopback and private addresses
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"_download_video: unsupported scheme: {parsed.scheme}")
+        hostname = parsed.hostname or ""
+        if hostname in ("localhost",):
+            raise ValueError(f"_download_video: blocked loopback hostname: {hostname}")
+        import ipaddress
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            addr = None  # hostname is a domain name, not an IP literal
+        if addr is not None:
+            if addr.is_loopback or addr.is_private:
+                raise ValueError(
+                    f"_download_video: blocked private/loopback address: {hostname}"
+                )
 
         timeout = self.fetch_timeout
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
@@ -178,9 +197,12 @@ class VideoMixin:
         raw = v.get("videoUrl") or v.get("video_url")
         specs = raw if isinstance(raw, list) else []
         if isinstance(raw, str):
+            # BUG-22: use json.loads instead of ast.literal_eval for safety
+            # (QQ API returns JSON, not Python repr; ast.literal_eval can
+            # cause DoS on crafted input like deeply nested brackets).
             try:
-                specs = ast.literal_eval(raw)
-            except Exception:
+                specs = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
                 specs = []
         if not isinstance(specs, list):
             specs = []

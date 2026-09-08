@@ -115,9 +115,12 @@ def preview_policy_for(ftype: str, policy_overrides: dict | None = None) -> dict
     for ov in (policy_overrides or {}).values():
         if not isinstance(ov, dict):
             continue
-        if str(ov.get("types", "")).split(",") and ftype in [
-            t.strip() for t in str(ov.get("types", "")).split(",") if t.strip()
-        ]:
+        # BUG-27 fix: str(...).split(",") always returns non-empty list
+        # ("".split(",") == [""]), so the original condition was always True.
+        # Now explicitly filter empty strings before checking membership.
+        types_str = str(ov.get("types", "") or "")
+        type_list = [t.strip() for t in types_str.split(",") if t.strip()]
+        if type_list and ftype in type_list:
             if ov.get("mode"):
                 policy["mode"] = ov["mode"]
             if ov.get("template") is not None:

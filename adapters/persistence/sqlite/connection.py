@@ -49,7 +49,15 @@ class ConnectionManager:
             if self._created < self._pool_size:
                 self._created += 1
                 return self._connect()
-        return self._pool.get()  # pool exhausted: block until a connection is returned
+        # BUG-11 fix: timeout prevents permanent hang when pool is exhausted
+        # (e.g. all connections stuck in long-running FTS queries).
+        try:
+            return self._pool.get(timeout=30.0)
+        except queue.Empty as exc:
+            raise TimeoutError(
+                f"connection pool exhausted (size={self._pool_size}); "
+                "all connections are in use"
+            ) from exc
 
     def _run(self, fn, *args):
         conn = self._acquire()

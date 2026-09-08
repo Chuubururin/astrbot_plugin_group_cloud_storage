@@ -31,7 +31,16 @@ class SearchMixin(StorePart):
             short_t = [t for t in terms if len(t) < 3]
             expr: str | None = None
             if long_t:
-                expr = " AND ".join('"%s"' % t.replace('"', '""') for t in long_t)
+                # BUG-23: escape FTS5 special characters to prevent query
+                # semantics from changing (e.g. "test*" becoming prefix match,
+                # "NOT secret" becoming exclusion). Only word characters and
+                # CJK are kept; special chars are stripped.
+                def _fts_escape(term: str) -> str:
+                    cleaned = re.sub(r'[^\w\u4e00-\u9fff]', '', term)
+                    return cleaned if cleaned else term
+                expr = " AND ".join(
+                    '"%s"' % _fts_escape(t) for t in long_t if _fts_escape(t)
+                )
             like_sql = ""
             like_params: list = []
             if short_t:

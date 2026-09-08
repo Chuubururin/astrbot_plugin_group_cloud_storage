@@ -320,10 +320,43 @@ class DownloadMixin:
             except OSError:
                 pass
 
+    # BUG-13: max response size (4 GB) to prevent memory exhaustion
+    _MAX_FETCH_BYTES = 4 * 1024**3
+
     async def _fetch_bytes(self, url: str) -> bytes:
         import httpx
+        from urllib.parse import urlparse
+
+        # BUG-5: SSRF defense-in-depth — block loopback and RFC1918 private
+        # addresses. Only these ranges are truly dangerous; reserved ranges
+        # (e.g. 100.64.0.0/10 CGNAT) are used by CDNs and should not be blocked.
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"_fetch_bytes: unsupported scheme: {parsed.scheme}")
+        hostname = parsed.hostname or ""
+        if hostname in ("localhost",):
+            raise ValueError(f"_fetch_bytes: blocked loopback hostname: {hostname}")
+        import ipaddress
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            addr = None  # hostname is a domain name, not an IP literal
+        if addr is not None:
+            if addr.is_loopback:
+                raise ValueError(f"_fetch_bytes: blocked loopback address: {hostname}")
+            if addr.is_private:
+                raise ValueError(f"_fetch_bytes: blocked private address: {hostname}")
 
         async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return resp.content
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes(chunk_size=1 << 16):
+                    total += len(chunk)
+                    if total > self._MAX_FETCH_BYTES:
+                        raise ValueError(
+                            f"_fetch_bytes: response exceeds {self._MAX_FETCH_BYTES} bytes"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)

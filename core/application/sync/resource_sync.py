@@ -46,6 +46,9 @@ class ResourceSyncService:
         if cached is not None:
             return dict(cached)
         # Coalesce simultaneous full/diff requests without exposing mutable state.
+        # BUG-19 note: this is safe in single-threaded asyncio — there is no
+        # await point between .get() and .create_task(), so two coroutines
+        # cannot both see None and create duplicate tasks.
         task = self._member_names_inflight.get(group_id)
         if task is None:
             task = asyncio.create_task(self._fetch_member_names(group_id))

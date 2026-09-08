@@ -49,7 +49,20 @@ class InboundMixin:
                 logger.warning(
                     f"[bridge] URL upload failed ({e}), degrading to fetch fallback"
                 )
-        # Fallback: delegate to ingest.submit_fetch 
+        # Fallback: delegate to ingest.submit_fetch
+        # BUG-24: check file size before committing to a full download.
+        # Without this, a10GB netdisk file would be downloaded to local
+        # disk before re-uploading, wasting time and space.
+        try:
+            stat = await self._client.stat(path)
+            if stat and hasattr(stat, "size") and stat.size:
+                if not self._size_ok(stat.size):
+                    return self._fail(
+                        op,
+                        f"file too large: {stat.size} bytes exceeds configured limits",
+                    )
+        except Exception:
+            pass  # stat failure is non-fatal; proceed with fetch
         # Ledger consumer starts BEFORE submit: create_task enters the ready
         # queue ahead of the worker wakeup, so the listener is registered
         # before any completion event can fire (no missed-event race).
@@ -105,7 +118,7 @@ class InboundMixin:
 
             # Default: assume supported (SnowLuma, modern NapCat accept URLs)
             # If the API doesn't actually support URL upload, the call will fail
-            # and bridge_in will fall back to fetch 
+            # and bridge_in will fall back to fetch
             self._url_upload_capable = True
             logger.info("[bridge] URL upload capability: True (default/confirmed)")
             return True
