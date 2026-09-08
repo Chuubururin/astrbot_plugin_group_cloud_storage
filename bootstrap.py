@@ -62,7 +62,7 @@ def build_components(
     from core.application.files import consts as files_consts
     files_consts.configure(cfg)
 
-    interval = float(cfg.get("request_interval_ms", 1000)) / 1000.0
+    interval = cfg.request_interval
 
     store = SqliteMetaStore(data_dir / "meta.db")
     database_admin = DatabaseAdminService(

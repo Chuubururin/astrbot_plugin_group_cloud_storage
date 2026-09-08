@@ -57,7 +57,8 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
         # Cached URL-upload capability; None = not yet probed
         self._url_upload_capable: bool | None = None
 
-        # Configuration
+        # Configuration (sizes resolve via string-unit keys with legacy
+        # byte-key fallback — see PluginConfig)
         self._interval = config.openlist_poll_interval_sec
         self._dst_dir = config.openlist_dst_dir
         self._dst_template = config.openlist_dst_dir_template

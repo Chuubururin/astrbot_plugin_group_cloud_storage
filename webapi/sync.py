@@ -28,6 +28,8 @@ async def api_sync_withering(s: Services) -> dict:
         valid = []
         for gid in ids:
             g = str(gid)
+            # Withering is a data reconciliation path: managed check only
+            # (offline accounts' groups are exactly its reconciliation target).
             if g and await s.scan.is_page_managed(g, managed):
                 valid.append(g)
         if not valid:

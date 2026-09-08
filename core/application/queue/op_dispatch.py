@@ -234,7 +234,7 @@ class OpDispatcher(CapacityMixin):
             return
 
         try:
-            interval = float(self.config.get("request_interval_ms", 1000)) / 1000.0
+            interval = float(self.config.request_interval)
         except (TypeError, ValueError):
             interval = 1.0
         # +-20% CSPRNG jitter so accounts do not hit server-side aggregated
@@ -460,7 +460,19 @@ class OpDispatcher(CapacityMixin):
             )
             targets = [g.group_id for g in groups]
         else:
-            targets = op.payload.get("groups") or []
+            # Explicit range: the submit path is gated, but the queue is the
+            # last line of defense (payload may predate a config/offline
+            # change) — drop groups that are no longer openable instead of
+            # pulling their cloud files through a possibly offline account.
+            mg = self.config.get("managed_groups", [])
+            targets = []
+            for gid in op.payload.get("groups") or []:
+                try:
+                    await self.scan.assert_group_openable(str(gid), mg)
+                except ValueError:
+                    logger.info(f"[file-scan] skip not-openable group {gid}")
+                else:
+                    targets.append(str(gid))
         total = len(targets)
         failed = 0
         last_fail: str | None = None

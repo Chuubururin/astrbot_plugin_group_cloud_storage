@@ -7,6 +7,8 @@ automatically.
 DEFAULTS: dict = {
     "managed_groups": [],
     "global_admin_qqs": [],
+    # Base interval in seconds between QQ API calls (legacy ms key supported)
+    "request_interval": 1.0,
     "request_interval_ms": 1000,
     "max_concurrent_scans": 8,
     "auto_index_upload_event": True,
@@ -17,6 +19,13 @@ DEFAULTS: dict = {
     "page_size": 10,
     "essence_chunk_size": 4000,
     "video_segment_seconds": 599,
+    # String-unit sizes (base 1000): users fill "95MB" / "2GB"; the backend
+    # parses them into bytes. Legacy numeric keys stay supported as aliases.
+    "volume_threshold": "95MB",
+    "fetch_max_size": "2GB",
+    "bridge_min_size": "0",
+    "bridge_max_size": "0",
+    # Legacy byte-unit keys (deprecated; kept for backward compatibility)
     "volume_threshold_mb": 95,
     "fetch_max_bytes": 2147483648,
     "fetch_timeout_sec": 180,
@@ -26,7 +35,7 @@ DEFAULTS: dict = {
     "download_server_enabled": False,
     "download_server_host": "127.0.0.1",
     "download_http_port": 6186,
-    "download_ftp_port": 0,
+    "download_sftp_port": 0,
     "download_smb_port": 0,
     "download_token": "",
     "op_high_priority_kinds": [],
@@ -42,6 +51,7 @@ DEFAULTS: dict = {
     "openlist_timeout_sec": 30.0,
     "openlist_allow_private_address": False,
     "openlist_poll_interval_sec": 0,
+    # Legacy byte-unit keys (deprecated; kept for backward compatibility)
     "bridge_min_bytes": 0,
     "bridge_max_bytes": 0,
     # Configurable classification and preview: data-driven default tables + config overrides

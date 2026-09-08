@@ -2,7 +2,7 @@
 plugin acts as the download server).
 
 Semantics (distinct from "egress = push to an external target"):
-- The host exposes **download service addresses** (http / ftp / smb);
+- The host exposes **download service addresses** (http / sftp / smb);
   external clients hit this host directly to pull cloud files. The address
   (host/port/token) comes from the plugin config
   (_conf_schema download_server_*)
@@ -10,9 +10,9 @@ Semantics (distinct from "egress = push to an external target"):
   QQ CDN direct link (zero proxy load); volumes/videos are reassembled
   locally and streamed back. `GET /download?staged=<token>&token` serves a
   registered staged file (e.g. an essence text exported to a .txt)
-- FTP: pyftpdlib virtual filesystem (/<group_id>/<filename>); RETR pulls
+- SFTP: paramiko virtual filesystem (/<group_id>/<filename>); reads pull
   bytes from the cloud on demand; /staged/<name> serves registered staged
-  files
+  files. Optional dependency (paramiko); disabled when not installed.
 - SMB: impacket smbserver (optional dependency) sharing a cache directory;
   entries materialize on demand via ensure_local()/register_staged()
 """
@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -56,26 +57,27 @@ class DownloadServerService:
         self.enabled = bool(cfg.get("download_server_enabled", False))
         self.host = str(cfg.get("download_server_host", "127.0.0.1") or "127.0.0.1")
         self.http_port = int(cfg.get("download_http_port", 0) or 0)
-        self.ftp_port = int(cfg.get("download_ftp_port", 0) or 0)
+        self.sftp_port = int(cfg.get("download_sftp_port", 0) or 0)
         self.smb_port = int(cfg.get("download_smb_port", 0) or 0)
         self.token = str(cfg.get("download_token", "") or "")
         self._download_info = download_info
         self._http_server: asyncio.AbstractServer | None = None
-        self._ftp_thread: threading.Thread | None = None
-        self._ftp_server = None
+        self._sftp_thread: threading.Thread | None = None
+        self._sftp_server = None
+        self._sftp_sock: socket.socket | None = None
         self._smb_thread: threading.Thread | None = None
         self._smb_server = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._ftp_auth = ("cloud", self.token)
-        self._cache_dir = Path(tempfile.gettempdir()) / "cloudftp"
+        self._sftp_auth = ("cloud", self.token)
+        self._cache_dir = Path(tempfile.gettempdir()) / "cloudsftp"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._smb_dir = Path(tempfile.gettempdir()) / "cloudsmb"
         self._smb_dir.mkdir(parents=True, exist_ok=True)
         # Staged-file registry: token -> {path, name} (essence text exports
-        # and other host-generated artifacts served over http/ftp)
+        # and other host-generated artifacts served over http/sftp)
         self._staged: dict[str, dict] = {}
         self.smb_available = False
-        try:  # optional dependency: keep http/ftp working without impacket
+        try:  # optional dependency: keep http/sftp working without impacket
             import impacket  # noqa: F401
 
             self.smb_available = True
@@ -114,9 +116,9 @@ class DownloadServerService:
                 f"{self.http_base()}/download?staged={token}&token={self.token}"
             ),
         }
-        if self.ftp_port > 0:
-            info["ftp"] = {
-                **self.ftp_info(),
+        if self.sftp_port > 0:
+            info["sftp"] = {
+                **self.sftp_info(),
                 "path": f"/staged/{token}_{quote(name or p.name)}",
             }
         if self.smb_port > 0 and self.smb_available:
@@ -176,18 +178,19 @@ class DownloadServerService:
             return None
         return target
 
-    def ftp_info(self) -> dict:
+    def sftp_info(self) -> dict:
         return {
             "host": self.host,
-            "port": self.ftp_port,
-            "user": self._ftp_auth[0],
+            "port": self.sftp_port,
+            "user": self._sftp_auth[0],
+            "password": self._sftp_auth[1],
         }
 
-    # ---------- Cross-thread calls (FTP thread -> plugin main loop) ----------
+    # ---------- Cross-thread calls (SFTP thread -> plugin main loop) ----------
 
     def _run_in_loop(self, coro, timeout: float = 180.0):
         """Cross-thread call: run a coroutine on the plugin's main event loop
-        (FTP thread -> asyncio)."""
+        (SFTP thread -> asyncio)."""
         if self._loop is None:
             raise RuntimeError("dlserver loop not ready")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -213,8 +216,8 @@ class DownloadServerService:
                 self._handle_http, self.host, self.http_port
             )
             logger.info(f"[dlserver] http download on :{self.http_port}")
-        if self.ftp_port > 0:
-            self._start_ftp()
+        if self.sftp_port > 0:
+            self._start_sftp()
         if self.smb_port > 0:
             self._start_smb()
 
@@ -223,12 +226,18 @@ class DownloadServerService:
             self._http_server.close()
             await self._http_server.wait_closed()
             self._http_server = None
-        if self._ftp_server is not None:
+        if self._sftp_server is not None:
             try:
-                self._ftp_server.close_all()
+                self._sftp_server.close()
             except Exception:
                 pass
-            self._ftp_server = None
+            self._sftp_server = None
+        if self._sftp_sock is not None:
+            try:
+                self._sftp_sock.close()
+            except Exception:
+                pass
+            self._sftp_sock = None
         if self._smb_server is not None:
             try:
                 self._smb_server.stop()
@@ -359,29 +368,7 @@ class DownloadServerService:
         )
         await writer.drain()
 
-    # ---------- FTP (pyftpdlib virtual filesystem: /<group_id>/<filename>) ----------
-
-    def _stat(self, path: str) -> dict:
-        parts = [p for p in path.split("/") if p]
-        if len(parts) == 2 and parts[0] == "staged":
-            # /staged/<token>_<name> -> staged registry lookup
-            token = parts[1].split("_", 1)[0]
-            entry = self._staged.get(token)
-            if not entry or not Path(entry["path"]).exists():
-                raise FileNotFoundError(path)
-            size = Path(entry["path"]).stat().st_size
-            return {"group": "staged", "name": parts[1], "id": 0, "size": size,
-                    "staged": token}
-        if len(parts) != 2:
-            raise FileNotFoundError(path)
-        group, name = parts
-        row = self._find_row(group, name)
-        return {
-            "group": group,
-            "name": name,
-            "id": row["id"],
-            "size": int(row.get("size") or 0),
-        }
+    # ---------- SFTP (paramiko virtual filesystem: /<group_id>/<filename>) ----------
 
     def _find_row(self, group: str, name: str) -> dict:
         from core.domain.sync import ResourceQuery
@@ -397,128 +384,265 @@ class DownloadServerService:
 
         return self._run_in_loop(_lookup)
 
-    def _start_ftp(self) -> None:
+    def _start_sftp(self) -> None:
         try:
-            from pyftpdlib.authorizers import DummyAuthorizer
-            from pyftpdlib.filesystems import AbstractedFS
-            from pyftpdlib.handlers import FTPHandler
-            from pyftpdlib.servers import FTPServer
+            import paramiko
         except ImportError:
-            logger.warning("[dlserver] pyftpdlib not installed; ftp disabled")
+            logger.warning(
+                "[dlserver] paramiko not installed; sftp disabled "
+                "(pip install paramiko)"
+            )
             return
 
+        from paramiko import SFTP_NO_SUCH_FILE, SFTP_FAILURE
+        from paramiko import SFTP_PERMISSION_DENIED, SFTP_OP_UNSUPPORTED
+        from paramiko.sftp_server import SFTPServer
+
         svc = self
+        # Fresh ephemeral host key per boot: read-only download service, so
+        # clients re-accepting the key after a restart is acceptable.
+        host_key = paramiko.RSAKey.generate(2048)
 
-        class CloudFS(AbstractedFS):
-            def isdir(self, path):
-                return path in ("/", "")
+        class _ServerInterface(paramiko.ServerInterface):
+            def get_allowed_auths(self, username):
+                return "password"
 
-            def isfile(self, path):
+            def check_auth_password(self, username, password):
+                if username == svc._sftp_auth[0] and password == svc._sftp_auth[1]:
+                    return paramiko.AUTH_SUCCESSFUL
+                return paramiko.AUTH_FAILED
+
+            def check_channel_shell_request(self, channel):
+                return False
+
+            def check_channel_pty_request(
+                self, channel, term, width, height, pixelwidth, pixelheight, modes
+            ):
+                return False
+
+        class _SFTPInterface(paramiko.SFTPServerInterface):
+            """Read-only virtual filesystem: /<group_id>/<filename> plus
+            /staged/<token>_<name>; cloud content materializes to the cache
+            directory on first open."""
+
+            def _resolve(self, path: str) -> dict | None:
+                parts = [p for p in path.split("/") if p]
+                if len(parts) == 2 and parts[0] == "staged":
+                    token = parts[1].split("_", 1)[0]
+                    entry = svc._staged.get(token)
+                    if not entry or not Path(entry["path"]).exists():
+                        return None
+                    return {
+                        "staged": token,
+                        "path": entry["path"],
+                        "name": entry["name"],
+                        "size": Path(entry["path"]).stat().st_size,
+                    }
+                if len(parts) != 2:
+                    return None
+                group, name = parts
                 try:
-                    svc._stat(path)
-                    return True
-                except Exception:
-                    return False
+                    row = svc._find_row(group, name)
+                except FileNotFoundError:
+                    return None
+                return {
+                    "group": group,
+                    "name": name,
+                    "id": row["id"],
+                    "size": int(row.get("size") or 0),
+                }
 
-            def listdir(self, path):
-                if path in ("/", ""):
+            def list_folder(self, path: str):
+                parts = [p for p in path.split("/") if p]
+                if not parts:
                     async def _groups():
                         groups = await svc.store.list_groups()
-                        names = [str(g.group_id) for g in groups]
+                        entries = []
+                        for g in groups:
+                            info = paramiko.SFTPAttributes()
+                            info.filename = str(g.group_id)
+                            info.st_mode = 0o40555  # dr-xr-xr-x
+                            entries.append(info)
                         if svc._staged:
-                            names.append("staged")
-                        return names
+                            info = paramiko.SFTPAttributes()
+                            info.filename = "staged"
+                            info.st_mode = 0o40555
+                            entries.append(info)
+                        return entries
 
                     try:
-                        return svc._run(_groups)
+                        return svc._run_in_loop(_groups())
                     except Exception:
-                        return ["staged"] if svc._staged else []
-                if path == "/staged":
-                    return [
-                        f"{token}_{entry['name']}"
-                        for token, entry in list(svc._staged.items())
-                    ]
+                        return []
+                if parts[0] == "staged" and len(parts) == 1:
+                    entries = []
+                    for token, entry in list(svc._staged.items()):
+                        info = paramiko.SFTPAttributes()
+                        info.filename = f"{token}_{entry['name']}"
+                        try:
+                            info.st_size = Path(entry["path"]).stat().st_size
+                        except OSError:
+                            continue
+                        entries.append(info)
+                    return entries
+                if len(parts) == 1:
+                    async def _files():
+                        from core.domain.sync import ResourceQuery
+
+                        page = await svc.store.query_resources(
+                            ResourceQuery(group_id=parts[0], page_size=500)
+                        )
+                        entries = []
+                        for it in page.items:
+                            info = paramiko.SFTPAttributes()
+                            info.filename = it.name
+                            info.st_size = it.size
+                            entries.append(info)
+                        return entries
+
+                    try:
+                        return svc._run_in_loop(_files())
+                    except Exception:
+                        return []
                 return []
 
-            def stat(self, path):
-                st = svc._stat(path)
-                import os as _os
+            def stat(self, path: str):
+                info = self._resolve(path)
+                if info is None:
+                    return SFTP_NO_SUCH_FILE
+                attrs = paramiko.SFTPAttributes()
+                attrs.st_size = info.get("size") or 0
+                attrs.st_mode = 0o100644  # -rw-r--r--
+                return attrs
 
-                return _os.stat_result(
-                    (
-                        33188,
-                        0,
-                        0,
-                        1,
-                        0,
-                        0,
-                        int(st.get("size") or 0),
-                        0,
-                        0,
-                        0,
-                    )
-                )
+            def lstat(self, path: str):
+                return self.stat(path)
 
-            def open(self, path, mode):
-                st = svc._stat(path)
-                if st.get("staged"):
-                    return Path(svc._staged[st["staged"]]["path"]).open("rb")
-                src, _ = svc._run(svc._download_info(st["group"], st["id"]))
-                sp = Path(src)
-                cache = svc._cache_dir / f"{st['group']}_{st['id']}_{st['name']}"
-                if not sp.exists():
-                    import httpx as _hx
+            def open(self, path: str, flags: int, attr):
+                info = self._resolve(path)
+                if info is None:
+                    return SFTP_NO_SUCH_FILE
+                try:
+                    if info.get("staged"):
+                        fh = Path(info["path"]).open("rb")
+                    else:
+                        src, _ = svc._run_in_loop(
+                            svc._download_info(info["group"], info["id"])
+                        )
+                        sp = Path(src)
+                        cache = svc._cache_dir / (
+                            f"{info['group']}_{info['id']}_{info['name']}"
+                        )
+                        if not sp.exists():
+                            # Cloud direct link: stream to the cache file
+                            # (temp + atomic rename; runs in a worker thread
+                            # so the event loop never blocks on IO)
+                            import httpx as _hx
 
-                    def _fetch():
-                        # Stream to a temp file + atomic rename: resp.content
-                        # would hold a whole (possibly multi-GB) file in RAM,
-                        # and a partial cache must never be served.
-                        tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
-                        try:
-                            with _hx.stream(
-                                "GET", src, follow_redirects=True, timeout=180.0
-                            ) as resp:
-                                resp.raise_for_status()
-                                with tmp.open("wb") as fh:
-                                    for chunk in resp.iter_bytes(
-                                        chunk_size=_STREAM_CHUNK
-                                    ):
-                                        fh.write(chunk)
-                            os.replace(tmp, cache)
-                        finally:
-                            tmp.unlink(missing_ok=True)
+                            def _fetch():
+                                tmp = cache.with_name(
+                                    cache.name + f".{uuid.uuid4().hex[:8]}.part"
+                                )
+                                try:
+                                    with _hx.stream(
+                                        "GET", src, follow_redirects=True,
+                                        timeout=180.0,
+                                    ) as resp:
+                                        resp.raise_for_status()
+                                        with tmp.open("wb") as out:
+                                            for chunk in resp.iter_bytes(
+                                                chunk_size=_STREAM_CHUNK
+                                            ):
+                                                out.write(chunk)
+                                    os.replace(tmp, cache)
+                                finally:
+                                    tmp.unlink(missing_ok=True)
 
-                    svc._run_in_loop(asyncio.to_thread(_fetch))
-                else:
-                    # Stream the local copy too (read_bytes/write_bytes would
-                    # hold the whole file in RAM).
-                    tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
+                            svc._run_in_loop(asyncio.to_thread(_fetch))
+                        else:
+                            tmp = cache.with_name(
+                                cache.name + f".{uuid.uuid4().hex[:8]}.part"
+                            )
+                            try:
+                                with sp.open("rb") as fin, tmp.open("wb") as out:
+                                    shutil.copyfileobj(fin, out, _STREAM_CHUNK)
+                                os.replace(tmp, cache)
+                            finally:
+                                tmp.unlink(missing_ok=True)
+                        fh = cache.open("rb")
+                    # paramiko contract: return an SFTPHandle with a
+                    # `readfile` attribute; its default read()/close()
+                    # delegate to the python file object.
+                    handle = paramiko.SFTPHandle()
+                    handle.readfile = fh
+                    return handle
+                except Exception as e:
+                    logger.debug(f"[dlserver] sftp open failed: {e}")
+                    return SFTP_FAILURE
+
+            def remove(self, path: str):
+                return SFTP_PERMISSION_DENIED
+
+            def rename(self, oldpath: str, newpath: str):
+                return SFTP_PERMISSION_DENIED
+
+            def mkdir(self, path: str, attr):
+                return SFTP_PERMISSION_DENIED
+
+            def rmdir(self, path: str):
+                return SFTP_PERMISSION_DENIED
+
+            def chattr(self, path: str, attr):
+                return SFTP_PERMISSION_DENIED
+
+            def symlink(self, target_path: str, path: str):
+                return SFTP_PERMISSION_DENIED
+
+            def readlink(self, path: str):
+                return SFTP_OP_UNSUPPORTED
+
+        def _serve():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((svc.host, svc.sftp_port))
+                sock.listen(100)
+                svc._sftp_sock = sock
+                logger.info(f"[dlserver] sftp listening on :{svc.sftp_port}")
+                while True:
                     try:
-                        with sp.open("rb") as fin, tmp.open("wb") as fout:
-                            shutil.copyfileobj(fin, fout, _STREAM_CHUNK)
-                        os.replace(tmp, cache)
+                        client_sock, _addr = sock.accept()
+                    except OSError:
+                        break  # socket closed by shutdown()
+                    transport = paramiko.Transport(client_sock)
+                    transport.local_version = "SSH-2.0-AstrBot-SFTP"
+                    try:
+                        transport.add_server_key(host_key)
+                        # Subsystem negotiation: the transport starts the
+                        # SFTP subsystem (SFTPServer runs the session loop)
+                        # when the client opens an "sftp" channel.
+                        transport.set_subsystem_handler(
+                            "sftp", SFTPServer, sftp_si=_SFTPInterface
+                        )
+                        transport.start_server(server=_ServerInterface())
+                        # Block until the session ends; each connection gets
+                        # its own thread so one slow client cannot starve
+                        # the accept loop.
+                        while transport.is_active():
+                            time.sleep(0.2)
+                    except Exception as e:
+                        logger.debug(f"[dlserver] sftp session error: {e}")
                     finally:
-                        tmp.unlink(missing_ok=True)
-                return cache.open("rb")
+                        try:
+                            transport.close()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning(f"[dlserver] sftp serve loop failed: {e}")
 
-        authorizer = DummyAuthorizer()
-        authorizer.add_user(self._ftp_auth[0], self._ftp_auth[1], "/", perm="elr")
-        handler = FTPHandler
-        handler.authorizer = authorizer
-        handler.abstracted_fs = CloudFS
-        handler.banner = "AstrBot cloud download service"
-        try:
-            self._ftp_server = FTPServer((self.host, self.ftp_port), handler)
-            self._ftp_thread = threading.Thread(
-                target=self._ftp_server.serve_forever,
-                kwargs={"timeout": 1, "blocking": True},
-                daemon=True,
-            )
-            self._ftp_thread.start()
-            logger.info(f"[dlserver] ftp download on :{self.ftp_port}")
-        except Exception as e:
-            logger.warning(f"[dlserver] ftp start failed: {e}")
-            self._ftp_server = None
+        self._sftp_thread = threading.Thread(target=_serve, daemon=True)
+        self._sftp_thread.start()
+        logger.info(f"[dlserver] sftp on :{self.sftp_port}")
 
     # ---------- SMB (impacket smbserver, optional dependency) ----------
 
@@ -526,7 +650,7 @@ class DownloadServerService:
         """SMB share over the cache directory (share name "cloud").
 
         impacket is an optional dependency: without it the SMB channel is
-        disabled and callers fall back to the http/ftp notice. Entries are
+        disabled and callers fall back to the http/sftp notice. Entries are
         materialized on demand (ensure_local / register_staged write into
         the shared directory before the user opens the UNC path).
         """

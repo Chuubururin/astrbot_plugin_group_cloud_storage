@@ -103,8 +103,8 @@ async def api_config_get(s: Services) -> dict:
         schema = {}
     cfg = s.config.raw if hasattr(s.config, "raw") else dict(s.config)
     reload_required = {
-        "request_interval_ms", "managed_groups", "global_admin_qqs",
-        "download_server_enabled", "download_server_host", "download_http_port", "download_ftp_port",
+        "request_interval", "managed_groups", "global_admin_qqs",
+        "download_server_enabled", "download_server_host", "download_http_port", "download_sftp_port",
         "openlist_enabled", "openlist_base_url", "openlist_username",
         "openlist_password", "openlist_token",
     }
@@ -208,8 +208,8 @@ async def api_config_save(s: Services) -> dict:
                 pass
     reload_required = sorted(
         k for k in saved if k in {
-            "request_interval_ms", "managed_groups", "global_admin_qqs",
-            "download_server_enabled", "download_server_host", "download_http_port", "download_ftp_port",
+            "request_interval", "managed_groups", "global_admin_qqs",
+            "download_server_enabled", "download_server_host", "download_http_port", "download_sftp_port",
             "openlist_enabled", "openlist_base_url", "openlist_username",
             "openlist_password", "openlist_token",
         }

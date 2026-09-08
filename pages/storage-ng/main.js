@@ -142,12 +142,24 @@ function initSSE() {
   // Visibility staleness guard: after a long time in a hidden tab, missed
   // SSE events (or silent connection decay) can leave stale rows. When the
   // tab becomes visible again and the last data refresh is older than
-  // ~60s, do an internal refresh of every data topic.
+  // ~60s, do an internal refresh of every data topic. A re-navigation to
+  // the current view additionally re-mounts the view DOM (a frozen-tab
+  // resume can leave a half-torn mount whose data loads were lost, which
+  // shows as an empty content area under a live tab strip).
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
-    if (Date.now() - lastDataRefreshAt < 60_000) return;
-    lastDataRefreshAt = Date.now();
-    refreshAllTopics();
+    if (Date.now() - lastDataRefreshAt >= 60_000) {
+      lastDataRefreshAt = Date.now();
+      refreshAllTopics();
+      // Empty-content auto-recovery: if the current view produced no DOM at
+      // all (mount lost during freeze/resume), re-mount it once.
+      const content = document.getElementById('content');
+      if (content && !content.firstElementChild) {
+        import('./router.js').then(({ navigate }) => {
+          navigate(getState().currentView || 'files');
+        });
+      }
+    }
   });
 }
 
@@ -192,6 +204,53 @@ function initKeyboard() {
   });
 }
 
+// ---------- View loading ----------
+
+// Stale-import guard + retry: after the import resolves, loadView checks the
+// container is still owned by this view via the router generation counter
+// (dataset.routerGen) — a fast tab switch must not let a stale dynamic import
+// write DOM into #content. A failed dynamic import stays cached as a failure
+// for the lifetime of the document (a views/*.js fetch broken mid-flight by a
+// restart/deploy/resume would fail instantly on every retry, leaving a
+// permanent "视图加载失败" tab), so failed attempts are retried with ?retry=N
+// cache-busting specifiers. The dashboard rewrites import specifiers with a
+// regex that only sees string literals — every attempt is therefore a
+// spelled-out literal thunk; a runtime-built specifier would fetch a second,
+// unrewritten module graph with its own store/router.
+async function loadView(attempts, container) {
+  const gen = container.dataset.routerGen;
+  let mod;
+  for (let i = 0; ; i++) {
+    try {
+      mod = await attempts[i]();
+      break;
+    } catch (e) {
+      if (i >= attempts.length - 1 || container.dataset.routerGen !== gen) throw e;
+      await new Promise((r) => setTimeout(r, 300 * Math.pow(2, i)));
+    }
+  }
+  if (container.dataset.routerGen !== gen) return () => {};
+  return mod;
+}
+
+function registerLazyView(name, exportName, imports) {
+  registerView(name, async (container) => {
+    const mod = await loadView(imports, container);
+    return mod[exportName](container);
+  });
+}
+
+/** name → [export name, first import, retry imports (literal specifiers)]. */
+const VIEW_IMPORTS = {
+  files: ['initFilesView', () => import('./views/files.js'), () => import('./views/files.js?retry=1'), () => import('./views/files.js?retry=2')],
+  albums: ['initAlbumsView', () => import('./views/albums.js'), () => import('./views/albums.js?retry=1'), () => import('./views/albums.js?retry=2')],
+  essence: ['initEssenceView', () => import('./views/essence.js'), () => import('./views/essence.js?retry=1'), () => import('./views/essence.js?retry=2')],
+  netdisk: ['initNetdiskView', () => import('./views/netdisk.js'), () => import('./views/netdisk.js?retry=1'), () => import('./views/netdisk.js?retry=2')],
+  tasks: ['initTasksView', () => import('./views/tasks.js'), () => import('./views/tasks.js?retry=1'), () => import('./views/tasks.js?retry=2')],
+  groups: ['initGroupsView', () => import('./views/groups.js'), () => import('./views/groups.js?retry=1'), () => import('./views/groups.js?retry=2')],
+  config: ['initConfigView', () => import('./views/config.js'), () => import('./views/config.js?retry=1'), () => import('./views/config.js?retry=2')],
+};
+
 // ---------- Init ----------
 
 /** E2E mode detection inline (testing/ is not shipped with the plugin —
@@ -219,46 +278,9 @@ async function init() {
   initTaskPanel();
   initStatBar(document.getElementById('stat-bar'));
 
-  // ---- View registration  ----
-  // After the import resolves, check the container is still connected:
-  // on a fast tab switch a stale import must not write its DOM into
-  // #content already owned by the new view (the router generation counter
-  // only guards cleanup, not DOM mounts inside render).
-  registerView('files', async (container) => {
-    const { initFilesView } = await import('./views/files.js');
-    if (!container.isConnected) return () => {};
-    return initFilesView(container);
-  });
-  registerView('albums', async (container) => {
-    const { initAlbumsView } = await import('./views/albums.js');
-    if (!container.isConnected) return () => {};
-    return initAlbumsView(container);
-  });
-  registerView('essence', async (container) => {
-    const { initEssenceView } = await import('./views/essence.js');
-    if (!container.isConnected) return () => {};
-    return initEssenceView(container);
-  });
-  registerView('netdisk', async (container) => {
-    const { initNetdiskView } = await import('./views/netdisk.js');
-    if (!container.isConnected) return () => {};
-    return initNetdiskView(container);
-  });
-  registerView('tasks', async (container) => {
-    const { initTasksView } = await import('./views/tasks.js');
-    if (!container.isConnected) return () => {};
-    return initTasksView(container);
-  });
-  registerView('groups', async (container) => {
-    const { initGroupsView } = await import('./views/groups.js');
-    if (!container.isConnected) return () => {};
-    return initGroupsView(container);
-  });
-  registerView('config', async (container) => {
-    const { initConfigView } = await import('./views/config.js');
-    if (!container.isConnected) return () => {};
-    return initConfigView(container);
-  });
+  for (const [name, [exportName, ...imports]] of Object.entries(VIEW_IMPORTS)) {
+    registerLazyView(name, exportName, imports);
+  }
 
   // classification table preload (drives netdisk local chips).
   import('./api.js').then(async ({ apiGet, API }) => {

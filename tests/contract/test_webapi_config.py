@@ -75,7 +75,7 @@ def _make_services(config_data=None, tmp_path=None):
         "openlist_password": "-".join(("dummy", "pw", "placeholder")),
         "openlist_token": "-".join(("dummy", "tok", "placeholder")),
         "download_token": "-".join(("dummy", "dl", "placeholder")),
-        "request_interval_ms": 500,
+        "request_interval": 0.5,
         "managed_groups": ["g1", "g2"],
         "global_admin_qqs": [12345],
     })
@@ -159,10 +159,10 @@ class TestApiConfigGet:
 
     @pytest.mark.asyncio
     async def test_config_get_reload_required_markers(self, monkeypatch):
-        svc = _make_services({"request_interval_ms": 500})
+        svc = _make_services({"request_interval": 0.5})
         result = await _wp.api_config_get(svc)
-        # request_interval_ms should be in reload_required
-        assert "request_interval_ms" in result["reload_required"]
+        # request_interval should be in reload_required
+        assert "request_interval" in result["reload_required"]
 
     @pytest.mark.asyncio
     async def test_config_get_groups_preserve_order(self, monkeypatch):
@@ -254,23 +254,22 @@ class TestApiConfigSave:
         assert "saved" in result or result.get("status") == "error"
 
     @pytest.mark.asyncio
-    async def test_save_int_type_normalization(self, monkeypatch):
-        """int 类型归一化。"""
+    async def test_save_request_interval_normalization(self, monkeypatch):
+        """float 类型归一化（request_interval 为 schema 中的 float 键）。"""
         svc = _make_services()
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
-            {"values": {"request_interval_ms": "600"}}
+            {"values": {"request_interval": "0.6"}}
         ))
         result = await _wp.api_config_save(svc)
-        # request_interval_ms is a valid schema key with type int
         if "saved" in result:
-            assert "request_interval_ms" in result["saved"]
+            assert "request_interval" in result["saved"]
 
     @pytest.mark.asyncio
     async def test_save_invalid_int_skipped(self, monkeypatch):
-        """无效 int 值应被跳过（不崩溃）。"""
+        """无效数值应被跳过（不崩溃）。"""
         svc = _make_services()
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
-            {"values": {"request_interval_ms": "not_a_number"}}
+            {"values": {"request_interval": "not_a_number"}}
         ))
         result = await _wp.api_config_save(svc)
         # Should error (no valid keys after skip)

@@ -47,19 +47,19 @@
     "group": "基础设置",
     "description": "管理面板文件列表每页条数（1-100，页面上可临时切换）"
   },
-  "request_interval_ms": {
-    "type": "int",
-    "default": 1000,
+  "request_interval": {
+    "type": "float",
+    "default": 1.0,
     "group": "基础设置",
-    "description": "调用 QQ 接口的基础间隔（毫秒），防止账号被风控",
-    "hint": "默认 1000（每秒 1 次）；读类接口（浏览列表等）自动放宽到 0.4 倍；一般无需修改"
+    "description": "调用 QQ 接口的基础间隔（秒），防止账号被风控",
+    "hint": "默认 1.0（每秒 1 次）；读类接口（浏览列表等）自动放宽到 0.4 倍；一般无需修改"
   },
-  "fetch_max_bytes": {
-    "type": "int",
-    "default": 2147483648,
+  "fetch_max_size": {
+    "type": "string",
+    "default": "2GB",
     "group": "自动保存与分卷",
     "description": "/csfetch 外部链接导入的单文件大小上限",
-    "hint": "单位字节，默认 2GB = 2147483648"
+    "hint": "填写带单位的大小，如 500MB、1.5GB、2TB（存储单位按 1000 进制换算）"
   },
   "download_server_enabled": {
     "type": "bool",
@@ -81,12 +81,12 @@
     "group": "下载服务",
     "description": "下载服务的 HTTP 端口（0 = 关闭 HTTP）"
   },
-  "download_ftp_port": {
+  "download_sftp_port": {
     "type": "int",
     "default": 0,
     "group": "下载服务",
-    "description": "下载服务的 FTP 端口（0 = 关闭 FTP）",
-    "hint": "开启后可用 FTP 客户端浏览 群号/文件名 目录结构"
+    "description": "下载服务的 SFTP 端口（0 = 关闭 SFTP）",
+    "hint": "需要可选依赖 paramiko（pip install paramiko）；SSH+密码认证，浏览 群号/文件名 目录结构"
   },
   "download_smb_port": {
     "type": "int",
@@ -142,17 +142,19 @@
     "description": "归档路径模板",
     "hint": "可用变量：{group_id} 群号、{filename} 文件名；默认按 群号/文件名 分目录存放"
   },
-  "bridge_min_bytes": {
-    "type": "int",
-    "default": 0,
+  "bridge_min_size": {
+    "type": "string",
+    "default": "0",
     "group": "网盘归档",
-    "description": "归档文件大小下限（字节，0 = 不限制）"
+    "description": "归档文件大小下限（0 = 不限制）",
+    "hint": "填写带单位的大小，如 10MB、1GB；纯数字按 MB 处理（存储单位按 1000 进制换算）"
   },
-  "bridge_max_bytes": {
-    "type": "int",
-    "default": 0,
+  "bridge_max_size": {
+    "type": "string",
+    "default": "0",
     "group": "网盘归档",
-    "description": "归档文件大小上限（字节，0 = 不限制）"
+    "description": "归档文件大小上限（0 = 不限制）",
+    "hint": "填写带单位的大小，如 500MB、2GB；纯数字按 MB 处理（存储单位按 1000 进制换算）"
   },
   "openlist_allow_private_address": {
     "type": "bool",
@@ -182,11 +184,12 @@
     "description": "长视频导入相册时切分的时长上限（受 QQ 相册 599 秒硬限制）",
     "invisible": true
   },
-  "volume_threshold_mb": {
-    "type": "int",
-    "default": 95,
+  "volume_threshold": {
+    "type": "string",
+    "default": "95MB",
     "group": "高级选项",
-    "description": "文件分卷阈值（MB），超过此大小的文件自动分卷压缩上传",
+    "description": "文件分卷阈值，超过此大小的文件自动分卷压缩上传",
+    "hint": "填写带单位的大小，如 95MB、1GB；纯数字按 MB 处理（存储单位按 1000 进制换算）",
     "invisible": true
   },
   "fetch_timeout_sec": {

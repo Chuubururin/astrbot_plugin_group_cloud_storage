@@ -6,6 +6,7 @@ never blocks execution.
 
 from __future__ import annotations
 
+from ..units import parse_size
 from .defaults import DEFAULTS
 
 
@@ -44,6 +45,29 @@ def validate_config(data: dict) -> list[tuple[str, str]]:
                 "建议设置独立令牌以获得更细粒度的访问控制。",
             )
         )
+    # Semantic: string-unit size keys must parse ("95MB", "2GB", base 1000);
+    # bare numbers are read as MB. Unparseable values warn (never block).
+    for key, floor_hint in (
+        ("volume_threshold", "10MB"),
+        ("fetch_max_size", "1MB"),
+        ("bridge_min_size", None),
+        ("bridge_max_size", None),
+    ):
+        if key not in data:
+            continue
+        value = data[key]
+        try:
+            parse_size(value)
+        except ValueError:
+            # Truncate: the value is user-supplied and unbounded in length.
+            shown = str(value)[:40]
+            warnings.append(
+                (
+                    key,
+                    f"大小格式无法识别（{shown!r}），支持 MB/GB/TB 如 500MB、1.5GB；"
+                    "已回退为默认值",
+                )
+            )
     # Semantic: volume_threshold_mb must be a positive integer >= 10
     vtb = data.get("volume_threshold_mb")
     if vtb is not None:

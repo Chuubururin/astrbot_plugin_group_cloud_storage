@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 
 from core.domain.sync import Page, ResourceQuery, ResourceStats
+from core.units import format_size
 from ports.meta_store import MetaStorePort
 
 
@@ -41,15 +42,15 @@ class StatsService:
 
     @staticmethod
     def format_stats(st: ResourceStats) -> str:
-        used = st.used_space / (1024**3) if st.used_space else 0
-        total = st.total_space / (1024**3) if st.total_space else 0
+        used = format_size(st.used_space)
+        total = format_size(st.total_space)
         lines = [
             f"📊 群 {st.group_id} 文件统计",
             f"▸ 文件数：{st.file_count}",
             f"▸ 总大小：{StatsService._fmt_size(st.total_size)}",
             f"▸ 上传者：{st.uploaders} 人",
-            f"▸ 群容量：{used:.2f} / {total:.2f} GB"
-            + (f"（富余 {max(0.0, total - used):.2f} GB）" if total else ""),
+            f"▸ 群容量：{used} / {total}"
+            + (f"（富余 {format_size(max(0, (st.total_space or 0) - (st.used_space or 0)))}）" if st.total_space else ""),
         ]
         if st.by_folder:
             lines.append("▸ 目录分布：")
@@ -97,11 +98,5 @@ class StatsService:
 
     @staticmethod
     def _fmt_size(n: int) -> str:
-        n = n or 0
-        if n < 1024:
-            return f"{n} B"
-        if n < 1024**2:
-            return f"{n / 1024:.1f} KB"
-        if n < 1024**3:
-            return f"{n / 1024**2:.1f} MB"
-        return f"{n / 1024**3:.2f} GB"
+        """Unified storage formatting (base 1000; MB/GB/TB only)."""
+        return format_size(n)

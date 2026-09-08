@@ -12,6 +12,8 @@
  * @module api
  */
 
+import { API_TIMEOUT } from './constants.js';
+
 /** Resolve the bridge SDK lazily (host injects it before scripts run). */
 function sdk() {
   return window.AstrBotPluginPage;
@@ -32,6 +34,7 @@ export const API = {
     REMOVE: 'groups/remove',
     REMOVED: 'groups/removed',
     RESTORE: 'groups/restore',
+    OPEN_STATE: 'groups/open-state',
   },
 
   // ---- Files  ----
@@ -52,7 +55,7 @@ export const API = {
     LINKS: 'files/links',                     // batch direct links
     DOWNLOAD: 'files/download',
     LINK: 'files/link',
-    ADDRESS: 'download/address',              // local download service (HTTP/FTP)
+    ADDRESS: 'download/address',              // local download service (HTTP/SFTP)
     URI: 'files/uri',
     SCAN: 'files/scan',
     SYNC: 'files/sync',
@@ -174,23 +177,35 @@ export const BRIDGE_STATE_LABELS = {
 };
 
 /**
- * GET request.
+ * GET request with timeout protection.
  * @param {string} path - API path (key of API)
  * @param {Record<string, string>} [params] - query parameters
  * @returns {Promise<any>} decoded JSON body
  */
 export async function apiGet(path, params) {
-  return sdk().apiGet(path, params);
+  const p = sdk().apiGet(path, params);
+  return Promise.race([
+    p,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`apiGet timeout: ${path}`)), API_TIMEOUT)
+    ),
+  ]);
 }
 
 /**
- * POST request (body-carried parameters per bridge contract).
+ * POST request with timeout protection (body-carried parameters per bridge contract).
  * @param {string} path - API path
  * @param {any} [body] - request body
  * @returns {Promise<any>}
  */
 export async function apiPost(path, body) {
-  return sdk().apiPost(path, body || {});
+  const p = sdk().apiPost(path, body || {});
+  return Promise.race([
+    p,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`apiPost timeout: ${path}`)), API_TIMEOUT)
+    ),
+  ]);
 }
 
 /**
@@ -227,7 +242,7 @@ export async function download(path, params, filename) {
  * @param {function(Object): void} handler - receives parsed event objects
  * @returns {function} cancel
  */
-export function subscribeSSE(handler) {
+export function subscribeSSE(handler, onError) {
   const bridge = sdk();
   if (!bridge || typeof bridge.subscribeSSE !== 'function') return () => {};
 
@@ -238,9 +253,12 @@ export function subscribeSSE(handler) {
       const ev = msg && msg.parsed !== undefined ? msg.parsed : (msg ? msg.raw : msg);
       try { handler(ev); } catch (e) { console.error('[sse] handler error:', e); }
     },
-    onError() {
-      // Host-side channel error: emit nothing; the heartbeat watchdog
-      // detects the dead stream and redials (utils/sse.js I5).
+    onError(err) {
+      // Signal the resilient SSE client so it arms the watchdog /
+      // triggers immediate reconnect instead of silently idling.
+      if (typeof onError === 'function') {
+        try { onError(err); } catch (e) { /* swallow */ }
+      }
     },
   });
 

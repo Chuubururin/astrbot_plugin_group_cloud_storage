@@ -9,12 +9,13 @@ import { formatSize, truncate, cls } from '../../utils/helpers.js';
 import { DATA_CHANGED_TOPICS, MAX_ROWS_PER_FRAME, EVENT_TYPES } from '../../constants.js';
 import { rectHitsRow } from '../../features/marquee-select.js';
 
-test('formatSize: units and zero', () => {
-  assert.equal(formatSize(0), '0 B');
-  assert.equal(formatSize(1023), '1023 B');
-  assert.equal(formatSize(1024), '1.0 KB');
-  assert.equal(formatSize(95 * 1024 * 1024), '95.0 MB');
-  assert.equal(formatSize(undefined), '-');
+test('formatSize: base 1000, MB floor, no byte/KB output', () => {
+  assert.equal(formatSize(0), '0 MB');
+  assert.equal(formatSize(0.5 * 1000 * 1000), '0.5 MB');
+  assert.equal(formatSize(95 * 1000 * 1000), '95.0 MB');
+  assert.equal(formatSize(2 * 1000**3), '2.00 GB');
+  assert.equal(formatSize(1023), '0.1 MB'); // sub-MB rounds to the MB floor
+  assert.equal(formatSize(undefined), '0 MB');
 });
 
 test('truncate: keeps short strings, ellipsizes long ones', () => {

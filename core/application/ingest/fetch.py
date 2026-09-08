@@ -24,7 +24,7 @@ class FetchMixin:
         lossy: bool = False,
         lossy_level: str = "medium",
     ) -> str:
-        """Queue an external URL ingest (http/https/ftp/smb).
+        """Queue an external URL ingest (http/https/sftp/smb).
 
         ``to_album`` accepts images and videos (videos use the long-video
         sharding pipeline); ``to_essence`` reads the downloaded document as
@@ -33,8 +33,8 @@ class FetchMixin:
         Album media is lossy re-encoded only when the uploader opted in
         (``lossy`` + tier high/medium/low; user-selected, irreversible).
         """
-        if not url.lower().startswith(("http://", "https://", "ftp://", "smb://")):
-            raise ValueError("unsupported scheme: only http/https/ftp/smb")
+        if not url.lower().startswith(("http://", "https://", "sftp://", "smb://")):
+            raise ValueError("unsupported scheme: only http/https/sftp/smb")
         if name and not (0 < len(name) <= 80):
             raise ValueError("name length 1..80")
         if to_album and to_essence:
@@ -62,7 +62,7 @@ class FetchMixin:
         )
 
     async def _download(self, url: str, dest: Path) -> int:
-        """Multi-protocol fetch (http/https/ftp/smb): delegated uniformly to
+        """Multi-protocol fetch (http/https/sftp/smb): delegated uniformly to
         TransferService."""
         if self.transfer is None:
             raise RuntimeError("transfer service not wired")

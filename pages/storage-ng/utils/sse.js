@@ -65,7 +65,12 @@ export function createResilientSSE(options = {}) {
     redialTimer = setTimeout(() => {
       if (stopped) return;
       try {
-        unsub = subscribeSSE(handleEvent);
+        unsub = subscribeSSE(handleEvent, () => {
+          // Bridge-side channel error: arm watchdog so the heartbeat
+          // timeout triggers a forced reconnect (prevents silent idle
+          // when the EventSource dies without firing close).
+          armWatchdog();
+        });
       } catch (e) {
         console.error('[sse] subscribe failed, retrying:', e);
         resubscribe(true);

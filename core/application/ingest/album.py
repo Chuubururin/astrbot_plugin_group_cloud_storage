@@ -105,7 +105,7 @@ class AlbumMixin:
         """Album video import (framework retained; the protocol side does not
         support album video upload yet).
 
-        <599s videos upload directly (single segment, no split); >600s videos
+        <599s videos upload directly (single segment, no split); >=599s videos
         are losslessly segmented (ffmpeg -c copy) and each segment gets a
         semantic title `{stem} 第i/N段` so the album listing reads as one
         logical long video.
@@ -118,7 +118,8 @@ class AlbumMixin:
         album_id = await self._album_id(op.target, album_name)
         max_sec = int(getattr(self, "video_segment_seconds", 599))
         dur = await self._probe_duration(src.as_posix()) if hasattr(self, "_probe_duration") else None
-        if dur is not None and dur <= max_sec:
+        # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split)
+        if dur is not None and dur < max_sec:
             # Short video: direct upload, no split
             await self.api.upload_image_to_qun_album(
                 op.target, album_id, album_name, src.as_posix()

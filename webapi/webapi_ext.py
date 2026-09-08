@@ -10,6 +10,7 @@ from .webapi_base import (
     PLUGIN_NAME,
     _Bound,
     _ensure_ready,
+    _group_open_error,
     _normalize_convert_to,
     _param,
 )
@@ -55,10 +56,8 @@ def register_ext_apis(context: Context, s: Services) -> None:
 async def api_files_distribute(s: Services) -> dict:
     """Distribute a group file for download (target=local|netdisk|album|essence)."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     rid = int(payload.get("id") or 0)
     target = str(payload.get("target") or "")
@@ -85,10 +84,8 @@ async def api_albums_distribute(s: Services) -> dict:
     target = str(payload.get("target") or "")
     if not album_id:
         return error_response("album_id required", status_code=400)
-    if group and not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     if s.distributor is None:
         return error_response("distributor not ready", status_code=500)
     try:

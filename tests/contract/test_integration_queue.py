@@ -159,6 +159,8 @@ async def test_unknown_kind_fails_through_dispatcher(store):
 @pytest.mark.asyncio
 async def test_file_scan_streams_data_changed(store):
     """file_scan 扫描中按节流发布 data_changed（边扫边刷新文件列表/容量）。"""
+    from core.domain.sync import GroupInfo
+
     api = FakeOneBotApi(build_tree(file_total=40, folder_total=2, files_per_folder=10))
     queue, dispatcher, _, _ = _make_env(store, api)
     events: list[dict] = []
@@ -167,6 +169,11 @@ async def test_file_scan_streams_data_changed(store):
         async for ev in queue.subscribe():
             events.append(ev)
 
+    # range 模式现在有开闸兜底：目标群必须先落库（归属账号已在线）
+    await store.upsert_groups(
+        [GroupInfo(group_id=g, account_id="10001") for g in
+         ("g1", "g2", "g3", "g4", "g5")]
+    )
     t = asyncio.create_task(listener())
     try:
         op = Op(task_id="fs1", kind="file_scan", target="*",
@@ -179,6 +186,31 @@ async def test_file_scan_streams_data_changed(store):
         assert dc, "扫描中应发布 data_changed（边扫边刷新）"
         assert prog
         assert 1 <= len(dc) <= 5  # 节流：5 群内 data_changed 次数受限
+    finally:
+        await queue.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_file_scan_range_drops_not_openable_groups(store):
+    """range 模式开闸兜底：队列执行时剔除归属账号离线的群，不放行云端拉取。"""
+    api = FakeOneBotApi(build_tree(file_total=4, folder_total=1, files_per_folder=2))
+    queue, dispatcher, _, scan = _make_env(store, api)
+    try:
+        await queue.submit("scan", target="*")
+        await _drain(queue, 1)
+        groups = {g.group_id: g for g in await store.list_groups()}
+        assert groups["g1"].account_id == "10001"
+        # 账号在线时 range 全部放行
+        scan.set_online_ids_callback(lambda: {"10001"})
+        op = Op(task_id="fs1", kind="file_scan", target="*",
+                payload={"mode": "range", "groups": ["g1", "no-such"]})
+        await dispatcher.do_file_scan(op)
+        # 账号离线后重放：g1 被剔除（no-such 本就未受管被剔除），不触发全量拉取
+        scan.set_online_ids_callback(lambda: set())
+        op2 = Op(task_id="fs2", kind="file_scan", target="*",
+                 payload={"mode": "range", "groups": ["g1"]})
+        await dispatcher.do_file_scan(op2)
+        assert not any("list_group_root" in c for c in api.calls)
     finally:
         await queue.shutdown()
 

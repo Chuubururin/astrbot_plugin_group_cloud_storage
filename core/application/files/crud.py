@@ -110,6 +110,10 @@ class CrudMixin:
         result = await self.sync.run_full_sync(op.target, lock)
         if not result.ok:
             logger.warning(f"[file-ops] post-upload sync failed: {result.error}")
+        if result.ok and op.payload.get("parent_resource_id_full"):
+            await self.backfill_volume_refs(
+                op.target, op.payload["parent_resource_id_full"]
+            )
         # Clean up the staged file
         try:
             Path(path).unlink(missing_ok=True)

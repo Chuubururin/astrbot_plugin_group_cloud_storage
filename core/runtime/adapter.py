@@ -36,7 +36,7 @@ class RuntimeAdapter:
         self._runtime_kernel = None
         self._last_bot = self._platform_bot = None
         self._platform_bots: list = []
-        self._api_limiter = KeyedLimiter(interval=float(self.config.get("request_interval_ms", 1000)) / 1000)
+        self._api_limiter = KeyedLimiter(interval=self.config.request_interval)
         self._resolver = PlatformBotResolver(self.context, self.config)
         components = build_components(bind_call_action=self._bind_call_action, run_handler=self._op_handler,
             ready=self._ensure_init, config=self.config, data_dir=self.data_dir,
@@ -57,6 +57,9 @@ class RuntimeAdapter:
         # Per-group scan chaining: as soon as a group's info is persisted the
         # dispatcher queues that group's file scan (no bulk wait)
         self.scan.on_group_scanned = self._dispatch._on_group_scanned
+        # Group open gate: the scan service needs the live online-account set
+        # to exclude offline accounts' groups from lists and targeted reads.
+        self.scan.set_online_ids_callback(self._get_online_account_ids)
         register_page_apis(self.context, self.services)
         logger.info("[group_cloud_storage] page apis registered (storage)")
 

@@ -1,8 +1,8 @@
 """TransferService - multi-protocol transfer pipeline (ingress only).
 
-Ingress (to cloud): remote file -multi-protocol fetch (http/https/ftps/smb)->
-local staging -OneBot11 upload-> QQ server. ftp:// URLs are always upgraded
-to explicit TLS (FTPS); plaintext FTP is never used.
+Ingress (to cloud): remote file -multi-protocol fetch (http/https/sftp/smb)->
+local staging -OneBot11 upload-> QQ server. SFTP targets always use SSH
+transport (paramiko); plaintext protocols are never used.
 
 Modular: each protocol implements ProtocolAdapter.get (fetch to local
 staging); protocol details (URL parsing/auth/rate limits/size caps) are
@@ -28,7 +28,7 @@ FETCH_MAX_BYTES = 2 * 1024**3
 FETCH_TIMEOUT_SEC = 180.0
 _HTTP_REDIRECT_MAX = 5
 
-_INGRESS_SCHEMES = ("http", "https", "ftp", "smb")
+_INGRESS_SCHEMES = ("http", "https", "sftp", "smb")
 
 
 def parse_target(url: str) -> dict:
@@ -114,62 +114,6 @@ class HttpAdapter(ProtocolAdapter):
         return total
 
 
-class FtpAdapter(ProtocolAdapter):
-    scheme = "ftp"
-
-    def _conn(self, target: dict):
-        import ftplib
-        import ssl
-
-        host = target["host"]
-        user = target["user"] or "anonymous"
-        password = target["password"] if target["user"] else "anonymous@"
-
-        # SSRF protection: validate host before connecting
-        if not self._allow_private:
-            assert_fetch_url_allowed(f"ftp://{host}", allow_private=False)
-
-        # FTPS-only (explicit TLS): AUTH TLS on the control channel plus
-        # PROT P on the data channel, so credentials and payloads are never
-        # transmitted in cleartext. Servers without TLS support are
-        # rejected with an explicit error instead of downgrading.
-        ftps = ftplib.FTP_TLS(context=ssl.create_default_context())
-        ftps.connect(host, target["port"] or 21, timeout=self.timeout)
-        try:
-            ftps.login(user, password)
-            ftps.prot_p()
-        except (ftplib.error_perm, ftplib.error_proto, ssl.SSLError, OSError, EOFError):
-            ftps.close()
-            raise ValueError(
-                "FTP 服务器不支持 FTPS（TLS），为避免明文传输已中止连接"
-            ) from None
-        return ftps
-
-    async def get(self, target: dict, dest: Path) -> int:
-        def _run():
-            ftp = self._conn(target)
-            try:
-                written = 0
-
-                def _cb(data: bytes) -> None:
-                    nonlocal written
-                    dest_fh.write(data)
-                    written += len(data)
-                    if written > self.max_bytes:
-                        raise ValueError("fetch exceeds max bytes (ftp)")
-
-                with dest.open("wb") as dest_fh:
-                    ftp.retrbinary(f"RETR {target['path']}", _cb, blocksize=1 << 16)
-            finally:
-                try:
-                    ftp.quit()
-                except Exception:
-                    ftp.close()
-
-        await asyncio.to_thread(_run)
-        return dest.stat().st_size
-
-
 class SmbAdapter(ProtocolAdapter):
     scheme = "smb"
 
@@ -209,6 +153,47 @@ class SmbAdapter(ProtocolAdapter):
         return dest.stat().st_size
 
 
+class SftpAdapter(ProtocolAdapter):
+    scheme = "sftp"
+
+    def _conn(self, target: dict):
+        import paramiko
+
+        host = target["host"]
+        user = target["user"] or "anonymous"
+        password = target["password"] if target["user"] else ""
+
+        # SSRF protection: validate host before connecting
+        if not self._allow_private:
+            assert_fetch_url_allowed(f"sftp://{host}", allow_private=False)
+
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            host,
+            port=target["port"] or 22,
+            username=user,
+            password=password,
+            timeout=self.timeout,
+        )
+        sftp = client.open_sftp()
+        return client, sftp
+
+    async def get(self, target: dict, dest: Path) -> int:
+        def _run():
+            ssh, sftp = self._conn(target)
+            try:
+                path = target["path"]
+                sftp.get(path, str(dest))
+            finally:
+                sftp.close()
+                ssh.close()
+
+        await asyncio.to_thread(_run)
+        return dest.stat().st_size
+
+
 class TransferService:
     def __init__(
         self,
@@ -225,7 +210,10 @@ class TransferService:
         # Config object injection: unified PluginConfig boundary (dicts pass
         # through for compatibility, see core.config.model)
         cfg = config if isinstance(config, PluginConfig) else PluginConfig(config or {})
-        fetch_max = int(cfg.get("fetch_max_bytes", FETCH_MAX_BYTES) or FETCH_MAX_BYTES)
+        # Unified size resolution: string-unit "fetch_max_size" (base 1000)
+        # with the legacy byte-count key as fallback (see PluginConfig);
+        # 0 = unset → built-in default.
+        fetch_max = cfg.fetch_max_bytes or FETCH_MAX_BYTES
         fetch_timeout = float(
             cfg.get("fetch_timeout_sec", FETCH_TIMEOUT_SEC) or FETCH_TIMEOUT_SEC
         )
@@ -237,7 +225,7 @@ class TransferService:
         self._adapters: dict[str, ProtocolAdapter] = {
             "http": HttpAdapter(fetch_max, fetch_timeout, allow_private),
             "https": HttpAdapter(fetch_max, fetch_timeout, allow_private),
-            "ftp": FtpAdapter(fetch_max, fetch_timeout, allow_private),
+            "sftp": SftpAdapter(fetch_max, fetch_timeout, allow_private),
             "smb": SmbAdapter(fetch_max, fetch_timeout, allow_private),
         }
 

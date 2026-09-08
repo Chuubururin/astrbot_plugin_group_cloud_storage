@@ -3,7 +3,10 @@
  *
  * Fetches the stat endpoint for the current context (group or all
  * managed groups when none is focused) and re-renders on group change
- * and file-list refreshes (G4 scheduler).
+ * and file-list refreshes (G4 scheduler). Operator display (stat
+ * `accounts` field): single-group view shows the owning QQ (each file
+ * is operated by exactly one account); the global view shows
+ * "全部在线账号" instead of listing individual QQs.
  *
  * @module components/stat-bar
  */
@@ -30,8 +33,19 @@ export function initStatBar(container) {
       const data = currentGroup
         ? await apiGet(API.STAT, { group: currentGroup })
         : await apiGet(API.STAT);
+      // Operator display (stat `accounts`): every single-file operation runs
+      // under exactly one account (the group's owning account), so a single
+      // group shows that one QQ. The global view aggregates groups across
+      // all online accounts — listing individual QQs there would imply
+      // multi-account operation of one file, so show the scope instead.
+      const operators = (data.accounts || []).filter(Boolean);
+      const isGlobal = data.group_id === '*';
+      const operatorText = isGlobal
+        ? (operators.length ? '全部在线账号' : '-')
+        : (operators.length ? operators[0] : '-');
       container.innerHTML = `
-        <span class="stat-item">群: ${data.group_id === '*' ? '全部受管群' : (data.group_id || '-')}</span>
+        <span class="stat-item">操作者: ${operatorText}</span>
+        <span class="stat-item">群: ${data.group_id === '*' ? '全部在线账号所属群' : (data.group_id || '-')}</span>
         <span class="stat-item">文件: ${data.file_count ?? 0}</span>
         <span class="stat-item">容量: ${formatSize(data.total_space || data.total_size || 0)}</span>
         ${data.used_space != null ? `<span class="stat-item">已用: ${formatSize(data.used_space)}</span>` : ''}

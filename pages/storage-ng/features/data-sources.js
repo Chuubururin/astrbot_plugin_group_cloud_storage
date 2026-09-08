@@ -93,7 +93,16 @@ function makeKindSource(spec) {
     capabilities: spec.capabilities,
     async list(state, params) {
       const query = { kind: spec.kind, page: params.page, page_size: params.page_size };
-      if (state[spec.groupKey]) query.group = state[spec.groupKey];
+      // Module-isolated group filter: each tab owns its own group key
+      // (albumGroup / essenceGroup). Falling back to state.currentGroup
+      // (the files tab's group) caused albums/essence to silently inherit
+      // the files group selection, breaking account-scoped aggregation.
+      const groupFilter = state[spec.groupKey] || '';
+      if (groupFilter) {
+        query.group = groupFilter;
+      } else if (state.accountFilter) {
+        query.account = state.accountFilter;
+      }
       if (params.q) query.q = params.q;
       // Custom-tag filter rides the #tag search channel (module-isolated key).
       if (state[spec.tagFilterKey]) {

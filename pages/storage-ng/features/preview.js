@@ -10,7 +10,7 @@
  * @module features/preview
  */
 
-import { getState } from '../store.js';
+import { getState, refresh } from '../store.js';
 import { API, apiGet, apiPost, download } from '../api.js';
 import { formatSize } from '../utils/helpers.js';
 import { rowGroupFor } from '../utils/group.js';

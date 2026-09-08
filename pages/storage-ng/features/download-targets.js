@@ -6,7 +6,7 @@
  * Naming contract:
  *  - 下载到本地   = browser download (reassembly included for volumes)
  *  - 复制 CDN 直链 = QQ CDN original link (copy only)
- *  - 本机服务地址  = local download-service links (HTTP/FTP/SMB)
+ *  - 本机服务地址  = local download-service links (HTTP/SFTP/SMB)
  *  - 转存到 X     = server-side transfer into another storage medium
  *  - 复制全文     = essence text to clipboard (no transfer)
  *
@@ -17,7 +17,7 @@
 export const DOWNLOAD_TARGETS = [
   { value: 'local', label: '下载到本地（浏览器）' },
   { value: 'link', label: '复制 CDN 直链' },
-  { value: 'address', label: '本机服务地址（HTTP/FTP/SMB）' },
+  { value: 'address', label: '本机服务地址（HTTP/SFTP/SMB）' },
   { value: 'netdisk', label: '转存到网盘' },
   { value: 'album', label: '转存到相册' },
   { value: 'essence', label: '转存到精华' },

@@ -39,9 +39,9 @@ function makeDistribute(spec) {
       try {
         const out = await apiPost(spec.endpoint, spec.payload(ctx, target));
         if (out.target === 'local') {
-          // Local direct-link service: when FTP/SMB lines are present show
+          // Local direct-link service: when SFTP/SMB lines are present show
           // the full address modal; HTTP-only results copy straight away.
-          if (out.ftp || out.smb) {
+          if (out.sftp || out.smb) {
             const copied = await showDownloadAddress(out);
             if (copied) toast('HTTP 地址已复制', 'success');
           } else {

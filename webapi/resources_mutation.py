@@ -15,15 +15,13 @@ except ImportError:
     _StarletteRequest = None
 from commands.handlers import Services
 from core.api_validate import ApiValidationError, json_body, pick, qi
-from .webapi_base import _param
+from .webapi_base import _param, _group_open_error, _account_scope_for
 
 async def api_file_tags(s: Services) -> dict:
     """Overwrite resource tags (undo supported)."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     fid = payload.get("id")
     tags = payload.get("tags")
@@ -67,10 +65,8 @@ async def api_tagcloud(s: Services) -> dict:
 async def api_file_delete(s: Services) -> dict:
     """Delete a group file (queued; progress via SSE)."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     fid = payload.get("id")
     if not isinstance(fid, int):
@@ -91,10 +87,8 @@ async def api_file_convert_volumes(s: Services) -> dict:
     files keep their own mandatory built-in volume pipeline.
     """
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     fid = payload.get("id")
     if not isinstance(fid, int):
@@ -109,10 +103,8 @@ async def api_file_convert_volumes(s: Services) -> dict:
 async def api_file_replace_name(s: Services) -> dict:
     """Rename (download-reupload): fetch original -> reupload under the new name -> delete old."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     fid, name = payload.get("id"), payload.get("new_name")
     if (
@@ -131,10 +123,8 @@ async def api_file_replace_name(s: Services) -> dict:
 async def api_file_move(s: Services) -> dict:
     """Move a file into the given folder (local index operation)."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     fid, folder = payload.get("id"), payload.get("folder_id")
     if not isinstance(fid, int) or not folder:
@@ -177,10 +167,8 @@ async def api_file_link(s: Services) -> dict:
     direct link (safe to hand out externally; its expiry is decided by QQ).
     """
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     fid = qi(await _param("id", "0")) or 0
     if fid <= 0:
         return error_response("id required", status_code=400)
@@ -221,12 +209,12 @@ async def api_download_address(s: Services) -> dict:
         "http_url": s.dlserver.download_url(group, int(rid)),
         "note": "HTTP 直链式下载：单文件 302 至 QQ CDN，分卷/视频流式返回",
     }
-    if s.dlserver.ftp_port > 0:
-        ftp = s.dlserver.ftp_info()
-        info["ftp"] = {
-            **ftp,
+    if s.dlserver.sftp_port > 0:
+        sftp = s.dlserver.sftp_info()
+        info["sftp"] = {
+            **sftp,
             "path": f"/{group}/{detail.get('name') or rid}",
-            "note": "FTP 虚拟目录 /<群号>/<文件名>，RETR 按需拉取",
+            "note": "SFTP 虚拟目录 /<群号>/<文件名>，读取按需拉取",
         }
     if s.dlserver.smb_port > 0 and getattr(s.dlserver, "smb_available", False):
         info["smb"] = {
@@ -239,10 +227,8 @@ async def api_download_address(s: Services) -> dict:
 async def api_folder_create(s: Services) -> dict:
     """Create a group file folder (backed by create_group_file_folder)."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     name = str(payload.get("name") or "").strip()
     parent_id = str(payload.get("parent_id") or "/").strip() or "/"
@@ -257,34 +243,36 @@ async def api_folder_create(s: Services) -> dict:
 
 async def api_folder_delete(s: Services) -> dict:
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(group, s.config.get("managed_groups", [])):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     folder_id = str(payload.get("folder_id") or "").strip()
     if not folder_id:
         return error_response("folder_id required", status_code=400)
-    try:
-        await s.api.delete_group_file_folder(group, folder_id)
-    except Exception as e:
-        logger.warning(f"[webapi] delete folder failed: {e}", exc_info=True)
-        return error_response("delete folder failed", status_code=502)
+    async with _account_scope_for(s, group):
+        try:
+            await s.api.delete_group_file_folder(group, folder_id)
+        except Exception as e:
+            logger.warning(f"[webapi] delete folder failed: {e}", exc_info=True)
+            return error_response("delete folder failed", status_code=502)
     return json_response({"ok": True, "group": group, "folder_id": folder_id})
 
 
 async def api_folder_rename(s: Services) -> dict:
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(group, s.config.get("managed_groups", [])):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     folder_id = str(payload.get("folder_id") or "").strip()
     name = str(payload.get("name") or payload.get("new_folder_name") or "").strip()
     if not folder_id or not name:
         return error_response("folder_id and name required", status_code=400)
-    try:
-        await s.api.rename_group_file_folder(group, folder_id, name)
-    except Exception as e:
-        logger.warning(f"[webapi] rename folder failed: {e}", exc_info=True)
-        return error_response("rename folder failed", status_code=502)
+    async with _account_scope_for(s, group):
+        try:
+            await s.api.rename_group_file_folder(group, folder_id, name)
+        except Exception as e:
+            logger.warning(f"[webapi] rename folder failed: {e}", exc_info=True)
+            return error_response("rename folder failed", status_code=502)
     return json_response({"ok": True, "group": group, "folder_id": folder_id, "name": name})
 
 
@@ -293,10 +281,8 @@ async def api_file_download(s: Services) -> dict | object:
     (Page iframes are restricted and must go through bridge.download).
     """
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     fid = qi(await _param("id", "0")) or 0
     if fid <= 0:
         return error_response("id required", status_code=400)
@@ -395,8 +381,8 @@ async def api_files_sync(s: Services) -> dict:
     """Manually trigger this group's cloud file scan (full sync, queued and rate-limited)."""
     group = await _param("group", "")
     if group:
-        if not await s.scan.is_page_managed(group, s.config.get("managed_groups", [])):
-            return error_response("group not managed", status_code=403)
+        if err := await _group_open_error(s, group):
+            return err
         task_id = await s.queue.submit("sync", target=group)
         return json_response({"task_id": task_id, "groups": 1})
     # No group given -> reject: use files/scan (all/range) instead of an implicit full pull
@@ -410,10 +396,8 @@ async def api_files_sync(s: Services) -> dict:
 async def api_file_detail(s: Services) -> dict:
     """File detail (volume info/hashes included; Page row action "detail")."""
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     fid = qi(await _param("id", "0")) or 0
     if fid <= 0:
         return error_response("id required", status_code=400)
@@ -456,11 +440,10 @@ async def api_file_detail(s: Services) -> dict:
 
 
 async def _managed_items(s: Services, items: list, failed: list):
-    """Yield (fid, gid) for each batch item that parses and belongs to a
-    page-managed group; failures are appended to `failed` (pass a throwaway
-    list for silent-skip semantics).
+    """Yield (fid, gid) for each batch item that parses and passes the group
+    open gate; failures are appended to `failed` (pass a throwaway list for
+    silent-skip semantics).
     """
-    managed = s.config.get("managed_groups", [])
     for it in items:
         try:
             fid = pick(it, "id", cast=int, required=True)
@@ -468,8 +451,10 @@ async def _managed_items(s: Services, items: list, failed: list):
         except ApiValidationError as e:
             failed.append(str(e))
             continue
-        if not await s.scan.is_page_managed(gid, managed):
-            failed.append(f"group {gid} not managed")
+        # Batch path: same open gate as single-group operations (offline owner
+        # or dissolved group -> per-item failure, rest continue).
+        if await _group_open_error(s, gid) is not None:
+            failed.append(f"group {gid} not openable")
             continue
         yield fid, gid
 

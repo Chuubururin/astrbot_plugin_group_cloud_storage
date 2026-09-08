@@ -7,7 +7,7 @@ created.
 
 Mesh topology, point-to-point transfers in both directions (type
 restrictions apply only at the album/essence entrances):
-- file -> local = downloads direct link (http/ftp; smb has no channel and
+- file -> local = downloads direct link (http/sftp; smb has no channel and
   is explicitly unsupported)
 - file -> netdisk = bridge_out (forward transfer)
 - file -> album = local direct link -> fetch to_album (cloud to cloud,
@@ -125,7 +125,7 @@ class DistributorService:
     def smb_notice(self) -> str:
         """smb direct-link degradation notice: the local download server has
         no SMB channel (missing impacket or port disabled)."""
-        return "SMB 直链未开启（需配置 download_smb_port 且安装 impacket）；请使用 HTTP/FTP 直链。"
+        return "SMB 直链未开启（需配置 download_smb_port 且安装 impacket）；请使用 HTTP/SFTP 直链。"
 
     # ---------- File distribution (kind=file) ----------
 
@@ -167,14 +167,14 @@ class DistributorService:
         raise ValueError(f"unsupported target for file: {target}")
 
     def _address_info(self, group_id: str, rid: int, name: str) -> dict:
-        """Direct-link address set (http/ftp/smb) for one resource on the
+        """Direct-link address set (http/sftp/smb) for one resource on the
         local download service; smb present only when the channel is up."""
         if not self.dlserver:
             raise ValueError("download server disabled")
         out: dict = {"http_url": self.dlserver.download_url(group_id, rid)}
-        if self.dlserver.ftp_port > 0:
-            out["ftp"] = {
-                **self.dlserver.ftp_info(),
+        if self.dlserver.sftp_port > 0:
+            out["sftp"] = {
+                **self.dlserver.sftp_info(),
                 "path": f"/{group_id}/{name}",
             }
         if (
@@ -290,7 +290,7 @@ class DistributorService:
         text = await self._essence_full_text(group_id, rid)
         if target == "local":
             # Full text staged as a file and served over the local download
-            # service (http/ftp/smb direct links); the text is also returned
+            # service (http/sftp/smb direct links); the text is also returned
             # so the browser side can copy it without a second fetch.
             if not self.dlserver or not self.dlserver.enabled or not self.tmp_dir:
                 raise ValueError("download server / tmp dir required")
@@ -301,7 +301,7 @@ class DistributorService:
                 "target": "local",
                 "text": text,
                 "http_url": addr.get("http_url"),
-                "ftp": addr.get("ftp"),
+                "sftp": addr.get("sftp"),
                 "smb": addr.get("smb"),
                 **({} if addr.get("smb") else {"smb_notice": self.smb_notice()}),
             }

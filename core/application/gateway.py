@@ -7,7 +7,7 @@ clients) interacts only with this gateway:
    live session-handle resolution, capability probing, and rate-limited
    queueing, all consolidated in the OneBotApiPort adapter + OpQueue
 2. local: local metadata index (SqliteMetaStore, filesystem-like/readable)
-3. external: unified facade for external services (http/ftp/smb fetch
+3. external: unified facade for external services (http/sftp/smb fetch
    ingress + the local download server)
 
 This class is a lightweight facade (it does not duplicate implementations);
@@ -34,8 +34,8 @@ class StorageGateway:
         self.cloud = cloud  # cloud escaping: OneBotApiPort (NapCat adapter)
         self.local = local  # local index: MetaStorePort (SQLite)
         self.ingest = ingest  # cloud ingress (splitting/fetch)
-        self.transfer = transfer  # egress transfer (http PUT/ftp/smb)
-        self.dlserver = dlserver  # local download server (http/ftp)
+        self.transfer = transfer  # egress transfer (http PUT/sftp/smb)
+        self.dlserver = dlserver  # local download server (http/sftp)
         self.fileops = fileops  # file-level operations (upload/download/add/delete/modify)
 
     # ---------- Routing semantics ----------
@@ -60,13 +60,13 @@ class StorageGateway:
     async def ingest_url(
         self, group_id: str, url: str, name: str = "", to_album: bool = False
     ) -> str:
-        """Ingress: fetch-import from an external URL (http/ftp/smb)."""
+        """Ingress: fetch-import from an external URL (http/sftp/smb)."""
         if self.ingest is None:
             raise RuntimeError("gateway ingest not wired")
         return await self.ingest.submit_fetch(group_id, url, name, to_album)
 
     async def egress(self, group_id: str, id: int, target: str) -> str:
-        """Egress: transfer to an external medium (http PUT/ftp/smb)."""
+        """Egress: transfer to an external medium (http PUT/sftp/smb)."""
         if self.transfer is None:
             raise RuntimeError("gateway transfer not wired")
         return await self.transfer.submit_egress(group_id, id, target)
@@ -94,9 +94,9 @@ class StorageGateway:
             "cloud": "OneBot/NapCat（会话句柄转义 + 能力探测 + OpQueue 限速）",
             "local": f"SQLite schema v10（path/ext 文件系统化 + v_resources 视图）",
             "external": {
-                "egress": ["http-put", "ftp", "smb"] if self.transfer else [],
+                "egress": ["http-put", "sftp", "smb"] if self.transfer else [],
                 "http_download": bool(self.dlserver and self.dlserver.http_port),
-                "ftp_download": bool(self.dlserver and self.dlserver.ftp_port),
-                "ingress": ["http", "https", "ftp", "smb"] if self.ingest else [],
+                "sftp_download": bool(self.dlserver and self.dlserver.sftp_port),
+                "ingress": ["http", "https", "sftp", "smb"] if self.ingest else [],
             },
         }

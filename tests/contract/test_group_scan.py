@@ -178,6 +178,79 @@ async def test_empty_managed_allows_all(env):
     assert await svc.is_page_managed("unknown_group", []) is True
 
 
+# ---------- 开闸校验（离线账号操作者 / 已解散群防护） ----------
+
+@pytest.mark.asyncio
+async def test_group_open_gate_offline_owner(env):
+    """归属账号离线 → open gate 拒绝（群归属账号离线）。"""
+    store, api, svc = env
+    await svc.scan_owned()
+    # g1 归属 bot_qq=10001；回调返回空集 → 该账号离线
+    svc.set_online_ids_callback(lambda: set())
+    with pytest.raises(ValueError, match="离线"):
+        await svc.assert_group_openable("g1", [])
+    # 账号在线 → 通过离线检查，进入远端解散探测（fake get_group_info 有名字 → 放行）
+    svc.set_online_ids_callback(lambda: {"10001"})
+    await svc.assert_group_openable("g1", [])
+
+
+@pytest.mark.asyncio
+async def test_group_open_gate_dissolved_group(env):
+    """账号在线但群已消失（get_group_info 无名字）→ fail-closed 拒绝。"""
+    store, api, svc = env
+    await svc.scan_owned()
+    svc.set_online_ids_callback(lambda: {"10001"})
+    # 模拟解散：远端群信息不可得（空 group_name）
+    async def _gone(group_id, no_cache=False):
+        return {"group_id": group_id, "group_name": ""}
+    api.get_group_info = _gone
+    with pytest.raises(ValueError, match="解散"):
+        await svc.assert_group_openable("g1", [])
+
+
+@pytest.mark.asyncio
+async def test_group_open_gate_remote_error_fail_closed(env):
+    """远端探测抛错（协议层失败）→ 同样按解散 fail-closed 拒绝。"""
+    store, api, svc = env
+    await svc.scan_owned()
+    svc.set_online_ids_callback(lambda: {"10001"})
+    async def _boom(group_id, no_cache=False):
+        raise RuntimeError("api unreachable")
+    api.get_group_info = _boom
+    with pytest.raises(ValueError, match="解散"):
+        await svc.assert_group_openable("g1", [])
+
+
+@pytest.mark.asyncio
+async def test_group_open_gate_unmanaged_group(env):
+    """未受管（未知群）→ group not managed 拒绝，且不发起远端探测。"""
+    store, api, svc = env
+    await svc.scan_owned()
+    svc.set_online_ids_callback(lambda: {"10001"})
+    calls = {"n": 0}
+    async def _probe(group_id, no_cache=False):
+        calls["n"] += 1
+        return {"group_id": group_id, "group_name": "x"}
+    api.get_group_info = _probe
+    with pytest.raises(ValueError, match="not managed"):
+        await svc.assert_group_openable("no-such-group", ["g2"])
+    assert calls["n"] == 0  # 短路：未受管不做远端调用
+
+
+@pytest.mark.asyncio
+async def test_list_page_groups_filters_offline_accounts(env):
+    """白名单非空时离线账号的群也不列出（白名单优先复活仅限在线账号）。"""
+    store, api, svc = env
+    await svc.scan_owned()
+    svc.set_online_ids_callback(lambda: set())  # 全部离线
+    allowed = await svc.list_page_groups(["g2", "799"])
+    assert {g.group_id for g in allowed} == {"799"}  # 无归属的未知白名单项保留
+    # 恢复在线 → g1/g2 回到列表（数据未删除）
+    svc.set_online_ids_callback(lambda: {"10001"})
+    allowed = await svc.list_page_groups(["g2", "799"])
+    assert {g.group_id for g in allowed} == {"g1", "g2", "799"}
+
+
 @pytest.mark.asyncio
 async def test_rename_remote_verify_backfill(env):
     """校验后回填：API 成功且群名一致 → 写本地；不一致 → 抛错且不写。"""

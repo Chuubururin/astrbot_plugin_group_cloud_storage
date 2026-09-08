@@ -169,14 +169,14 @@ async def test_backfill_volume_refs(env):
     from core.domain.sync import VolumeInfo
 
     await store.insert_volumes([
-        VolumeInfo(parent_resource_id=parent, seq=1, part_name="big.part01", status="uploaded"),
-        VolumeInfo(parent_resource_id=parent, seq=2, part_name="big.part02", status="uploaded"),
+        VolumeInfo(parent_resource_id=parent, seq=1, part_name="big.part01of02.zip", status="uploaded"),
+        VolumeInfo(parent_resource_id=parent, seq=2, part_name="big.part02of02.zip", status="uploaded"),
     ])
     # 模拟同步后索引：part 文件落库（backfill 从 DB 匹配文件名）
     await store.upsert_resources([
-        Resource(group_id="g1", type=ResourceType.FILE, name="big.part01",
+        Resource(group_id="g1", type=ResourceType.FILE, name="big.part01of02.zip",
                  source_ref="volf1", size=5000, busid=102, created_at=1),
-        Resource(group_id="g1", type=ResourceType.FILE, name="big.part02",
+        Resource(group_id="g1", type=ResourceType.FILE, name="big.part02of02.zip",
                  source_ref="volf2", size=4999, busid=102, created_at=1),
     ])
     await ops.backfill_volume_refs("g1", parent)
@@ -193,15 +193,15 @@ async def test_event_driven_volume_backfill(env):
 
     parent = "g1:file:volgroup:evt"
     await store.insert_volumes([
-        VolumeInfo(parent_resource_id=parent, seq=1, part_name="big.part01", status="uploaded"),
-        VolumeInfo(parent_resource_id=parent, seq=2, part_name="big.part02", status="uploaded"),
+        VolumeInfo(parent_resource_id=parent, seq=1, part_name="big.part01of02.zip", status="uploaded"),
+        VolumeInfo(parent_resource_id=parent, seq=2, part_name="big.part02of02.zip", status="uploaded"),
     ])
     sync = ResourceSyncService(api, store)
     # 模拟群成员手动补传 part01 的事件
     ok = await sync.index_event({
         "post_type": "notice", "notice_type": "group_upload",
         "group_id": "g1", "user_id": "7", "time": 1,
-        "file": {"id": "evtfile_1", "name": "big.part01", "size": 100, "busid": 102},
+        "file": {"id": "evtfile_1", "name": "big.part01of02.zip", "size": 100, "busid": 102},
     })
     assert ok is True
     vols = await store.list_volumes(parent)

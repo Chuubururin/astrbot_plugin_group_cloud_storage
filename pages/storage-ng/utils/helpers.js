@@ -6,18 +6,68 @@
  */
 
 /**
- * Format a byte count as a human-readable string.
+ * Coerce any row value to a finite non-negative number. Symbol/BigInt throw
+ * on Number(), and hostile magnitudes make toFixed emit exponent form
+ * ("1e+296 TB") — anything unusable becomes 0, anything huge is capped.
+ * @param {*} v
+ * @param {number} cap
+ * @returns {number}
+ */
+function toSafeNumber(v, cap) {
+  let n;
+  try { n = Number(v) || 0; } catch { return 0; }
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(n, cap);
+}
+
+/**
+ * Format a byte count as a human-readable storage size.
+ *
+ * Storage units use the decimal base 1000 and the smallest displayed unit is
+ * MB: byte and KB magnitudes never appear (sub-MB values render as "0.1 MB").
  * @param {number} bytes
  * @returns {string}
  */
 export function formatSize(bytes) {
-  if (!bytes && bytes !== 0) return '-';
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = bytes;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  const n = toSafeNumber(bytes, 1e15);
+  if (n <= 0) return '0 MB';
+  const KB = 1000;
+  const MB = KB * 1000;
+  const GB = MB * 1000;
+  const TB = GB * 1000;
+  if (n >= TB) return `${(n / TB).toFixed(2)} TB`;
+  if (n >= GB) return `${(n / GB).toFixed(2)} GB`;
+  return `${Math.max(n / MB, 0.1).toFixed(1)} MB`;
+}
+
+/**
+ * Format a transfer rate (bytes/s) as bandwidth with the binary base 1024.
+ * The smallest displayed unit is MB/s; KB/s and below never appear.
+ * @param {number} bytesPerSecond
+ * @returns {string}
+ */
+export function formatRate(bytesPerSecond) {
+  const v = toSafeNumber(bytesPerSecond, 1e12);
+  if (v <= 0) return '0 MB/s';
+  const MB = 1024 * 1024;
+  const GB = MB * 1024;
+  if (v >= GB) return `${(v / GB).toFixed(2)} GB/s`;
+  return `${Math.max(v / MB, 0.1).toFixed(1)} MB/s`;
+}
+
+/**
+ * Format a duration (seconds) using only 时/分/秒 — milliseconds never appear.
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function formatDuration(seconds) {
+  const total = Math.round(toSafeNumber(seconds, 1e9));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}时${String(m).padStart(2, '0')}分${String(s).padStart(2, '0')}秒`;
+  if (m) return s ? `${m}分${String(s).padStart(2, '0')}秒` : `${m}分`;
+  return `${s}秒`;
 }
 
 /**

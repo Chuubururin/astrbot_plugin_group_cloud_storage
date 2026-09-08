@@ -8,7 +8,7 @@ import time
 from .state import StorePart
 from typing import TYPE_CHECKING
 
-from core.domain.enums import ResourceStatus
+from core.domain.enums import ResourceStatus, ResourceType
 from core.domain.resource import Resource
 from core.domain.sync import Page, PageItem, ResourceQuery, ResourceStats
 
@@ -39,6 +39,78 @@ class ResourcesMixin(StorePart):
     if TYPE_CHECKING:
         _conn: "ConnectionManager"
         _tag_cloud_cache: dict
+
+    def _inherit_composition_identity(
+        self, conn: sqlite3.Connection, items: list[Resource]
+    ) -> None:
+        """Successor-row identity carry-over (same logical file, new file_id).
+
+        NapCat file_ids are session-scoped handles: after a restart the same
+        cloud file lists under a fresh file_id, so the sync inserts a new
+        resource_id row (meta empty) while the composition-carrying row keeps
+        the same (group, name) identity. The sweep cannot retire the old row
+        (its volumes-guard keeps composition parents), leaving two rows for
+        one logical file and a 0/n volume view on the active one.
+
+        One indexed pass loads every volume-composition row; each incoming
+        file row then adopts a stale same-(group_id, name) row's composition
+        meta — stale means its source_ref is no longer among the incoming
+        listing (the cloud no longer exposes that session's file_id).
+        Volumes are reattached to the successor and the stale row is
+        hard-removed so (group, name) identity stays unique. Rows whose
+        source_ref is still listed keep their data: genuinely distinct cloud
+        files with identical names in one folder are merged only when the old
+        session handle has vanished.
+        """
+        if not any(
+            r.type == ResourceType.FILE and r.source_ref for r in items
+        ):
+            return
+        # O(composition rows) via idx_res_name — composition parents are rare
+        # (a handful per group), so this stays small even on 20k upserts.
+        comp_rows = conn.execute(
+            """
+            SELECT resource_id, group_id, name, source_ref, meta FROM resources
+            WHERE type='file'
+              AND json_extract(meta, '$.composition.kind') = 'volumes'
+            """
+        ).fetchall()
+        if not comp_rows:
+            return
+        incoming_refs = {r.source_ref for r in items if r.source_ref}
+        # Successor lookup: newest incoming row wins when the same name is
+        # listed several times in one batch.
+        successors: dict[tuple[str, str], Resource] = {}
+        for r in items:
+            if r.type == ResourceType.FILE and r.source_ref:
+                successors[(r.group_id, r.name)] = r
+        for pred in comp_rows:
+            key = (pred["group_id"], pred["name"])
+            succ = successors.get(key)
+            if (
+                succ is None
+                or succ.resource_id == pred["resource_id"]
+                or pred["source_ref"] in incoming_refs
+            ):
+                continue
+            pred_id, pred_meta = pred["resource_id"], pred["meta"]
+            try:
+                merged = json.loads(pred_meta) if pred_meta else {}
+            except (TypeError, ValueError):
+                merged = {}
+            conn.execute(
+                "UPDATE resources SET meta=? WHERE resource_id=?",
+                (json.dumps(merged, ensure_ascii=False), succ.resource_id),
+            )
+            # Reattach volume records to the successor BEFORE the predecessor
+            # row is removed (volumes rows are keyed by parent resource_id).
+            conn.execute(
+                "UPDATE volumes SET parent_resource_id=? WHERE parent_resource_id=?",
+                (succ.resource_id, pred_id),
+            )
+            # The predecessor is superseded: hard-remove so (group, name)
+            # identity stays unique and it cannot re-shade listings.
+            conn.execute("DELETE FROM resources WHERE resource_id=?", (pred_id,))
 
     async def upsert_resources(self, items: list[Resource]) -> int:
         if not items:
@@ -93,12 +165,23 @@ class ResourcesMixin(StorePart):
                           folder_id=excluded.folder_id, folder_name=excluded.folder_name,
                           created_at=CASE WHEN excluded.created_at > 0
                               THEN excluded.created_at ELSE created_at END,
-                          meta=excluded.meta, updated_at=excluded.updated_at,
+                          status=CASE WHEN excluded.status != 'active'
+                              THEN excluded.status ELSE status END,
+                          meta=CASE WHEN resources.meta IS NOT NULL
+                              AND json_extract(resources.meta, '$.composition') IS NOT NULL
+                            THEN json_patch(resources.meta, excluded.meta)
+                            ELSE excluded.meta END,
+                          updated_at=excluded.updated_at,
                           path=excluded.path, ext=excluded.ext
                         """,
                         chunk,
                     )
                     n += cur.rowcount
+                    # Successor identity carry-over: a newly listed file_id for
+                    # a known (group, name) adopts the deleted composition
+                    # row's meta (volume/composition identity survives the
+                    # session-scoped file_id churn).
+                    self._inherit_composition_identity(conn, items)
                     conn.commit()
                 except Exception:
                     conn.rollback()
@@ -139,8 +222,8 @@ class ResourcesMixin(StorePart):
             if q.keyword:
                 where.append(
                     "(name LIKE ? OR path LIKE ? OR folder_name LIKE ? "
-                    "OR mime LIKE ? OR uploader_name LIKE ? OR uploader_id LIKE ? "
-                    "OR sha256 LIKE ? OR source_ref LIKE ? "
+                    "OR ext LIKE ? OR mime LIKE ? OR uploader_name LIKE ? "
+                    "OR uploader_id LIKE ? OR sha256 LIKE ? OR source_ref LIKE ? "
                     "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) LIKE ? "
                     "OR group_id LIKE ? "
                     "OR group_id IN ("
@@ -149,7 +232,7 @@ class ResourcesMixin(StorePart):
                     "))"
                 )
                 keyword_like = f"%{q.keyword}%"
-                params.extend([keyword_like] * 11)
+                params.extend([keyword_like] * 12)
             if q.uploader_id:
                 where.append("uploader_id = ?")
                 params.append(q.uploader_id)

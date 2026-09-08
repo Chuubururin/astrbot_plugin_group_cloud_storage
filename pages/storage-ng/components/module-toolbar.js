@@ -21,6 +21,7 @@ import {
   showAlbumUploadModal, handleAlbumFileUpload,
   showEssenceUploadModal, handleEssenceFileUpload,
 } from '../features/ingest.js';
+import { filterByAccount, loadAccounts, loadGroups } from '../features/group-data.js';
 
 /** Module specs: everything the shared toolbar needs to differ per tab. */
 export const MODULE_TOOLBAR_SPECS = {
@@ -66,7 +67,10 @@ export function initModuleToolbar(container, modId) {
   container.innerHTML = `
     <div class="toolbar-left">
       <button id="${mod.id}-upload" class="primary" title="上传">${getIcon('UPLOAD', 14)} 上传</button>
-      <select id="${mod.id}-group" class="group-focus" title="群聚焦（未选=全部群聚合）"></select>
+      <select id="${mod.id}-account" class="account-focus" title="账号筛选（缺省=全部在线账号）">
+        <option value="">全部在线账号</option>
+      </select>
+      <select id="${mod.id}-group" class="group-focus" title="群聚焦（未选=全部在线账号所属群聚合）"></select>
       <span class="toolbar-menu">
         <button id="${mod.id}-refresh-menu" class="icon-btn" title="刷新（菜单两档）">${getIcon('REFRESH', 14)}<span class="caret"></span></button>
         <div class="menu-box hidden" id="${mod.id}-refresh-menu-box">
@@ -94,9 +98,33 @@ export function initModuleToolbar(container, modId) {
     }
   });
 
-  // Group focus: '' = aggregated view over all groups .
+  // Account filter: same accountFilter state as the groups tab (one filter
+  // everywhere). Ensure the accounts list is loaded even when the groups
+  // tab was never opened (the module select would otherwise stay empty).
+  renderAccountFilter(container.querySelector(`#${mod.id}-account`));
+  if (!(getState().accounts || []).length) loadAccounts().then(() => (
+    renderAccountFilter(container.querySelector(`#${mod.id}-account`))
+  ));
+  const unsubAccounts = subscribe('accounts', () => renderAccountFilter(container.querySelector(`#${mod.id}-account`)));
+  // Same for the group focus select: the groups state is shared, so the
+  // first module toolbar mount loads it if the groups tab never ran.
+  if (!(getState().groups || []).length) loadGroups();
+  container.querySelector(`#${mod.id}-account`)?.addEventListener('change', (e) => {
+    set('accountFilter', e.target.value);
+    // A focused group outside the picked account is no longer reachable.
+    const groups = getState().groups || [];
+    const focus = getState()[mod.groupKey];
+    if (focus && !filterByAccount(groups, e.target.value).some((g) => g.group_id === focus)) {
+      set(mod.groupKey, '');
+    }
+    set(mod.id === 'album' ? 'albumPage' : 'essencePage', 1);
+    refresh(mod.topic);
+  });
+
+  // Group focus: '' = aggregated view over all groups.
   renderGroupFocus(container.querySelector(`#${mod.id}-group`), mod);
-  const unsub = subscribe('groups', () => renderGroupFocus(container.querySelector(`#${mod.id}-group`), mod));
+  const unsubGroups = subscribe('groups', () => renderGroupFocus(container.querySelector(`#${mod.id}-group`), mod));
+  const unsubAccount = subscribe('accountFilter', () => renderGroupFocus(container.querySelector(`#${mod.id}-group`), mod));
 
   // Two-tier refresh menu (list vs cloud rescan).
   attachMenu(
@@ -114,21 +142,35 @@ export function initModuleToolbar(container, modId) {
     refresh(mod.topic);
   }, 260));
 
-  return unsub;
+  return () => { unsubGroups(); unsubAccount(); unsubAccounts(); };
 }
 
-/** Group focus select options from the groups state; '' = all groups. */
+/** Account filter select from the accounts state ('' = all online). */
+function renderAccountFilter(selectEl) {
+  if (!selectEl) return;
+  const accounts = getState().accounts || [];
+  const cur = getState().accountFilter || '';
+  selectEl.innerHTML = '<option value="">全部在线账号</option>' + accounts.map((id) =>
+    `<option value="${escapeHtml(String(id))}" ${String(id) === cur ? 'selected' : ''}>${escapeHtml(String(id))}</option>`
+  ).join('');
+}
+
+/** Group focus select options from the groups state, filtered by account. */
 function renderGroupFocus(selectEl, mod) {
   if (!selectEl) return;
   const groups = getState().groups || [];
+  const { accountFilter } = getState();
   const cur = getState()[mod.groupKey] || '';
-  if (!groups.length) {
-    selectEl.innerHTML = '<option value="">请先在群组 Tab 加载群列表</option>';
+  const filtered = filterByAccount(groups, accountFilter);
+  if (!filtered.length) {
+    selectEl.innerHTML = groups.length
+      ? '<option value="">当前账号无群组</option>'
+      : '<option value="">请先在群组 Tab 加载群列表</option>';
     selectEl.disabled = true;
     return;
   }
   selectEl.disabled = false;
-  selectEl.innerHTML = '<option value="">全部群（聚合）</option>' + groups.map((g) =>
+  selectEl.innerHTML = '<option value="">全部群（在线聚合）</option>' + filtered.map((g) =>
     `<option value="${g.group_id}" ${g.group_id === cur ? 'selected' : ''}>` +
     `${escapeHtml(g.group_name || String(g.group_id))} (${g.group_id})</option>`).join('');
   selectEl.onchange = () => {

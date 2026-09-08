@@ -13,16 +13,19 @@
  */
 
 import { getState, set, subscribe, refresh } from '../store.js';
+import { API, apiGet } from '../api.js';
 import { getIcon } from '../icons.js';
 import { attachMarquee } from '../features/marquee-select.js';
 import {
   groupSlice, loadGroups, rerenderGroups, updateGroupCheckboxes, loadAccounts,
+  syncModuleFocusToGroup,
 } from '../features/group-data.js';
 import {
   handleBatchOps, handleRemove, handleRestore, handleToggleRemoved, handleMenuAction,
 } from '../features/group-actions.js';
 import { navigate } from '../router.js';
 import { attachMenu } from './menu.js';
+import { toast } from './toast.js';
 
 /**
  * Initialize the groups view.
@@ -33,11 +36,11 @@ export function initGroupsView(container) {
   container.innerHTML = `
     <div class="groups-toolbar toolbar">
       <div class="toolbar-left">
-        <select id="file-group-select" title="查看的群（B1：全部群=聚合视图；选择具体群即设置文件页群上下文）">
-          <option value="">全部群</option>
+        <select id="file-group-select" title="查看的群（B1：全部群=在线账号所属群的聚合视图；选择具体群即设置文件页群上下文）">
+          <option value="">全部群（在线）</option>
         </select>
-        <select id="account-filter" title="账号筛选">
-          <option value="">全部账号</option>
+        <select id="account-filter" title="账号筛选（缺省=全部在线账号）">
+          <option value="">全部在线账号</option>
         </select>
         <button id="btn-batch" class="primary" title="批量操作">${getIcon('EDIT', 13)} 批量操作</button>
         <button id="btn-remove" class="danger" title="移除管理">${getIcon('DELETE', 13)} 移除管理</button>
@@ -87,6 +90,12 @@ export function initGroupsView(container) {
 
   const subs = [
     subscribe('refresh:groups', () => loadGroups(selectedGroups)),
+    // accountFilter can be set programmatically (group row click pins it to
+    // the group's owner); keep the toolbar select in sync.
+    subscribe('accountFilter', () => {
+      const sel = container.querySelector('#account-filter');
+      if (sel) sel.value = getState().accountFilter || '';
+    }),
     subscribe('currentGroup', () => {
       const sel = container.querySelector('#file-group-select');
       if (sel) sel.value = getState().currentGroup || '';
@@ -149,9 +158,34 @@ export function initGroupsView(container) {
   });
 
   // Group context select: navigating to the files tab with a concrete group.
-  container.querySelector('#file-group-select')?.addEventListener('change', (e) => {
+  container.querySelector('#file-group-select')?.addEventListener('change', async (e) => {
     const gid = e.target.value;
+    if (gid) {
+      try {
+        const st = await apiGet(API.GROUPS.OPEN_STATE, { group: gid });
+        if (st && st.reason) {
+          toast(st.reason, 'warn');
+          e.target.value = getState().currentGroup || '';
+          return;
+        }
+      } catch (err) {
+        toast('群状态校验失败: ' + (err.message || '网络错误'), 'error');
+        e.target.value = getState().currentGroup || '';
+        return;
+      }
+    }
     set('currentGroup', gid || '');
+    // Keep albums/essence in step with the new files context: a concrete
+    // group pins the module focuses; clearing it resets to the aggregate.
+    const row = (getState().groups || []).find((gr) => gr.group_id === gid);
+    if (gid && row) {
+      syncModuleFocusToGroup(row);
+    } else {
+      set('albumGroup', '');
+      set('essenceGroup', '');
+      set('albumPage', 1);
+      set('essencePage', 1);
+    }
     set('filePage', 1);
     navigate('files');
   });

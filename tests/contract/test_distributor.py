@@ -23,7 +23,7 @@ from tests.fixtures.fake_onebot import FakeOneBotApi  # noqa: E402
 
 class _FakeDlServer:
     enabled = True
-    ftp_port = 21
+    sftp_port = 22
     smb_port = 0
     smb_available = False
 
@@ -34,12 +34,12 @@ class _FakeDlServer:
         self.calls.append(f"url:{group_id}:{rid}")
         return f"http://dl.local/{group_id}/{rid}"
 
-    def ftp_info(self):
-        return {"host": "127.0.0.1", "port": 21, "user": "cloud", "password": "x"}
+    def sftp_info(self):
+        return {"host": "127.0.0.1", "port": 22, "user": "cloud", "password": "x"}
 
     def register_staged(self, path, name):
         self.calls.append(f"staged:{name}")
-        return {"http_url": f"http://dl.local/staged/{name}", "ftp": None}
+        return {"http_url": f"http://dl.local/staged/{name}", "sftp": None}
 
 
 class _FakeBridge:
@@ -145,7 +145,7 @@ async def test_file_to_local_with_smb_notice(env):
     out = await d.distribute_file("g1", rid, "local")
     assert out["target"] == "local"
     assert out["http_url"].startswith("http://dl.local/")
-    assert out["ftp"] and out["ftp"]["port"] == 21
+    assert out["sftp"] and out["sftp"]["port"] == 22
     assert out["smb"] is None
     assert "SMB" in out["smb_notice"]  # 诚实降级
 

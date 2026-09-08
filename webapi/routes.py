@@ -32,6 +32,7 @@ ROUTES = [
     ("groups/remove", ["POST"], "api_groups_remove", "移除管理条目", "page"),
     ("groups/removed", ["GET"], "api_groups_removed", "已移除管理的群", "page"),
     ("groups/restore", ["POST"], "api_groups_restore", "恢复管理", "page"),
+    ("groups/open-state", ["GET"], "api_groups_open_state", "群可访问性预检", "page"),
     ("groups/info", ["GET"], "api_group_info", "群信息", "page"),
     ("groups/members", ["GET"], "api_group_members", "群成员", "page"),
     ("groups/honor", ["GET"], "api_group_honor", "群荣誉", "page"),

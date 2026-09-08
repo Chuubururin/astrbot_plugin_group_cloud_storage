@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from ..units import parse_size
 from .defaults import DEFAULTS, _to_bool
 from .schema import validate_config
 
@@ -82,6 +83,21 @@ class PluginConfig:
         return self._as("request_interval_ms", int, DEFAULTS["request_interval_ms"])
 
     @property
+    def request_interval(self) -> float:
+        """Base QQ API interval in seconds: the second-unit key wins; the
+        legacy millisecond key applies when the new key is unset.
+        """
+        value = self._data.get("request_interval")
+        if value is not None:
+            try:
+                v = float(value)
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+        return self.request_interval_ms / 1000.0
+
+    @property
     def auto_index_upload_event(self) -> bool:
         value = self._data.get(
             "auto_index_upload_event", DEFAULTS["auto_index_upload_event"]
@@ -115,9 +131,65 @@ class PluginConfig:
     def volume_threshold_mb(self) -> int:
         return self._as("volume_threshold_mb", int, DEFAULTS["volume_threshold_mb"])
 
+    # ---- string-unit size keys (base 1000; legacy byte keys as fallback) ----
+
+    def _size_property(
+        self,
+        key: str,
+        legacy_key: str,
+        default_bytes: int,
+        *,
+        legacy_unit: str = "bytes",
+    ) -> int:
+        """Resolve a size config to bytes.
+
+        Priority: the new string-unit key ("95MB"/"2GB", base 1000; a bare
+        number means MB) > the legacy key > the schema default. Unparseable
+        strings fall through to the legacy/default path (a validation warning
+        already surfaced at startup). ``legacy_unit`` distinguishes the two
+        legacy key families: raw bytes (fetch/bridge) vs MB counts
+        (volume_threshold_mb).
+        """
+        value = self._data.get(key)
+        if value is not None and str(value).strip() not in ("",):
+            try:
+                return parse_size(value)
+            except ValueError:
+                pass
+        # Legacy key: raw bytes, or an MB count for volume_threshold_mb
+        legacy = self._data.get(legacy_key)
+        if legacy is not None:
+            try:
+                n = max(int(legacy), 0)
+                return n * 1024 * 1024 if legacy_unit == "mb" else n
+            except (TypeError, ValueError):
+                pass
+        return default_bytes
+
+    @property
+    def volume_threshold_bytes(self) -> int:
+        default = parse_size(DEFAULTS["volume_threshold"])
+        return self._size_property(
+            "volume_threshold", "volume_threshold_mb", default, legacy_unit="mb"
+        )
+
     @property
     def fetch_max_bytes(self) -> int:
-        return self._as("fetch_max_bytes", int, DEFAULTS["fetch_max_bytes"])
+        return self._size_property(
+            "fetch_max_size", "fetch_max_bytes", DEFAULTS["fetch_max_bytes"]
+        )
+
+    @property
+    def bridge_min_bytes(self) -> int:
+        return self._size_property(
+            "bridge_min_size", "bridge_min_bytes", DEFAULTS["bridge_min_bytes"]
+        )
+
+    @property
+    def bridge_max_bytes(self) -> int:
+        return self._size_property(
+            "bridge_max_size", "bridge_max_bytes", DEFAULTS["bridge_max_bytes"]
+        )
 
     @property
     def fetch_timeout_sec(self) -> int:
@@ -139,8 +211,8 @@ class PluginConfig:
         return self._as("download_http_port", int, DEFAULTS["download_http_port"])
 
     @property
-    def download_ftp_port(self) -> int:
-        return self._as("download_ftp_port", int, DEFAULTS["download_ftp_port"])
+    def download_sftp_port(self) -> int:
+        return self._as("download_sftp_port", int, DEFAULTS["download_sftp_port"])
 
     @property
     def download_token(self) -> str:
@@ -195,11 +267,3 @@ class PluginConfig:
         return self._as(
             "openlist_poll_interval_sec", int, DEFAULTS["openlist_poll_interval_sec"]
         )
-
-    @property
-    def bridge_min_bytes(self) -> int:
-        return self._as("bridge_min_bytes", int, DEFAULTS["bridge_min_bytes"])
-
-    @property
-    def bridge_max_bytes(self) -> int:
-        return self._as("bridge_max_bytes", int, DEFAULTS["bridge_max_bytes"])

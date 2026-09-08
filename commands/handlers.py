@@ -147,7 +147,7 @@ async def handle_cssave(
 async def handle_csfetch(
     event, services: Services, group_id: str = "", url: str = "", name: str = ""
 ) -> str:
-    """Queue an external file import (HTTP/HTTPS/FTP URL) into the target group."""
+    """Queue an external file import (HTTP/HTTPS/SFTP URL) into the target group."""
     actual_group = event.get_group_id()
     target = group_id or actual_group
     if not target:
@@ -159,7 +159,7 @@ async def handle_csfetch(
     if not services.ingest:
         return _err("导入服务未就绪。")
     if not url:
-        return _err("用法：/csfetch [群号] <http|https|ftp URL> [文件名]")
+        return _err("用法：/csfetch [群号] <http|https|sftp URL> [文件名]")
     try:
         task_id = await services.ingest.submit_fetch(
             target, url, name.strip() if name else ""

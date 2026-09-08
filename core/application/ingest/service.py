@@ -42,7 +42,7 @@ class CloudIngestService(EssenceMixin, VideoMixin, AlbumMixin, FetchMixin):
             converter=converter,
             essence_chunk_chars=int(cfg.get("essence_chunk_size", ESSENCE_CHUNK_MAX_CHARS) or ESSENCE_CHUNK_MAX_CHARS),
             video_segment_seconds=int(cfg.get("video_segment_seconds", VIDEO_SEGMENT_MAX_SECONDS) or VIDEO_SEGMENT_MAX_SECONDS),
-            fetch_max_bytes=int(cfg.get("fetch_max_bytes", FETCH_MAX_BYTES) or FETCH_MAX_BYTES),
+            fetch_max_bytes=cfg.fetch_max_bytes or FETCH_MAX_BYTES,
             fetch_timeout=float(cfg.get("fetch_timeout_sec", FETCH_TIMEOUT_SEC) or FETCH_TIMEOUT_SEC),
         )
         self.context.tmp_dir.mkdir(parents=True, exist_ok=True)

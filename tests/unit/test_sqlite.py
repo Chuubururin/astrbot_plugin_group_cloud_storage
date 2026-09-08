@@ -50,6 +50,107 @@ async def test_upsert_idempotent(store):
 
 
 @pytest.mark.asyncio
+async def test_upsert_preserves_composition_meta(store):
+    """回归（0/n 分卷不完整）：full_sync 重索引云端同一文件时，分卷父资源的
+    meta（volumes/composition/total_sha256）必须保留——否则父资源丢失组合
+    语义，前端不再显示分卷徽章、删除走普通分支留下孤儿 part。普通文件的
+    meta 仍按 excluded 覆盖（同步是最终权威）。"""
+    rid = "g1:file:ref_1"
+    await store.upsert_resources(
+        [
+            Resource(
+                group_id="g1", type=ResourceType.FILE, name="f1.zip",
+                source_ref="ref_1", size=100, created_at=1700000001,
+                meta={"volumes": True, "compression": "zip-part",
+                      "composition": {"kind": "volumes", "parts": 2}},
+            )
+        ]
+    )
+    # 同步重索引：同一 resource_id（group:file:source_ref），meta 为空
+    resync = Resource(
+        group_id="g1", type=ResourceType.FILE, name="f1.zip",
+        source_ref="ref_1", size=100, uploader_id="10001", busid=102,
+        created_at=1700000001,
+    )
+    await store.upsert_resources([resync])
+    detail = await store.get_resource_by_resource_id(rid)
+    meta = detail["meta"] or {}
+    assert meta.get("volumes") is True
+    assert (meta.get("composition") or {}).get("kind") == "volumes"
+    # 普通文件（无 composition）：meta 仍被重索引覆盖
+    await store.upsert_resources(
+        [
+            Resource(
+                group_id="g1", type=ResourceType.FILE, name="f2.zip",
+                source_ref="ref_2", size=200, created_at=1700000002,
+                meta={"custom": 1},
+            )
+        ]
+    )
+    resync2 = Resource(
+        group_id="g1", type=ResourceType.FILE, name="f2.zip",
+        source_ref="ref_2", size=200, uploader_id="10001", busid=102,
+        created_at=1700000002,
+    )
+    await store.upsert_resources([resync2])
+    detail2 = await store.get_resource_by_resource_id("g1:file:ref_2")
+    assert detail2["meta"] == {}
+
+
+@pytest.mark.asyncio
+async def test_successor_row_inherits_composition_and_relinks_volumes(store):
+    """回归（0/n 分卷不完整·复发路径）：NapCat file_id 是会话级句柄，重启后
+    同一云端文件以新 file_id 重扫 → 新 resource_id 行（meta 空），携带
+    composition 的旧行被 sweep 标 deleted，volumes 仍挂旧 parent —— 下载
+    显示 0/n 分卷不完整。修复：upsert 时同 (group, name) 的已删 composition
+    行把 meta 让渡给新行、volumes 重挂到新行、旧行硬删。"""
+    from core.domain.sync import VolumeInfo
+
+    old = Resource(
+        group_id="g1", type=ResourceType.FILE, name="big.bin",
+        source_ref="old_ref", size=1000, created_at=1700000001,
+        meta={"volumes": True, "compression": "zip-part",
+              "composition": {"kind": "volumes", "parts": 3}},
+    )
+    await store.upsert_resources([old])
+    await store.insert_volumes([
+        VolumeInfo(parent_resource_id="g1:file:old_ref", seq=1,
+                   part_name="big.part01.zip", source_ref="p1", busid=1,
+                   size=100, sha256="a" * 64, status="ready", upload_time=1,
+                   group_id="g1"),
+        VolumeInfo(parent_resource_id="g1:file:old_ref", seq=2,
+                   part_name="big.part02.zip", source_ref="p2", busid=2,
+                   size=100, sha256="b" * 64, status="ready", upload_time=2,
+                   group_id="g1"),
+    ])
+    # 旧行被 sweep 软删（file_id 不再出现于云端清单）
+    await store.mark_missing_as_deleted("g1", True, set())
+    # 重启后重扫：同一逻辑文件以新 file_id 列出 → 新 resource_id 行
+    fresh = Resource(
+        group_id="g1", type=ResourceType.FILE, name="big.bin",
+        source_ref="new_ref", size=1000, uploader_id="10001", busid=9,
+        created_at=1700000002,
+    )
+    await store.upsert_resources([fresh])
+
+    # 新行继承 composition 语义
+    d = await store.get_resource_by_resource_id("g1:file:new_ref")
+    meta = d["meta"] or {}
+    assert meta.get("volumes") is True
+    assert (meta.get("composition") or {}).get("kind") == "volumes"
+    # volumes 重挂到新行：下载链路可取到全部分卷
+    vols = await store.list_volumes("g1:file:new_ref")
+    assert len(vols) == 2
+    assert {v.part_name for v in vols} == {"big.part01.zip", "big.part02.zip"}
+    # 旧行不复存在（身份唯一），0/2 不再出现
+    assert await store.get_resource_by_resource_id("g1:file:old_ref") is None
+    # 折叠条件恢复：part 行按 volumes 匹配（父行为新行）
+    page = await store.query_resources(ResourceQuery(group_id="g1", page_size=50))
+    names = {it.name for it in page.items}
+    assert "big.bin" in names
+
+
+@pytest.mark.asyncio
 async def test_query_filter_keyword(store):
     await store.upsert_resources([_res(1), _res(2), _res(3)])
     page = await store.query_resources(

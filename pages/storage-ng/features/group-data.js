@@ -82,6 +82,23 @@ export function filterByAccount(groups, accountFilter) {
     : groups;
 }
 
+/**
+ * Propagate a files-tab group context into the albums/essence modules:
+ * accountFilter pins to the group's owning account, albumGroup/essenceGroup
+ * focus the same group. Keeps every tab's precise account+group state in
+ * step with the files tab (the group row click / group select entry points
+ * both route through here).
+ */
+export function syncModuleFocusToGroup(g) {
+  const gid = g.group_id;
+  const accountId = g.account_id || g.account || '';
+  set('accountFilter', accountId);
+  set('albumGroup', gid);
+  set('essenceGroup', gid);
+  set('albumPage', 1);
+  set('essencePage', 1);
+}
+
 function renderGroupRows(groups, selectedGroups, isRemoved) {
   const paneA = document.querySelector('tbody.group-tbody[data-pane="a"]');
   const paneB = document.querySelector('tbody.group-tbody[data-pane="b"]');
@@ -143,9 +160,23 @@ function buildGroupRow(g, selectedGroups) {
       : '-'}</td>
   `;
 
-  tr.addEventListener('click', (e) => {
+  tr.addEventListener('click', async (e) => {
     if (e.target.type === 'checkbox') return;
+    try {
+      const st = await apiGet(API.GROUPS.OPEN_STATE, { group: g.group_id });
+      if (st && st.reason) {
+        toast(st.reason, 'warn');
+        return;
+      }
+    } catch (err) {
+      toast('群状态校验失败: ' + (err.message || '网络错误'), 'error');
+      return;
+    }
     set('currentGroup', g.group_id);
+    // Albums/essence follow the files context: pin the shared account
+    // filter and both module group focuses to this group's owner + group,
+    // so entering a group shows exactly its albums/essence everywhere.
+    syncModuleFocusToGroup(g);
     set('filePage', 1);
     navigate('files');
   });
@@ -240,7 +271,7 @@ export async function loadAccounts() {
       sel.replaceChildren();
       const empty = document.createElement('option');
       empty.value = '';
-      empty.textContent = '全部账号';
+      empty.textContent = '全部在线账号';
       sel.appendChild(empty);
       ids.forEach((id) => {
         const opt = document.createElement('option');
@@ -258,7 +289,7 @@ export function renderGroupSelect(groups) {
   if (!sel) return;
   const { accountFilter, currentGroup } = getState();
   const filtered = filterByAccount(groups, accountFilter);
-  sel.innerHTML = '<option value="">全部群</option>' +
+  sel.innerHTML = '<option value="">全部群（在线）</option>' +
     filtered.map((g) =>
       `<option value="${escapeHtml(g.group_id)}"${g.group_id === currentGroup ? ' selected' : ''}>` +
       `${escapeHtml(g.shown_name || g.group_name || g.group_id)}（${g.group_id}）</option>`

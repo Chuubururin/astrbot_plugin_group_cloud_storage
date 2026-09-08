@@ -1,4 +1,4 @@
-"""CloudIngestService 测试（v1.2）：精华拆分存储 / HTTP-FTP 外部导入 / 长视频分段。"""
+"""CloudIngestService 测试（v1.2）：精华拆分存储 / HTTP-SFTP 外部导入 / 长视频分段。"""
 
 from __future__ import annotations
 
@@ -149,7 +149,7 @@ async def test_essence_rebuild_missing_part(env):
     assert full == m0["text"][: m0["text"].rfind("\n[云盘|")]
 
 
-# ---------- HTTP/FTP 外部导入 ----------
+# ---------- HTTP/SFTP 外部导入 ----------
 
 @pytest.mark.asyncio
 async def test_fetch_http_to_file(env):
@@ -161,14 +161,24 @@ async def test_fetch_http_to_file(env):
 
 
 @pytest.mark.asyncio
-async def test_fetch_ftp_to_file(env):
+async def test_fetch_ftp_rejected(env):
+    tmp_path, store, api, queue, ingest = env
+    with pytest.raises(ValueError):
+        await ingest.submit_fetch(
+            "g1", "ftp://user:pw@127.0.0.1:2121/pub/b.zip", name="b.zip"
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_sftp_accepted(env):
+    """ingress 入站协议白名单：sftp:// 属于合法拉取来源（文档契约 http/https/sftp/smb）。"""
     tmp_path, store, api, queue, ingest = env
     tid = await ingest.submit_fetch(
-        "g1", "ftp://user:pw@127.0.0.1:2121/pub/b.zip", name="b.zip"
+        "g1", "sftp://user:pw@example.com/pub/c.zip", name="c.zip"
     )
     r = await drain_op(queue, tid)
     assert r["state"] == "ok"
-    assert any("upload_group_file:g1:b.zip" in c for c in api.calls)
+    assert any("upload_group_file:g1:c.zip" in c for c in api.calls)
 
 
 @pytest.mark.asyncio
@@ -226,10 +236,11 @@ async def test_fetch_image_to_album_create_unsupported(env):
 
 
 @pytest.mark.asyncio
-async def test_fetch_rejects_bad_input(env):
+async def test_fetch_rejects_unsupported_schemes(env):
+    """ingress 协议白名单（文档契约 http/https/sftp/smb）：ftp 明文协议一律拒绝。"""
     tmp_path, store, api, queue, ingest = env
     with pytest.raises(ValueError):
-        await ingest.submit_fetch("g1", "sftp://host/x")
+        await ingest.submit_fetch("g1", "ftp://host/x")
     with pytest.raises(ValueError):
         await ingest.submit_fetch("g1", "https://h/x.txt", name="x.txt",
                                   to_album=True)
@@ -251,6 +262,34 @@ async def test_video_direct_when_short(env, monkeypatch):
     # 直传路径：不产生分片父资源
     vpage = await store.query_resources(ResourceQuery(group_id="g1"))
     assert not any(((it.meta or {}).get("kind") == "video") for it in vpage.items)
+
+
+@pytest.mark.asyncio
+async def test_video_boundary_599_splits(env, monkeypatch):
+    """契约：≥599s 切为 <599s 段；恰为阈值（599s）的视频必须走分片。
+
+    fixture 的分段阈值为 600，这里显式配置 599 验证「等于阈值即切」的边界。
+    """
+    tmp_path, store, api, queue, ingest = env
+    ingest.video_segment_seconds = 599
+    src = tmp_path / "edge.mp4"
+    src.write_bytes(b"fakemp4" * 10)
+
+    async def _fake_split(srcp, out_dir, stem, max_sec):
+        seg = out_dir / f"{stem}_seg001.mp4"
+        seg.write_bytes(b"SEG" * 10)
+        return [seg]
+
+    import core.application.ingest.video as video_mod
+
+    monkeypatch.setattr(CloudIngestService, "_probe_duration",
+                        _fixed_duration(599))
+    monkeypatch.setattr(video_mod, "split_video", _fake_split)
+    tid = await ingest.submit_video_upload("g1", src.as_posix(), "edge.mp4")
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    parts = [c for c in api.calls if c.startswith("upload_group_file:g1:edge.part")]
+    assert len(parts) == 1
 
 
 def _fixed_duration(sec):

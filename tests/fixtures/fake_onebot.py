@@ -17,6 +17,7 @@ from core.domain.resource import (
     GroupMember,
 )
 from ports.onebot_api import OneBotApiPort
+from core.opctx import account_var
 
 
 class FakeOneBotApi(OneBotApiPort):
@@ -75,6 +76,9 @@ class FakeOneBotApi(OneBotApiPort):
         return self.fs_info or FileSystemInfo(file_count=0, limit_count=1000, used_space=0, total_space=10 * 1024 ** 3)
 
     async def get_group_file_url(self, group_id: str, file_id: str, busid: int | None = None, name: str = "") -> str:
+        # Record the account_scope the call ran under: single-file ops must
+        # execute under the group's owning account (no best_bot ambiguity).
+        self.calls.append(f"get_group_file_url:{group_id}:{file_id}:{account_var.get()}")
         return f"https://fake/download/{file_id}"
 
     async def get_group_album_media_list(self, group_id: str, album_id: str) -> list:

@@ -118,7 +118,15 @@ export function initDataTable(container, source) {
       console.error('[data-table] load failed:', e);
       set(`loadError:${topic}`, true);
       renderErrorRow(e);
-      toast('加载列表失败', 'error');
+      const msg = String(e && e.message || e || '');
+      if (isGroup && (msg.includes('离线') || msg.includes('解散'))) {
+        toast(msg.includes('离线') ? '群归属账号离线，已回退全部群聚合视图' : '该群已解散或不可访问，已回退全部群聚合视图', 'warn');
+        set('currentGroup', '');
+        set('folder', '');
+        set('folderChain', []);
+      } else {
+        toast('加载列表失败', 'error');
+      }
     } finally {
       loadingInFlight = false;
       if (!cancelled) set('loading', false);

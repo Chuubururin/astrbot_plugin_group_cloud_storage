@@ -2,7 +2,27 @@
 from __future__ import annotations
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _PLUGIN_DIR)
+
+# The host framework purges only "data.plugins.<name>.*" entries from
+# sys.modules on plugin reload. This plugin imports its internals as
+# top-level names (core.*, webapi.*, commands.*, ...), which the purge
+# never touches — stale bytecode would survive every reload. Evict any
+# top-level modules that resolve back into this plugin directory before
+# the imports below run, so a reload always picks up fresh code.
+_TOP_LEVEL_PKGS = ("commands", "core", "webapi", "adapters", "ports", "bootstrap")
+for _pkg in _TOP_LEVEL_PKGS:
+    for _key in [k for k in sys.modules if k == _pkg or k.startswith(_pkg + ".")]:
+        _mod = sys.modules.get(_key)
+        _file = getattr(_mod, "__file__", None) or ""
+        if _file and os.path.realpath(os.path.dirname(_file)).startswith(
+            os.path.realpath(_PLUGIN_DIR)
+        ):
+            del sys.modules[_key]
+del _pkg, _key, _mod, _file
+
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from commands.handlers import (handle_csarchive, handle_csbridge, handle_csfetch, handle_cssave, handle_csfile, handle_csfiles, handle_cssync, handle_cshelp)

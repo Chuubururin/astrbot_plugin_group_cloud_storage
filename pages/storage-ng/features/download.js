@@ -35,15 +35,15 @@ export async function promptDownloadTarget(allowed) {
 }
 
 /**
- * Download-service address modal (HTTP/FTP lines + copy HTTP on OK).
- * @param {Object} d - files/address response ({http_url, ftp?, note?})
+ * Download-service address modal (HTTP/SFTP/SMB lines + copy HTTP on OK).
+ * @param {Object} d - files/address response ({http_url, sftp?, note?})
  */
 export async function showDownloadAddress(d) {
   const lines = [
     `HTTP：${d.http_url || '-'}`,
-    d.ftp
-      ? `FTP：ftp://${d.ftp.user}:${d.ftp.password}@${d.ftp.host}:${d.ftp.port}${d.ftp.path}`
-      : 'FTP：未开启',
+    d.sftp
+      ? `SFTP：sftp://${d.sftp.user}:${d.sftp.password}@${d.sftp.host}:${d.sftp.port}${d.sftp.path}`
+      : 'SFTP：未开启',
     d.smb
       ? `SMB：${d.smb.unc || ''}`
       : (d.smb_notice || 'SMB：未开启'),

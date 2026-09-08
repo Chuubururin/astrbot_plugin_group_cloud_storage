@@ -93,13 +93,10 @@ class VolumeMixin:
                 )
             )
         await self.store.insert_volumes(volumes)  # idempotent; keeps existing part status
+        existing_vols = await self.store.list_volumes(parent_key)
         for v in volumes:
             cur = next(
-                (
-                    x
-                    for x in await self.store.list_volumes(parent_key)
-                    if x.seq == v.seq
-                ),
+                (x for x in existing_vols if x.seq == v.seq),
                 v,
             )
             if cur.status == "uploaded" and cur.source_ref:
@@ -260,7 +257,7 @@ class VolumeMixin:
         if not vols:
             return
         page = await self.store.query_resources(
-            _RQ(group_id=group_id, page_size=200), fold_parts=False
+            _RQ(group_id=group_id, page_size=1000), fold_parts=False
         )
         by_name = {it.name: it for it in page.items}
         for v in vols:
@@ -314,9 +311,7 @@ class VolumeMixin:
         # can patch files.consts uniformly.
         threshold = consts.CHUNK_THRESHOLD_BYTES
         if int(detail.get("size") or 0) <= threshold:
-            raise ValueError(
-                f"文件小于分卷阈值（{threshold // 1048576}MB）"
-            )
+            raise ValueError(f"文件小于分卷阈值（{consts.threshold_label()}）")
         return await self.queue.submit(
             "convert_volumes",
             target=group_id,
@@ -426,5 +421,9 @@ class VolumeMixin:
         fid2, busid2 = fresh2 or (op.payload["file_id"], op.payload["busid"] or 0)
         await self.api.delete_group_file(op.target, fid2, busid2)
         lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
-        await self.sync.run_full_sync(op.target, lock)
+        result = await self.sync.run_full_sync(op.target, lock)
+        if result.ok and op.payload.get("parent_resource_id_full"):
+            await self.backfill_volume_refs(
+                op.target, op.payload["parent_resource_id_full"]
+            )
         logger.info(f"[file-ops] converted {op.payload['name']} to volumes")

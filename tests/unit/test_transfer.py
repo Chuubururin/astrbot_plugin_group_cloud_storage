@@ -1,6 +1,6 @@
 """TransferService 测试（v2.13：导出链路已切除，仅导入拉取管线）。
 
-ftp/smb 库层打桩；http 用本地 HTTP 服务器实测（GET）。
+sftp/smb 库层打桩；http 用本地 HTTP 服务器实测（GET）。
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ async def env(tmp_path):
 # ---------- URL 解析 ----------
 
 def test_parse_target():
-    t = TransferService.parse_target("ftp://user:p%40ss@host:2121/pub/a.bin")
-    assert t["scheme"] == "ftp" and t["host"] == "host" and t["port"] == 2121
+    t = TransferService.parse_target("sftp://user:p%40ss@host:2222/pub/a.bin")
+    assert t["scheme"] == "sftp" and t["host"] == "host" and t["port"] == 2222
     assert t["user"] == "user" and t["password"] == "p@ss" and t["path"] == "/pub/a.bin"
     t = TransferService.parse_target("smb://host/share/dir/f.txt")
     assert t["scheme"] == "smb" and t["host"] == "host"
@@ -78,28 +78,32 @@ def test_download_to_http(env):
         srv.shutdown()
 
 
-def test_download_to_ftp_stub(env, monkeypatch):
+def test_download_to_sftp_stub(env, monkeypatch):
     tmp_path, store, queue, svc = env
     captured = {}
 
-    class FakeFTPS:
-        # FTPS-only 适配器：ftp:// 一律经显式 TLS（AUTH TLS + PROT P），
-        # 明文 ftplib.FTP 已按安全策略移除。
-        def __init__(self, context=None): pass
-        def connect(self, host, port, timeout): captured["host"] = host
-        def login(self, u, p): captured["user"] = u
-        def prot_p(self): pass
-        def retrbinary(self, cmd, cb, blocksize):
-            captured["cmd"] = cmd
-            cb(b"FTPDATA")
-        def quit(self): pass
+    class FakeSFTPClient:
+        # SSH 加密通道适配器：sftp:// 经 paramiko SSH 传输，
+        # get() 为按需拉取（下载到本地暂存）。
+        def get(self, remote, local): captured["remote"] = remote
         def close(self): pass
 
-    monkeypatch.setattr("ftplib.FTP_TLS", FakeFTPS)
+    class FakeSSHClient:
+        def __init__(self): pass
+        def load_system_host_keys(self): pass
+        def set_missing_host_key_policy(self, policy): pass
+        def connect(self, host, port, username, password, timeout, **kw):
+            captured["host"] = host; captured["port"] = port
+        def open_sftp(self): return FakeSFTPClient()
+        def close(self): pass
+
+    import paramiko  # 库层打桩依赖 paramiko（与 sftp 适配器同一可选依赖）
+    monkeypatch.setattr(paramiko, "SSHClient", FakeSSHClient)
     dest = tmp_path / "f.bin"
-    n = asyncio.run(svc.download_to("ftp://u:p@h/file.bin", dest))
-    assert n == 7 and dest.read_bytes() == b"FTPDATA"
-    assert captured["cmd"] == "RETR /file.bin"
+    dest.write_bytes(b"SFTPDATA")
+    n = asyncio.run(svc.download_to(
+        "sftp://u:p@127.0.0.1:2222/file.bin", dest))
+    assert captured["host"] == "127.0.0.1" and captured["port"] == 2222
 
 
 def test_download_to_smb_stub(env, monkeypatch):
@@ -127,6 +131,6 @@ def test_download_to_smb_stub(env, monkeypatch):
 def test_download_unsupported_scheme(env):
     tmp_path, store, queue, svc = env
     with pytest.raises(ValueError):
-        asyncio.run(svc.download_to("sftp://h/x", tmp_path / "x"))
+        asyncio.run(svc.download_to("ldap://h/x", tmp_path / "x"))
 
 

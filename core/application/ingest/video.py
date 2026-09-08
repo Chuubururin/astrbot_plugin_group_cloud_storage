@@ -265,7 +265,8 @@ class VideoMixin:
         stem = Path(name).stem
         dur = await self._probe_duration(path)
         max_sec = self.video_segment_seconds
-        if dur is None or dur <= max_sec:
+        # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split)
+        if dur is None or dur < max_sec:
             await self.api.upload_group_file(op.target, path, name, folder_id=folder)
             lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
             result = await self.sync.run_full_sync(op.target, lock)

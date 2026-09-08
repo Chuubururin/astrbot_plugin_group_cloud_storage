@@ -7,7 +7,7 @@ from astrbot.api.web import error_response, json_response
 from core.api_validate import json_body, pick
 from commands.handlers import Services
 
-from .webapi_base import _ensure_ready
+from .webapi_base import _ensure_ready, _group_open_error
 
 
 __all__ = [
@@ -39,10 +39,9 @@ async def api_bridge_transfer(s: Services) -> dict:
     force = pick(payload, "force", cast=bool, default=False)
     dst_dir = pick(payload, "dst_dir", default="")
 
-    # Permission check 
-    managed = s.config.get("managed_groups", [])
-    if not await s.scan.is_page_managed(group, managed):
-        return error_response("group not managed", status_code=403)
+    # Open gate: managed + owning account online + not dissolved.
+    if err := await _group_open_error(s, group):
+        return err
 
     # Submit tasks
     results = []
@@ -144,9 +143,9 @@ async def api_bridge_transfer_in(s: Services) -> dict:
     group = pick(payload, "group", required=True, empty_allowed=False)
     path = pick(payload, "path", required=True, empty_allowed=False)
 
-    # Permission check (same managed-group criteria as the Page)
-    if not await s.scan.is_page_managed(group, s.config.get("managed_groups", [])):
-        return error_response("group not managed", status_code=403)
+    # Open gate (same criteria as the Page list view)
+    if err := await _group_open_error(s, group):
+        return err
 
     try:
         task_id = await s.bridge.submit_in(path, group_id=group)

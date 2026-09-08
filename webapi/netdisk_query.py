@@ -69,8 +69,8 @@ async def api_bridge_config_get(s: Services) -> dict:
                 "openlist_allow_private_address", False
             ),
             "openlist_poll_interval_sec": cfg.get("openlist_poll_interval_sec", 0),
-            "bridge_min_bytes": cfg.get("bridge_min_bytes", 0),
-            "bridge_max_bytes": cfg.get("bridge_max_bytes", 0),
+            "bridge_min_size": cfg.get("bridge_min_size", "0"),
+            "bridge_max_size": cfg.get("bridge_max_size", "0"),
             "download_server_enabled": cfg.get("download_server_enabled", False),
             "download_server_host": cfg.get("download_server_host", "127.0.0.1"),
             "download_http_port": cfg.get("download_http_port", 6186),

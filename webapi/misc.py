@@ -13,6 +13,7 @@ from core.domain.file_type import (
     preview_policy_for,
 )
 from .webapi_base import (
+    _group_open_error,
     _normalize_convert_to,
     _param,
 )
@@ -40,10 +41,8 @@ async def api_fetch(s: Services) -> dict:
     an optional ``convert_to`` extension performs format conversion first.
     """
     group = await _param("group", "")
-    if not group or not await s.scan.is_page_managed(
-        group, s.config.get("managed_groups", [])
-    ):
-        return error_response("group not managed", status_code=403)
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     url = str(payload.get("url") or "").strip()
     if not url:

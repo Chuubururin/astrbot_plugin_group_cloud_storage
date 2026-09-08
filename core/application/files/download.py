@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import time
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.log import logger
+from core.opctx import account_scope
 
 if TYPE_CHECKING:
     from .service import FileOpsService
@@ -17,6 +19,12 @@ if TYPE_CHECKING:
 class DownloadMixin:
     if TYPE_CHECKING:
         _service: FileOpsService
+
+    async def _account_for_group(self, group_id: str) -> str:
+        """Owning account of a group (VolumeMixin._group_account_id; kept as
+        a thin alias here so every download/link OneBot call resolves the
+        executor the same way the queue ops do)."""
+        return await self._group_account_id(group_id)
 
     async def _resolve_file_ref(
         self,
@@ -63,6 +71,10 @@ class DownloadMixin:
         to a global id search when the (group, id) pair misses. Returns
         (url, name); raises ValueError when the resource is missing or is a
         volume resource; upstream errors propagate to the caller.
+
+        OneBot calls are scoped to the resource's group owning account, so a
+        web-triggered link resolves through exactly one account (the same
+        routing rule queue ops follow).
         """
         detail = await self.store.get_resource_detail(
             group_id, id
@@ -74,17 +86,35 @@ class DownloadMixin:
                 "分卷/视频资源不支持单链接：请使用「下载」/「转存到网盘」或本机下载服务地址"
             )
         name = detail.get("name") or "download"
-        fresh = await self._resolve_file_ref(
-            str(detail.get("group_id") or group_id),
-            name,
-            int(detail.get("size") or 0),
-            detail.get("folder_id") or None,
-        )
-        fid, busid = fresh or (detail.get("source_ref"), detail.get("busid") or 0)
-        url = await self.api.get_group_file_url(
-            str(detail.get("group_id") or group_id), fid, busid, name
-        )
+        async with self._scoped_for_resource(detail):
+            fresh = await self._resolve_file_ref(
+                str(detail.get("group_id") or group_id),
+                name,
+                int(detail.get("size") or 0),
+                detail.get("folder_id") or None,
+            )
+            fid, busid = fresh or (detail.get("source_ref"), detail.get("busid") or 0)
+            url = await self.api.get_group_file_url(
+                str(detail.get("group_id") or group_id), fid, busid, name
+            )
         return url, name
+
+    @contextlib.asynccontextmanager
+    async def _scoped_for_resource(self, detail: dict):
+        """account_scope of the resource's group owning account (empty when
+        the group is unrecorded — best_bot fallback still applies then)."""
+        gid = str(detail.get("group_id") or "")
+        account_id = await self._account_for_group(gid) if gid else ""
+        with account_scope(account_id):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _scoped_for_group(self, group_id: str):
+        """account_scope by raw group id (volume parts may live in a
+        different group than the parent resource)."""
+        account_id = await self._account_for_group(str(group_id or ""))
+        with account_scope(account_id):
+            yield
 
     async def download_info(
         self, group_id: str, id: int, *, allow_incomplete: bool = False
@@ -105,14 +135,18 @@ class DownloadMixin:
             raise ValueError(f"resource {id} not found in group {group_id}")
         name = detail["name"]
         if not self._is_volume_resource(detail):
-            fresh = await self._resolve_file_ref(
-                group_id,
-                name,
-                int(detail.get("size") or 0),
-                detail.get("folder_id") or None,
-            )
-            fid, busid = fresh or (detail["source_ref"], detail["busid"] or 0)
-            url = await self.api.get_group_file_url(group_id, fid, busid, name)
+            # Single-file OneBot calls (list + get url) must run under the
+            # group owning account: web-triggered downloads route to exactly
+            # one account, mirroring the queue-op routing rule.
+            async with self._scoped_for_resource(detail):
+                fresh = await self._resolve_file_ref(
+                    group_id,
+                    name,
+                    int(detail.get("size") or 0),
+                    detail.get("folder_id") or None,
+                )
+                fid, busid = fresh or (detail["source_ref"], detail["busid"] or 0)
+                url = await self.api.get_group_file_url(group_id, fid, busid, name)
             return url, name
         vols = await self.store.list_volumes(detail["resource_id"])
         if not vols:
@@ -144,16 +178,19 @@ class DownloadMixin:
             with out.open("wb") as of:
                 for v in sorted(ready, key=lambda x: x.seq):
                     # Cross-group volumes: fetch each part's URL from its own
-                    # group (falls back to the parent group for legacy data)
+                    # group (falls back to the parent group for legacy data).
+                    # File-account one-to-one mapping: each part's OneBot calls
+                    # run under the account owning that part's group.
                     vg = v.group_id or group_id
-                    fresh = await self._resolve_file_ref(
-                        vg,
-                        v.part_name,
-                        int(v.size or 0),
-                        detail.get("folder_id") or None,
-                    )
-                    fid, busid = fresh or (v.source_ref, v.busid or 0)
-                    url = await self.api.get_group_file_url(vg, fid, busid, v.part_name)
+                    async with self._scoped_for_group(vg):
+                        fresh = await self._resolve_file_ref(
+                            vg,
+                            v.part_name,
+                            int(v.size or 0),
+                            detail.get("folder_id") or None,
+                        )
+                        fid, busid = fresh or (v.source_ref, v.busid or 0)
+                        url = await self.api.get_group_file_url(vg, fid, busid, v.part_name)
                     data = await self._fetch_bytes(url)
                     if v.sha256 and hashlib.sha256(data).hexdigest() != v.sha256:
                         raise ValueError(f"volume {v.seq} sha256 mismatch")
@@ -229,11 +266,14 @@ class DownloadMixin:
             with list_file.open("w", encoding="utf-8") as lf:
                 for v in vols:
                     vg = v.group_id or group_id
-                    fresh = await self._resolve_file_ref(
-                        vg, v.part_name, int(v.size or 0), folder
-                    )
-                    fid, busid = fresh or (v.source_ref, v.busid or 0)
-                    url = await self.api.get_group_file_url(vg, fid, busid, v.part_name)
+                    # Same file-account one-to-one rule as zip-part volumes:
+                    # each segment is fetched under its own group's account.
+                    async with self._scoped_for_group(vg):
+                        fresh = await self._resolve_file_ref(
+                            vg, v.part_name, int(v.size or 0), folder
+                        )
+                        fid, busid = fresh or (v.source_ref, v.busid or 0)
+                        url = await self.api.get_group_file_url(vg, fid, busid, v.part_name)
                     data = await self._fetch_bytes(url)
                     if v.sha256 and hashlib.sha256(data).hexdigest() != v.sha256:
                         raise ValueError(f"volume {v.seq} sha256 mismatch")

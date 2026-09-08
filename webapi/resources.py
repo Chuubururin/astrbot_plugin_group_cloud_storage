@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,15 +29,16 @@ from .webapi_base import (
     _param,
     _is_image_name,
     _managed_groups_cached,
+    _group_open_error,
 )
 
 
 async def api_files(s: Services) -> dict:
     """File listing/search: group + q + type + page (Page read path)."""
     group = await _param("group", "")
-    managed = s.config.get("managed_groups", [])
-    if group and not await s.scan.is_page_managed(group, managed):
-        return error_response("group not managed", status_code=403)
+    # Open gate: managed + owning account online + not dissolved (fail-closed).
+    if err := await _group_open_error(s, group):
+        return err
     q = await _param("q", "")
     ftype = await _param("type", "")
     kind = await _param("kind", "file")  # file/album/essence/all (unified resource catalog)
@@ -57,11 +59,14 @@ async def api_files(s: Services) -> dict:
     store_status = await _param("status", "")
     if store_status not in ("", "netdisk", "album", "essence", "none"):
         store_status = ""
-    # Cross-group view: empty group aggregates all managed groups (files are not per-group)
-    # Managed-group list is cached for 30s (avoids refetching all groups on every keystroke)
+    # Cross-group view: empty group aggregates managed groups of online
+    # accounts by default (default rule: "all" = all online accounts' groups;
+    # wither semantics keep offline accounts' groups out without deleting).
+    # The account param picks one account's groups explicitly. Managed-group
+    # list is cached for 30s (avoids refetching all groups on every keystroke)
     target_groups = None
     if not group:
-        all_managed = await _managed_groups_cached(s)
+        all_managed = await _managed_groups_cached(s, online_only=not account_id)
         if account_id:
             # Account filter: return only groups owned by this account
             target_groups = [
@@ -232,14 +237,26 @@ def _aggregate_capacity(groups, local_sizes: dict[str, int]) -> tuple[int, int, 
 
 async def api_stat(s: Services) -> dict:
     """Statistics (file count/total size/capacity); empty group = global aggregate
-    (unified management view, only groups with managed=1).
+    (unified management view, only groups with managed=1; default scope = online
+    accounts' groups).
+
+    ``accounts`` = operator accounts (QQ) of the stat scope: the owning account
+    for a single group, or the distinct set of account_ids across the aggregated
+    groups (the online set under the default scope). Each file operation is
+    performed by exactly one account (the group's owning account); the list is
+    for display only.
     """
     group = await _param("group", "")
-    managed = s.config.get("managed_groups", [])
-    if group and not await s.scan.is_page_managed(group, managed):
-        return error_response("group not managed", status_code=403)
+    account_id = await _param("account", "")
+    if err := await _group_open_error(s, group):
+        return err
     if not group:
-        groups = await s.scan.list_page_groups(managed)
+        groups = await _managed_groups_cached(s, online_only=not account_id)
+        if account_id:
+            groups = [g for g in groups if g.account_id == account_id]
+        operator_accounts = sorted(
+            {g.account_id for g in groups if getattr(g, "account_id", "")}
+        )
         page = await s.query.page_with(
             ResourceQuery(groups=[g.group_id for g in groups], page_size=5000)
         )
@@ -252,17 +269,35 @@ async def api_stat(s: Services) -> dict:
                 except Exception:
                     local[g.group_id] = 0
         used_total, cap_total, _ = _aggregate_capacity(groups, local)
+        # Accurate total_size: sum file sizes across all groups in scope
+        total_size = 0
+        for g in groups:
+            try:
+                total_size += await s.store.sum_resource_sizes(g.group_id)
+            except Exception:
+                pass
         return json_response(
             {
                 "group_id": "*",
                 "file_count": page.total,
-                "total_size": sum((it.size or 0) for it in page.items),
+                "total_size": total_size,
                 "uploaders": 0,
                 "used_space": used_total,
                 "total_space": cap_total,
+                "accounts": operator_accounts,
             }
         )
     st = await s.stats.stats(group)
+    # Operator of a single group = the account owning it (its bot performs the
+    # group file operations); empty when the owning account is unrecorded.
+    owning_account = ""
+    try:
+        for g in await s.store.list_groups():
+            if g.group_id == group:
+                owning_account = getattr(g, "account_id", "") or ""
+                break
+    except Exception:
+        owning_account = ""
     return json_response(
         {
             "group_id": st.group_id,
@@ -271,6 +306,7 @@ async def api_stat(s: Services) -> dict:
             "uploaders": st.uploaders,
             "used_space": st.used_space,
             "total_space": st.total_space or GROUP_TOTAL_DEFAULT,
+            "accounts": [owning_account] if owning_account else [],
         }
     )
 
@@ -280,6 +316,15 @@ async def api_stat(s: Services) -> dict:
 # 1) POST files/upload/prepare {group?, name} -> {token}
 # 2) POST files/upload/<token> (multipart file field) performs the real upload
 _UPLOAD_TOKENS: dict[str, dict] = {}
+_UPLOAD_TOKEN_TTL = 600  # 10 minutes
+
+
+def _cleanup_upload_tokens() -> None:
+    """Remove expired upload tokens (lazy cleanup on each prepare call)."""
+    now = time.time()
+    expired = [k for k, v in _UPLOAD_TOKENS.items() if now - v.get("_ts", 0) > _UPLOAD_TOKEN_TTL]
+    for k in expired:
+        _UPLOAD_TOKENS.pop(k, None)
 
 
 async def api_files_recommend_group(s: Services) -> dict:
@@ -316,8 +361,8 @@ async def api_file_upload_prepare(s: Services) -> dict:
     except (TypeError, ValueError):
         requested_bytes = 0
     if group:
-        if not await s.scan.is_page_managed(group, s.config.get("managed_groups", [])):
-            return error_response("group not managed", status_code=403)
+        if err := await _group_open_error(s, group):
+            return err
     else:
         # Default rule: smallest group id whose remaining space exceeds the file.
         rec = await s.ops.recommend_upload_group(
@@ -354,7 +399,9 @@ async def api_file_upload_prepare(s: Services) -> dict:
     if lossy_level not in ("high", "medium", "low"):
         lossy_level = "medium"
     token = uuid4().hex[:16]
+    _cleanup_upload_tokens()
     _UPLOAD_TOKENS[token] = {
+        "_ts": time.time(),
         "group": group,
         "name": name,
         "folder": folder,

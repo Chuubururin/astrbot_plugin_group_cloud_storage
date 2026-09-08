@@ -388,7 +388,7 @@ class ResourceSyncService:
         """
         import re
 
-        if not re.search(r"\.part\d+$", name):
+        if not re.search(r"\.part\d+(?:of\d+)?\.zip$", name):
             return
         # volumes primary keys carry a group prefix (g:file:volgroup:*); the
         # SQL matches unbackfilled parts by part_name plus the group prefix

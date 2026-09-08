@@ -104,6 +104,36 @@ async def test_download_url(env):
     url, name = await ops.download_info("g1", page.items[0].id)
     assert url == "https://fake/download/f1" and name == "a.txt"
 
+
+@pytest.mark.asyncio
+async def test_download_and_link_route_to_owning_account(env):
+    """单文件操作恒由群归属账号执行：网页直连路径（不经队列 account_scope
+    包裹）调用 download_info / direct_link 时，OneBot 取链调用必须落在该群
+    归属账号上，而不是 best_bot 兜底。"""
+    tmp_path, store, api, queue, ops = env
+    res = Resource(group_id="g1", type=ResourceType.FILE, name="a.txt",
+                   source_ref="f1", size=10, busid=102, created_at=1)
+    await store.upsert_resources([res])
+    page = await store.query_resources(__import__("core.domain.sync", fromlist=["ResourceQuery"]).ResourceQuery(group_id="g1", page_size=10))
+    rid = page.items[0].id
+
+    url, name = await ops.download_info("g1", rid)
+    assert url == "https://fake/download/f1" and name == "a.txt"
+    assert "get_group_file_url:g1:f1:10001" in api.calls
+
+    url2, _ = await ops.direct_link("g1", rid)
+    assert url2 == "https://fake/download/f1"
+    assert api.calls.count("get_group_file_url:g1:f1:10001") == 2
+
+    # 归属账号未记录时退化为无 scope（空账号），best_bot 兜底保持不变
+    await store.upsert_groups([GroupInfo(group_id="g2", account_id="")])
+    res2 = Resource(group_id="g2", type=ResourceType.FILE, name="b.txt",
+                    source_ref="f2", size=10, busid=103, created_at=1)
+    await store.upsert_resources([res2])
+    page2 = await store.query_resources(__import__("core.domain.sync", fromlist=["ResourceQuery"]).ResourceQuery(group_id="g2", page_size=10))
+    await ops.direct_link("g2", page2.items[0].id)
+    assert "get_group_file_url:g2:f2:" in api.calls
+
 @pytest.mark.asyncio
 async def test_replace_name_flow(env, monkeypatch):
     """改名重传（v2.6 唯一改名路径）：下载原件→新名重传→删旧→索引替换。"""
