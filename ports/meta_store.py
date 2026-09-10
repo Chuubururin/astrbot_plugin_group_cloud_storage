@@ -85,6 +85,10 @@ class MetaStorePort(Protocol):
     async def list_volumes(self, parent_resource_id: str) -> list[VolumeInfo]:
         """Return a parent resource's volumes in sequence order."""
 
+    async def has_volume_part(self, group_id: str, part_name_pattern: str) -> bool:
+        """True when the group has any volume part whose name matches the
+        regex (identity guard for re-conversion after meta loss)."""
+
     async def update_volume_fields(
         self, parent_resource_id: str, seq: int, **fields
     ) -> None:

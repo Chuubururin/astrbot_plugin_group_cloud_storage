@@ -108,3 +108,26 @@ class VolumesMixin(StorePart):
             conn.commit()
 
         await self._conn.exec(_do)
+
+    async def has_volume_part(self, group_id: str, part_name_glob: str) -> bool:
+        """True when the group already has a volume part matching the glob.
+
+        Identity guard for re-conversion after meta loss (2026-09-09 live:
+        meta was lost after file_id churn, parts stayed attached to the stale
+        parent, and a second convert duplicated uploads). The pattern is
+        built in plugin code from an escaped filename stem and a fixed
+        suffix, then bound as a parameter.
+
+        Scoping uses the parent_resource_id prefix (`<group>:file:%`) rather
+        than volumes.group_id: the convert path never populates that column,
+        so every live row carries NULL there (verified 2026-09-10).
+        """
+        def _do(conn: sqlite3.Connection):
+            row = conn.execute(
+                "SELECT 1 FROM volumes WHERE parent_resource_id LIKE ? "
+                "AND part_name LIKE ? ESCAPE '\\' LIMIT 1",
+                (f"{group_id}:file:%", part_name_glob),
+            ).fetchone()
+            return row is not None
+
+        return await self._conn.exec(_do)

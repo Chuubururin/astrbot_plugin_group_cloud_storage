@@ -62,14 +62,15 @@ export function createResilientSSE(options = {}) {
     teardown();
     const delay = afterTimeout ? backoffMs : 0;
     backoffMs = Math.min(backoffMs * 2, timings.maxMs);
+    clearTimeout(redialTimer);
     redialTimer = setTimeout(() => {
       if (stopped) return;
       try {
         unsub = subscribeSSE(handleEvent, () => {
-          // Bridge-side channel error: arm watchdog so the heartbeat
-          // timeout triggers a forced reconnect (prevents silent idle
-          // when the EventSource dies without firing close).
-          armWatchdog();
+          // Bridge-side channel error: reconnect immediately instead of
+          // idling up to a full heartbeat timeout. The watchdog stays armed
+          // as the fallback for silent deaths that never fire onError.
+          resubscribe(true);
         });
       } catch (e) {
         console.error('[sse] subscribe failed, retrying:', e);

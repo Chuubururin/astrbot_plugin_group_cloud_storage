@@ -13,7 +13,7 @@
 
 import { getState, subscribe } from '../store.js';
 import { API, apiGet } from '../api.js';
-import { formatSize } from '../utils/helpers.js';
+import { escapeHtml, formatSize } from '../utils/helpers.js';
 
 /**
  * Initialize the stat strip.
@@ -44,8 +44,8 @@ export function initStatBar(container) {
         ? (operators.length ? '全部在线账号' : '-')
         : (operators.length ? operators[0] : '-');
       container.innerHTML = `
-        <span class="stat-item">操作者: ${operatorText}</span>
-        <span class="stat-item">群: ${data.group_id === '*' ? '全部在线账号所属群' : (data.group_id || '-')}</span>
+        <span class="stat-item">操作者: ${escapeHtml(operatorText)}</span>
+        <span class="stat-item">群: ${escapeHtml(data.group_id === '*' ? '全部在线账号所属群' : (data.group_id || '-'))}</span>
         <span class="stat-item">文件: ${data.file_count ?? 0}</span>
         <span class="stat-item">容量: ${formatSize(data.total_space || data.total_size || 0)}</span>
         ${data.used_space != null ? `<span class="stat-item">已用: ${formatSize(data.used_space)}</span>` : ''}

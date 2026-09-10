@@ -120,6 +120,27 @@ test('netdisk-upload: waitTasksDone resolves on terminal states', async () => {
   assert.equal(done.get('x2'), 'failed');
 });
 
+test('netdisk-upload: cancelled is terminal (Celery REVOKED convention)', async () => {
+  // 中断/取消的任务永远不会跑完: 若不算终态, 接力会空转满 4 分钟超时。
+  const done = await waitTasksDone(['x1'], {
+    apiPost: async () => ({
+      tasks: [{ task_id: 'x1', state: 'cancelled' }],
+    }),
+    group: '10001',
+  }, 5000);
+  assert.equal(done.get('x1'), 'cancelled');
+});
+
+test('netdisk-upload: paused/retry stay non-terminal', async () => {
+  const done = await waitTasksDone(['x1'], {
+    apiPost: async () => ({
+      tasks: [{ task_id: 'x1', state: 'paused' }],
+    }),
+    group: '10001',
+  }, 300);
+  assert.ok(!done.has('x1'), 'paused task must keep the relay waiting');
+});
+
 test('upload: five-source segmentation and two-phase helpers exported (W3-C)', () => {
   assert.equal(typeof showUploadSourceModal, 'function');
   assert.equal(typeof handleFileUpload, 'function');

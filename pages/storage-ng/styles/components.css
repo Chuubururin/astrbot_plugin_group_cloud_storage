@@ -610,6 +610,25 @@ body.marquee-active tr { cursor: crosshair; }
 .gallery-item .gallery-img { height: auto; flex: 1 1 0; min-height: 0; }
 .gallery-hint { word-break: break-all; }
 
+/* Failure plate swapped in for a broken album image (visible feedback +
+   click-to-retry instead of a silent broken-image icon). */
+.gallery-img-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 90px;
+  flex: 1 1 0;
+  padding: 8px;
+  font-size: 11px;
+  color: var(--text-dim, #a06a00);
+  background: var(--surface2, rgba(160, 106, 0, 0.08));
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  word-break: break-all;
+}
+
 .gallery-item { position: relative; flex-direction: column; gap: 4px; }
 .gallery-item-actions {
   display: flex;

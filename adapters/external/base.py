@@ -222,12 +222,22 @@ def resolve_and_pin_ip(
     allow_private: bool = False,
     hint: str = "fetch_allow_private_address",
 ) -> tuple[str, str | None]:
-    """SSRF-safe DNS resolution: validate + return a pinned IP for connection.
+    """SSRF-safe DNS resolution: validate + (http only) pin the IP.
 
-    Returns (url, pinned_ip_or_None). If the hostname is already a literal
-    IP, returns (url, None) — callers should use the original URL. If DNS
-    resolved, returns (url_with_ip, original_hostname) so the caller can
-    connect to the IP and set the Host header to the original hostname.
+    Returns (url, pinned_ip_or_None):
+    - Literal IP: (url, None) — no DNS rebinding risk.
+    - https hostname: validate all resolved addresses, return
+      (original_url, None). TLS already binds the connection to the
+      hostname (SNI + certificate identity), so a rebinding attacker
+      cannot present a valid certificate for a private endpoint; pinning
+      the IP here would instead replace the URL hostname with an IP and
+      break certificate verification (httpx does not expose
+      server_hostname for IP connections).
+    - http hostname: validate all resolved addresses and return
+      (url_with_ip, original_hostname) — plain http has no TLS identity
+      binding, so the caller must connect to the validated IP and set the
+      Host header to the original hostname to close the check-to-connect
+      rebinding window.
 
     Raises ExternalApiError if any resolved address is restricted.
     """
@@ -264,6 +274,9 @@ def resolve_and_pin_ip(
             "openlist",
             f"DNS resolution for {hostname} returned no valid addresses. Received: {url}",
         )
+    # https: keep the original URL (TLS binds hostname identity; see docstring)
+    if parsed.scheme == "https":
+        return url, None
     # Rebuild URL with pinned IP; preserve port
     port = parsed.port
     pinned_host = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip

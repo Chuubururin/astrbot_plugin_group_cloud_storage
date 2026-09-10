@@ -334,11 +334,36 @@ async def api_file_download(s: Services) -> dict | object:
         )
 
     async def _body():
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            async with client.stream("GET", target) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
+        # SSRF: the direct link comes from the cloud API response — validate
+        # every hop (redirects off) so a hostile/misbehaving backend cannot
+        # aim the proxy at intranet endpoints (same model as transfer.HttpAdapter).
+        # The pinned IP must NOT replace the redirect-resolution base: keep
+        # the original URL for urljoin and carry Host: original-hostname so
+        # virtual-hosted http origins keep routing correctly.
+        import asyncio
+
+        from adapters.external.base import resolve_and_pin_ip
+        from urllib.parse import urljoin
+
+        async with httpx.AsyncClient(follow_redirects=False, timeout=120.0) as client:
+            url = target
+            for _hop in range(6):  # 1 direct + up to 5 redirects
+                pinned_url, original_host = await asyncio.to_thread(
+                    resolve_and_pin_ip, url, allow_private=False
+                )
+                headers = {}
+                if original_host:
+                    headers["Host"] = original_host
+                async with client.stream("GET", pinned_url, headers=headers) as resp:
+                    if resp.is_redirect and resp.has_redirect_location:
+                        if _hop == 5:
+                            raise ValueError("download proxy: redirects exceeded (5)")
+                        url = urljoin(url, resp.headers["location"])
+                        continue
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+                    return
 
     return StreamingResponse(
         _body(),

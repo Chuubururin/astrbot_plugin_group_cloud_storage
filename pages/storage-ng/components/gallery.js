@@ -57,6 +57,7 @@ async function generateKeyframe(holder, item, ctx) {
       img.className = 'gallery-img';
       img.src = 'data:image/gif;base64,' + r.gif_base64;
       img.alt = item.name || '';
+      img.referrerPolicy = 'no-referrer';
       // The GIF swaps in for the badge/button, but the management actions
       // bar must survive the replacement.
       const actions = holder.querySelector('.gallery-item-actions');
@@ -64,15 +65,57 @@ async function generateKeyframe(holder, item, ctx) {
       if (actions) holder.appendChild(actions);
     } else {
       fail();
-      toast('关键帧生成失败', 'error');
+      toast(`关键帧生成失败: 后端未返回 GIF 数据`, 'error');
     }
   } catch (e) {
     fail();
-    toast('关键帧生成失败', 'error');
+    // 失败回显：toast 一闪即逝，按钮文字保留本轮错误直到下一次点击
+    const msg = e && e.message ? e.message : '未知错误';
+    toast(`关键帧生成失败: ${msg}`, 'error');
+    if (btn) btn.textContent = '生成失败，点击重试';
   }
   function fail() {
     if (btn) { btn.disabled = false; btn.textContent = '生成关键帧预览'; }
   }
+}
+
+/**
+ * Wire failure feedback for an album image: the QQ photo CDN intermittently
+ * fails specs (302 downgrades, rate-limit blips), so a silent broken-image
+ * icon is the only symptom without explicit handling. One automatic retry
+ * (fresh browser request; the CDN usually serves the next attempt), then a
+ * visible error plate in place of the image.
+ */
+function observeImage(img, holder) {
+  img.addEventListener('error', () => {
+    if (img.dataset.retried === '1') {
+      img.remove();
+      const plate = document.createElement('div');
+      plate.className = 'gallery-img-error';
+      plate.textContent = '预览加载失败（CDN 临时不可用）· 点击重试';
+      plate.addEventListener('click', () => {
+        plate.remove();
+        const retry = document.createElement('img');
+        retry.className = img.className;
+        retry.src = img.src + (img.src.includes('?') ? '&' : '?') + 'r=' + Date.now();
+        retry.alt = img.alt || '';
+        retry.loading = 'lazy';
+        retry.referrerPolicy = 'no-referrer';
+        observeImage(retry, holder);
+        const actions = holder.querySelector('.gallery-item-actions');
+        holder.prepend(retry);
+        if (actions) holder.appendChild(actions);
+      });
+      const actions = holder.querySelector('.gallery-item-actions');
+      holder.prepend(plate);
+      if (actions) holder.appendChild(actions);
+      return;
+    }
+    img.dataset.retried = '1';
+    // Cache-bust so the retry is a fresh request instead of a replay of a
+    // negative cache entry.
+    img.src = img.src + (img.src.includes('?') ? '&' : '?') + 'r=' + Date.now();
+  });
 }
 
 function mountItem(holder, item) {
@@ -88,6 +131,8 @@ function mountItem(holder, item) {
       img.src = item.poster;
       img.alt = item.name || '';
       img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer';
+      observeImage(img, holder);
       holder.prepend(img);
     }
     return;
@@ -98,6 +143,8 @@ function mountItem(holder, item) {
     img.src = item.url;
     img.alt = item.name || '';
     img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    observeImage(img, holder);
     holder.replaceChildren(img);
   } else {
     holder.textContent = item.name || '(无预览)';

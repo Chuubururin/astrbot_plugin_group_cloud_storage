@@ -98,6 +98,11 @@ export function formatTimeFull(ts) {
 
 /**
  * Escape HTML to prevent XSS from user-controlled strings.
+ *
+ * The textContent round-trip covers & < >; attribute contexts (value=,
+ * title=, data-*) additionally need the quote characters escaped
+ * (OWASP XSS Prevention, HTML Attribute Context), so quotes are
+ * re-escaped explicitly afterwards.
  * @param {string} str
  * @returns {string}
  */
@@ -105,7 +110,9 @@ export function escapeHtml(str) {
   if (!str) return '';
   const el = document.createElement('span');
   el.textContent = str;
-  return el.innerHTML;
+  return el.innerHTML
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 /**
@@ -140,6 +147,30 @@ export function truncate(str, max = 40) {
  */
 export function cls(...names) {
   return names.filter(Boolean).join(' ');
+}
+
+/**
+ * Sandbox-safe window.open (MDN 惯例: 返回 null 即被拦截, 必须检查).
+ *
+ * 宿主 iframe 的 sandbox 是 allow-scripts allow-forms allow-downloads,
+ * 没有 allow-popups, window.open 恒返回 null — 裸调用会静默失败, 用户
+ * 以为点了没反应。此助手检测拦截并给出可见反馈: 降级为复制链接到剪贴板。
+ * @param {string} url
+ * @returns {Promise<boolean>} true=已打开新窗口; false=被拦截(已降级复制)
+ */
+export async function openExternal(url) {
+  if (!url) return false;
+  let win = null;
+  try {
+    win = window.open(url, '_blank', 'noopener');
+  } catch {
+    win = null;
+  }
+  if (win) return true;
+  await copyToClipboard(url);
+  const { toast } = await import('../components/toast.js');
+  toast('沙箱内无法弹出新窗口，链接已复制到剪贴板', 'warn');
+  return false;
 }
 
 /** Copy text to the clipboard with a fallback for insecure contexts. */

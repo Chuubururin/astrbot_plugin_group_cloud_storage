@@ -35,14 +35,14 @@ def validate_config(data: dict) -> list[tuple[str, str]]:
                 "请设置 download_token 后重载。",
             )
         )
-    # Semantic: database admin token empty → falls back to Page session auth
+    # Semantic: database admin token empty → admin endpoints stay closed
     db_token = str(data.get("database_admin_token", "") or "")
     if not db_token:
         warnings.append(
             (
                 "database_admin_token",
-                "database_admin_token 为空——数据库管理接口将沿用面板管理权限。"
-                "建议设置独立令牌以获得更细粒度的访问控制。",
+                "database_admin_token 为空——数据库管理接口已关闭（fail-closed）。"
+                "需要备份/恢复/重置数据库时请设置令牌后重载。",
             )
         )
     # Semantic: string-unit size keys must parse ("95MB", "2GB", base 1000);

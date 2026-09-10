@@ -132,7 +132,7 @@ function renderBridgeTasks() {
       <td>${escapeHtml(String(task.task_id || '').slice(0, 8))}</td>
       <td>${escapeHtml(String(task.resource_id || '-'))}</td>
       <td>${escapeHtml(task.remote_path || '-')}</td>
-      <td><span class="badge ${task.state}">${BRIDGE_STATE_LABELS[task.state] || task.state}</span>
+      <td><span class="badge ${escapeHtml(task.state)}">${BRIDGE_STATE_LABELS[task.state] || escapeHtml(task.state)}</span>
         ${task.detail ? `<span class="detail-hint" title="${escapeHtml(task.detail)}">${getIcon('INFO', 12)}</span>` : ''}</td>
       <td>${formatTimeFull(task.updated_at)}</td>
       <td>

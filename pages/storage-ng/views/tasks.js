@@ -27,6 +27,7 @@ const STATE_FILTERS = [
   { value: 'paused', label: '已暂停' },
   { value: 'done', label: '已完成' },
   { value: 'failed', label: '失败' },
+  { value: 'cancelled', label: '已取消' },
 ];
 
 const STATE_LABEL = {

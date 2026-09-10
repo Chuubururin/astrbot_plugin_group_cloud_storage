@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from .service import FileOpsService
 
 
+def _like_escape(text: str) -> str:
+    """Escape SQL LIKE wildcards in a filename stem (ESCAPE not required:
+    escaped chars are doubled into the pattern)."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class VolumeMixin:
     if TYPE_CHECKING:
         _service: FileOpsService
@@ -104,6 +110,24 @@ class VolumeMixin:
             )
         await self.store.insert_volumes(volumes)  # idempotent; keeps existing part status
         existing_vols = await self.store.list_volumes(parent_key)
+        # Resume support: parts already marked "uploaded" but without a
+        # backfilled source_ref would never qualify for the skip below
+        # (source_ref only arrives via backfill_volume_refs after a full
+        # sync), so a queue retry used to re-upload EVERY part. Try one
+        # sync + backfill to recover their refs first; parts that still
+        # lack a ref were likely deleted on the cloud and get re-uploaded.
+        pending_resume = [
+            x for x in existing_vols
+            if x.status == "uploaded" and not x.source_ref
+        ]
+        if pending_resume and op.payload.get("parent_resource_id_full"):
+            lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
+            sync_result = await self.sync.run_full_sync(op.target, lock)
+            if sync_result.ok:
+                await self.backfill_volume_refs(
+                    op.target, op.payload["parent_resource_id_full"]
+                )
+                existing_vols = await self.store.list_volumes(parent_key)
         for v in volumes:
             cur = next(
                 (x for x in existing_vols if x.seq == v.seq),
@@ -111,6 +135,7 @@ class VolumeMixin:
             )
             if cur.status == "uploaded" and cur.source_ref:
                 continue  # already uploaded -> skipped for resume
+            await self.queue.pause_check(op)
             await self.store.update_volume_fields(parent_key, v.seq, status="uploading")
             await self.api.upload_group_file(
                 op.target,
@@ -139,6 +164,7 @@ class VolumeMixin:
         # reassembly on download)
         import json
 
+        await self.queue.pause_check(op)
         detail = await self.store.get_resource_by_resource_id(
             op.payload.get("parent_resource_id_full") or parent_id
         )
@@ -314,6 +340,18 @@ class VolumeMixin:
             raise ValueError(f"resource {id} not found in group {group_id}")
         if is_composite(detail.get("meta")):
             raise ValueError("该资源已是组合形态（分卷/分片），无需转换")
+        # Identity guard beyond the meta flag: after NapCat file_id churn a
+        # re-listed copy can carry an empty meta while volumes of a previous
+        # conversion still exist for the same logical file — converting again
+        # would re-upload duplicate parts whose rows stay attached to the
+        # stale parent (live 2026-09-09: meta lost -> parts orphaned). Match
+        # any sibling part name for this (group, name) stem.
+        stem = (Path(detail["name"]).stem or "file").lower()
+        glob = f"{_like_escape(stem)}%.part%of__.zip"
+        if await self.store.has_volume_part(group_id, glob):
+            raise ValueError(
+                "检测到同名文件的既有分卷（可能是上次转换的遗留索引），请先在任务页处理或联系管理员修复索引"
+            )
         account_id = await self._group_account_id(group_id)
         if not self._is_current_account_upload(detail, account_id):
             raise ValueError("仅支持当前群归属账号上传的文件进行分卷")
@@ -443,6 +481,10 @@ class VolumeMixin:
             },
         )
         # Delete the cloud original (the old file remains after re-upload)
+        # Cooperative cancel checkpoint BEFORE the irreversible delete: an
+        # interrupt/cancel must not land after the original is gone but
+        # before sync/backfill (that window strands parts without refs).
+        await self.queue.pause_check(op)
         fresh2 = await self._resolve_file_ref(
             op.target,
             op.payload["name"],

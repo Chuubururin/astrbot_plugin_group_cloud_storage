@@ -208,7 +208,13 @@ class DistributorService:
             if not self.bridge:
                 raise ValueError("bridge not enabled")
             url = await self._album_media_url(group_id, album_id, name)
-            tasks = await self._bridge_client(bridge=self.bridge).submit_offline_download([url], "/")
+            # Media lands on the same netdisk destination as bridge_out
+            # (openlist_dst_dir + template): a hard-coded "/" breaks OpenList
+            # mounts that only expose a subdirectory.
+            client = self._bridge_client(bridge=self.bridge)
+            tasks = await client.submit_offline_download(
+                [url], getattr(self.bridge, "_dst_dir", "") or "/"
+            )
             tid = tasks[0].id if tasks else ""
             return {"target": "netdisk", "task_id": tid, "via": "media-offline"}
         if target == "group":
@@ -267,20 +273,46 @@ class DistributorService:
 
     @staticmethod
     def _extract_media_url(m: dict) -> str:
-        """Support both shapes: flat {url} and the nested QQ
-        image.photo_url[].url.url."""
+        """Support both shapes: flat {url} and the nested QQ album image.
+
+        The QQ NT album service returns camelCase media entries
+        (image.photoUrls[].url.url plus image.defaultUrl.url); legacy
+        NapCat-style adapters return snake_case (image.photo_url). Video
+        entries carry videoUrl[]/video_url[] specs and a flat playback url.
+        Mirrors the gallery frontend normalization (album-media.js).
+        """
         if not isinstance(m, dict):
             return ""
         flat = m.get("url") or m.get("file") or ""
         if isinstance(flat, str) and flat:
             return flat
-        photos = (m.get("image") or {}).get("photo_url") or []
-        for p in photos:
-            u = (p or {}).get("url")
-            if isinstance(u, dict) and u.get("url"):
-                return str(u["url"])
-            if isinstance(u, str) and u:
-                return u
+        image = m.get("image") or {}
+        for key in ("photoUrls", "photo_url"):
+            for p in image.get(key) or []:
+                u = (p or {}).get("url")
+                if isinstance(u, dict) and u.get("url"):
+                    return str(u["url"])
+                if isinstance(u, str) and u:
+                    return u
+        default_url = image.get("defaultUrl")
+        if isinstance(default_url, dict) and default_url.get("url"):
+            return str(default_url["url"])
+        video = m.get("video") or {}
+        if isinstance(video.get("url"), str) and video["url"]:
+            return video["url"]
+        for key in ("videoUrl", "video_url"):
+            for spec in video.get(key) or []:
+                u = (spec or {}).get("url")
+                if isinstance(u, dict) and u.get("url"):
+                    return str(u["url"])
+                if isinstance(u, str) and u:
+                    return u
+        cover = video.get("cover") or {}
+        for key in ("photoUrls", "photo_url"):
+            for p in cover.get(key) or []:
+                u = (p or {}).get("url")
+                if isinstance(u, dict) and u.get("url"):
+                    return str(u["url"])
         return ""
 
     # ---------- Essence text distribution (kind=essence) ----------

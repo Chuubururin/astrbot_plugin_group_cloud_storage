@@ -18,6 +18,7 @@ import { toast } from '../components/toast.js';
 import { copyToClipboard } from '../utils/helpers.js';
 import { targetOptions, targetLabel } from './download-targets.js';
 import { showDownloadAddress } from './download.js';
+import { resolveUploadGroup } from './upload.js';
 
 /**
  * Distribution command factory.
@@ -35,9 +36,9 @@ function makeDistribute(spec) {
         { name: 'target', label: '目标', type: 'select', value: 'local', options },
       ]);
       const target = res ? res.target : '';
-      if (!target) { toast('已取消', 'info'); return; }
+      if (!target) { toast('已取消', 'info'); return false; }
       try {
-        const out = await apiPost(spec.endpoint, spec.payload(ctx, target));
+        const out = await apiPost(spec.endpoint, await spec.payload(ctx, target));
         if (out.target === 'local') {
           // Local direct-link service: when SFTP/SMB lines are present show
           // the full address modal; HTTP-only results copy straight away.
@@ -75,9 +76,13 @@ export function registerDistributeCommands() {
     contextLabel: '网盘下载',
     targets: ['local', 'group', 'album', 'essence'],
     endpoint: API.BRIDGE.NETDISK_DISTRIBUTE,
-    payload: (ctx, target) => ({
+    // Netdisk rows carry no group_id and the netdisk tab has no currentGroup;
+    // target=group therefore resolves the recommended group (same rule as
+    // the cross-upload picker and files upload default).
+    payload: async (ctx, target) => ({
       path: ctx.keys[0], target,
-      group: ctx.state.currentGroup || '',
+      group: ctx.state.currentGroup
+        || (target === 'group' ? await resolveUploadGroup('', 'file') : ''),
       name: ctx.rows[0]?.name || '',
     }),
   });

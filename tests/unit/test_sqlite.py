@@ -151,6 +151,51 @@ async def test_successor_row_inherits_composition_and_relinks_volumes(store):
 
 
 @pytest.mark.asyncio
+async def test_same_name_smaller_file_does_not_inherit_composition(store):
+    """尺寸门（2026-09-10 线上 10879 案例）：同名新上传的更小文件不是旧
+    组合文件的接续（云端原件在转换后已删除），不得继承 composition、
+    不得重挂分卷。旧行保留、分卷仍挂旧行。"""
+    from core.domain.sync import VolumeInfo
+
+    old = Resource(
+        group_id="g1", type=ResourceType.FILE, name="vol_test.bin",
+        source_ref="old_ref", size=200000000, created_at=1700000001,
+        meta={"volumes": True, "compression": "zip-part",
+              "composition": {"kind": "volumes", "parts": 3}},
+    )
+    await store.upsert_resources([old])
+    await store.insert_volumes([
+        VolumeInfo(parent_resource_id="g1:file:old_ref", seq=1,
+                   part_name="vol_test.part01of03.zip", source_ref="p1",
+                   busid=1, size=100, sha256="a" * 64, status="ready",
+                   upload_time=1, group_id=None),
+    ])
+    # 同名但小得多的新文件（旧组合原件 200MB，转换后云端已删）
+    small = Resource(
+        group_id="g1", type=ResourceType.FILE, name="vol_test.bin",
+        source_ref="new_ref", size=2048, uploader_id="10001", busid=9,
+        created_at=1700000002,
+    )
+    await store.upsert_resources([small])
+
+    d = await store.get_resource_by_resource_id("g1:file:new_ref")
+    assert (d["meta"] or {}) == {}
+    assert await store.get_resource_by_resource_id("g1:file:old_ref") is not None
+    vols = await store.list_volumes("g1:file:old_ref")
+    assert len(vols) == 1
+    # 更大（或同尺寸）的接续者仍然继承（覆盖旧路径不回归）
+    big = Resource(
+        group_id="g1", type=ResourceType.FILE, name="vol_test.bin",
+        source_ref="big_ref", size=200000000, uploader_id="10001", busid=9,
+        created_at=1700000003,
+    )
+    await store.upsert_resources([big])
+    d2 = await store.get_resource_by_resource_id("g1:file:big_ref")
+    assert (d2["meta"] or {}).get("volumes") is True
+    assert await store.list_volumes("g1:file:big_ref")
+
+
+@pytest.mark.asyncio
 async def test_query_filter_keyword(store):
     await store.upsert_resources([_res(1), _res(2), _res(3)])
     page = await store.query_resources(

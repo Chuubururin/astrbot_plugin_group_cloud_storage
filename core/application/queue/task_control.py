@@ -27,8 +27,23 @@ _REVERSIBLE_KINDS = {"move_file", "replace_name"}
 class TaskControlService:
     def __init__(self, store, queue, ops=None):
         self.store = store
-        self.queue = queue
+        # BUG-28: guard against premature access during bootstrap when
+        # queue=None is passed and assigned after OpQueue construction.
+        self._queue = queue
         self.file_ops = ops  # compensation executor (undo only); ledger hooks do not use it
+
+    @property
+    def queue(self):
+        if self._queue is None:
+            raise RuntimeError(
+                "TaskControlService.queue accessed before OpQueue initialization; "
+                "this is a bootstrap ordering bug"
+            )
+        return self._queue
+
+    @queue.setter
+    def queue(self, value):
+        self._queue = value
 
     # ---------- Ledger hooks (injected into OpQueue) ----------
 

@@ -13,11 +13,21 @@ class DatabaseAdminService:
         self.token = token or ""
 
     def authorize(self, provided: str | None) -> bool:
-        """Use the authenticated Page session when no extra token is configured."""
+        """Deny by default (OWASP: fail closed).
+
+        When no token is configured the database administration endpoints
+        refuse every request instead of falling back to the Page session:
+        restore/reset are destructive, so a single layer of trust is not
+        enough. Configure database_admin_token to enable them.
+        """
         if not self.token:
-            return True
+            return False
         import hmac
-        return hmac.compare_digest(str(provided or ""), self.token)
+        # Byte comparison: str compare_digest rejects non-ASCII (TypeError);
+        # UTF-8 bytes never do. Constant time either way.
+        return hmac.compare_digest(
+            str(provided or "").encode("utf-8"), self.token.encode("utf-8")
+        )
 
     def _path(self, value: str | None, *, default: Path | None = None) -> Path:
         """Resolve maintenance paths inside the configured data directory."""

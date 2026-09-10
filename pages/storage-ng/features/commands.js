@@ -53,9 +53,9 @@ export function commands() {
 export function canRun(id, env) {
   const cmd = registry.get(id);
   if (!cmd) return { ok: false, reason: 'unknown command' };
-  if (env.count === 0 && !cmd.allowNoSelection) return { ok: false, reason: 'no selection' };
-  if (cmd.needsSingle && env.count !== 1) return { ok: false, reason: 'select exactly one item' };
-  if (cmd.needsGroup && !env.hasGroup) return { ok: false, reason: 'select a group first' };
+  if (env.count === 0 && !cmd.allowNoSelection) return { ok: false, reason: '请先选择文件' };
+  if (cmd.needsSingle && env.count !== 1) return { ok: false, reason: '请只选择一项' };
+  if (cmd.needsGroup && !env.hasGroup) return { ok: false, reason: '请先选择群' };
   return { ok: true };
 }
 
@@ -122,13 +122,21 @@ export async function runCommand(id, ctx, hooks = {}) {
   }
 
   if (hooks.onBusy) hooks.onBusy(id);
+  let result;
   try {
-    await cmd.run({ ...ctx, state: getState() });
-    if (cmd.refresh) {
-      const topics = Array.isArray(cmd.refresh) ? cmd.refresh : [cmd.refresh];
-      for (const t of topics) refresh(t);
+    result = await cmd.run({ ...ctx, state: getState() });
+    // 取消不是失败也不是完成: 取消路径必须显式 return false / null / ''
+    // (模态与确认框的约定)。undefined 是普通 async run() 的隐式返回值,
+    // 视为成功——否则所有命令的 refresh 与选区清理都会失效。
+    const cancelled = result === null || result === false || result === ''
+      || (result !== undefined && result.cancelled === true);
+    if (!cancelled) {
+      if (cmd.refresh) {
+        const topics = Array.isArray(cmd.refresh) ? cmd.refresh : [cmd.refresh];
+        for (const t of topics) refresh(t);
+      }
+      if (!cmd.keepSelection && ctx.source?.selection) ctx.source.selection.clear();
     }
-    if (!cmd.keepSelection && ctx.source?.selection) ctx.source.selection.clear();
   } catch (e) {
     // Failure contract: besides the toast, re-pull the affected rows'
     // authoritative info from their cloud storage so the table never keeps

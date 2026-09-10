@@ -462,6 +462,65 @@ async def test_convert_volumes_payload_always_zip(env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_convert_rejected_when_sibling_parts_exist(env, monkeypatch):
+    """身份守卫（2026-09-09 线上坏链）：file_id 会话级变更后重列出的同名
+    资源 meta 可能为空（非 composite），但上次转换的分卷行还在——再次转
+    换会重复上传分卷且行仍挂旧 parent。守卫按 (group, 文件名主干) 匹配任
+    一既有分卷并拒绝。"""
+    tmp_path, store, api, queue, ops = env
+    from core.domain.sync import ResourceQuery, VolumeInfo
+
+    await store.upsert_resources(
+        [
+            Resource(
+                group_id="g1", type=ResourceType.FILE, name="big.bin",
+                source_ref="ref1", size=12000, uploader_id="10001",
+            )
+        ]
+    )
+    # 上次转换遗留的分卷行（parent 是旧 resource_id，与当前行无关；
+    # group_id 与线上一致——convert 路径从不写该列，恒为 NULL）
+    await store.insert_volumes(
+        [
+            VolumeInfo(
+                parent_resource_id="g1:file:old_ref", seq=1,
+                part_name="big.part01of02.zip", source_ref="p1", busid=1,
+                size=100, sha256="a" * 64, status="uploaded",
+                upload_time=1, group_id=None,
+            )
+        ]
+    )
+    page = await store.query_resources(ResourceQuery(group_id="g1", page_size=5))
+    with pytest.raises(ValueError, match="既有分卷"):
+        await ops.submit_convert_volumes("g1", page.items[0].id)
+    # 名称主干不同（LIKE 转义生效）：不误伤
+    await store.upsert_resources(
+        [
+            Resource(
+                group_id="g1", type=ResourceType.FILE, name="big%_other.bin",
+                source_ref="ref2", size=12000, uploader_id="10001",
+            )
+        ]
+    )
+    page2 = await store.query_resources(
+        ResourceQuery(group_id="g1", page_size=10, keyword="other")
+    )
+    await store.insert_volumes(
+        [
+            VolumeInfo(
+                parent_resource_id="g1:file:old_ref2", seq=1,
+                part_name="big%_other.part01of02.zip", source_ref="p9",
+                busid=1, size=100, sha256="b" * 64, status="uploaded",
+                upload_time=1, group_id=None,
+            )
+        ]
+    )
+    # big%_other.bin 自身有分卷行 → 也被拒（守卫对同名主干生效）
+    with pytest.raises(ValueError, match="既有分卷"):
+        await ops.submit_convert_volumes("g1", page2.items[0].id)
+
+
+@pytest.mark.asyncio
 async def test_sweep_convert_volumes_submits_over_threshold(env, monkeypatch):
     """内置自动转分卷（sweep）：只提交超阈值、非组合、无待处理任务的文件，
     且受 per-sweep limit 限流（防部署后洪峰）。"""

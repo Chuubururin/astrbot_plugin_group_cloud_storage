@@ -255,23 +255,25 @@ class CrudMixin:
             raise ValueError("download returned empty content")
         staged = self.tmp_dir / f"replace_{op.payload['id']}_{int(_t.time())}.tmp"
         staged.write_bytes(data)
-        await self.api.upload_group_file(
-            op.target,
-            staged.as_posix(),
-            op.payload["new_name"],
-            folder_id=op.payload.get("folder") or None,
-        )
-        # Delete the old file (re-resolve a fresh id: the old name still
-        # exists after the reupload)
-        fresh2 = await self._resolve_file_ref(
-            op.target,
-            op.payload["name"],
-            0,
-            op.payload.get("folder") or None,
-        )
-        fid2, busid2 = fresh2 or (op.payload["file_id"], op.payload["busid"] or 0)
-        await self.api.delete_group_file(op.target, fid2, busid2)
-        staged.unlink(missing_ok=True)
+        try:
+            await self.api.upload_group_file(
+                op.target,
+                staged.as_posix(),
+                op.payload["new_name"],
+                folder_id=op.payload.get("folder") or None,
+            )
+            # Delete the old file (re-resolve a fresh id: the old name still
+            # exists after the reupload)
+            fresh2 = await self._resolve_file_ref(
+                op.target,
+                op.payload["name"],
+                0,
+                op.payload.get("folder") or None,
+            )
+            fid2, busid2 = fresh2 or (op.payload["file_id"], op.payload["busid"] or 0)
+            await self.api.delete_group_file(op.target, fid2, busid2)
+        finally:
+            staged.unlink(missing_ok=True)
         # Index replacement: record the new file name (the new source_ref is
         # backfilled by a later file refresh; the old record is soft-deleted)
         await self.store.update_resource_fields(
@@ -346,6 +348,15 @@ class CrudMixin:
             if op.payload.get("folder_id")
             else "!/",
         )
-        await self.store.update_resource_fields(
-            op.payload["id"], folder_id=op.payload["folder_id"]
-        )
+        # Mirror the successful-sync write shape: the move payload's "!/"
+        # sentinel (or empty) means cloud root, which sync stores as NULL;
+        # a real folder keeps its "/uuid" id plus the folders-table name.
+        raw_folder = str(op.payload.get("folder_id") or "")
+        index_folder = None if raw_folder in ("", "!/") else raw_folder
+        next_folder = {"folder_id": index_folder, "folder_name": None}
+        if index_folder:
+            for fd in await self.store.list_folders_detail(op.target):
+                if fd.get("folder_id") == index_folder:
+                    next_folder["folder_name"] = fd.get("folder_name")
+                    break
+        await self.store.update_resource_fields(op.payload["id"], **next_folder)

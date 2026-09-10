@@ -21,40 +21,20 @@ import { EVENT_TYPES, DATA_CHANGED_TOPICS, EVENT_KINDS } from './constants.js';
 import { createResilientSSE } from './utils/sse.js';
 import { toast } from './components/toast.js';
 
-// ---------- Theme (follow the host AstrBot theme; fall back to the
-// system preference and react to live changes) ----------
-
-function initTheme() {
-  const ctx = getContext();
-  const hostTheme = ctx && (ctx.theme || '').toLowerCase();
-
-  const apply = () => {
-    let theme = 'dark';
-    if (hostTheme === 'light' || hostTheme === 'dark') {
-      theme = hostTheme;
-    } else {
-      theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
-        ? 'light' : 'dark';
-    }
-    document.documentElement.setAttribute('data-theme', theme);
-  };
-
-  apply();
-  try {
-    if (window.matchMedia) {
-      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
-        if (hostTheme !== 'light' && hostTheme !== 'dark') apply();
-      });
-    }
-  } catch (e) { /* matchMedia unsupported */ }
-}
-
 // ---------- SSE  ----------
 
 /** Event types that feed the floating task-panel log. */
 const TASK_LOG_TYPES = new Set([
   EVENT_TYPES.QUEUED, EVENT_TYPES.STARTED, EVENT_TYPES.PROGRESS,
   EVENT_TYPES.DONE, EVENT_TYPES.FAILED, EVENT_TYPES.RETRY,
+  EVENT_TYPES.PAUSED, EVENT_TYPES.RESUMED, EVENT_TYPES.CANCELLED,
+]);
+
+/** Queue-state transitions that must repaint the tasks ledger immediately:
+ * without this the row keeps the pre-click state (e.g. "排队中" after a
+ * pause) until an unrelated reload happens. */
+const LEDGER_SYNC_TYPES = new Set([
+  EVENT_TYPES.PAUSED, EVENT_TYPES.RESUMED, EVENT_TYPES.CANCELLED,
 ]);
 
 /** After a reconnection: one refresh per data topic. */
@@ -95,6 +75,12 @@ function handleSSEEvent(ev) {
     pushTaskLog(ev);
   }
 
+  if (LEDGER_SYNC_TYPES.has(type)) {
+    // 暂停/继续/取消是用户刚点击的操作: 立即重载任务账本, 行状态与
+    // 点击结果一致 (避免"点了暂停仍显示排队中"的脱节窗口)。
+    refresh('tasks');
+  }
+
   switch (type) {
     case EVENT_TYPES.DONE:
       if (kind === EVENT_KINDS.BRIDGE_OUT || kind === EVENT_KINDS.BRIDGE_IN) {
@@ -109,6 +95,20 @@ function handleSSEEvent(ev) {
       // topics so the visible rows match the cloud instead of going stale.
       toast(`${kind || '任务'}失败: ${detail || ''}`, 'error');
       debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
+      break;
+
+    case EVENT_TYPES.CANCELLED:
+      // 中断同样是部分写入后的终态（批量任务可能已改了一半云状态）：
+      // 与 FAILED 同样处理, 避免表格停留在中断前的旧数据上。
+      debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
+      break;
+
+    case EVENT_TYPES.PAUSED:
+      toast(`任务已暂停: ${kind || task_id || ''}`, 'info');
+      break;
+
+    case EVENT_TYPES.RESUMED:
+      toast('任务已继续', 'success');
       break;
 
     case EVENT_TYPES.DATA_CHANGED: {
@@ -175,27 +175,8 @@ function initErrorHandling() {
   });
 }
 
-// ---------- Keyboard shortcuts (mainstream control paradigm) ----------
-
-function initKeyboard() {
-  document.addEventListener('keydown', async (e) => {
-    const { sourceFor } = await import('./features/data-sources.js');
-    const source = sourceFor(getState().currentView);
-    // Escape: clear the selection of the active resource list.
-    if (e.key === 'Escape') {
-      source.selection.clear();
-      return;
-    }
-    // Ctrl/Cmd+A: select all rows of the active list (not inside inputs).
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-      const tag = e.target?.tagName;
-      if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
-      e.preventDefault();
-      const items = getState()[source.itemsKey] || [];
-      source.selection.setMany(items.filter((f) => !f.is_dir).map(source.rowKey));
-    }
-  });
-}
+import { initTheme } from './components/theme.js';
+import { initKeyboard } from './components/keyboard.js';
 
 // ---------- View loading ----------
 

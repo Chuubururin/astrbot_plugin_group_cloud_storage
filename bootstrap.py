@@ -7,6 +7,7 @@ thin.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from astrbot.api import logger
@@ -101,8 +102,13 @@ def build_components(
         group_info_ttl_hours=float(cfg.get("group_info_ttl_hours", 24) or 0),
     )
     auto_scan_hours = float(cfg.get("auto_scan_interval_hours", 6) or 0)
+    # One shared lock dict for every sync path (file-op post-sync inside
+    # FileOpsService and file_scan/sync ops via Services.lock_for): two
+    # dicts let two run_full_sync race on the same group.
+    sync_locks: dict[str, asyncio.Lock] = {}
     ops = FileOpsService(
-        api, store, queue, sync, tmp_dir=data_dir / "tmp", config=cfg
+        api, store, queue, sync, tmp_dir=data_dir / "tmp", config=cfg,
+        sync_locks=sync_locks,
     )
     task_control.file_ops = ops  # undo compensation executor
 
@@ -187,6 +193,7 @@ def build_components(
         netdisk=netdisk,
         task_control=task_control,
         converter=converter,
+        sync_locks=sync_locks,
         distributor=DistributorService(
             store=store,
             api=api,

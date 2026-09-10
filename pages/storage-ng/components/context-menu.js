@@ -109,6 +109,10 @@ export function show(x, y, source, item, opts = {}) {
   const rows = opts.selection?.size > 0
     ? getSelectedRows(source, opts.selection)
     : [item];
+  // runCommand() counts the selection via ctx.keys; the action bar passes
+  // the same (keys, rows) pair, so the context menu must too — otherwise
+  // every right-click command is gated off with "no selection".
+  const keys = rows.map((r) => source.rowKey(r));
 
   const env = {
     count: rows.length,
@@ -135,7 +139,7 @@ export function show(x, y, source, item, opts = {}) {
 
   if (!items.length) { hide(); return; }
   showRaw(x, y, items, (cmdId) => {
-    if (opts.onAction) opts.onAction(cmdId, { source, row: item, rows });
+    if (opts.onAction) opts.onAction(cmdId, { source, row: item, rows, keys });
   });
 }
 

@@ -25,6 +25,7 @@ class ScanMixin:
         account_bot=None,
         api_override=None,
         group_filter: list[str] | None = None,
+        op=None,
     ) -> ScanResult:
         """Scan group info (caller enqueues via OpQueue; per-group calls
         self-throttle).
@@ -73,6 +74,12 @@ class ScanMixin:
         judged = 0  # new groups actually judged in this run
         last_pub = 0.0
         for i, g in enumerate(groups, 1):
+            # Cooperative checkpoint: cancel/pause from the task Tab takes
+            # effect between groups (same contract as do_file_scan); without
+            # it a running scan ignores 中断 and keeps chaining file_scan
+            # children. op=None (non-queue callers) skips the check.
+            if op is not None:
+                await self.queue.pause_check(op)
             gid = str(g.get("group_id") or "")
             if not gid:
                 continue
@@ -235,6 +242,7 @@ class ScanMixin:
         self, account_bot=None, api_override=None,
         group_filter: list[str] | None = None,
         include_capacity: bool = True,
+        op=None,
     ) -> ScanResult:
         """Incremental group info sync (default cadence):
         - Only new groups / groups with unknown capacity get capacity
@@ -276,6 +284,10 @@ class ScanMixin:
         judged = 0
         last_pub = 0.0
         for i, g in enumerate(groups, 1):
+            # Cooperative checkpoint (see scan_owned): scan kind must honor
+            # 中断/暂停 between groups.
+            if op is not None:
+                await self.queue.pause_check(op)
             gid = str(g.get("group_id") or "")
             if not gid:
                 continue

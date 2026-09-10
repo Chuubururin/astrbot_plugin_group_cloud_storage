@@ -42,6 +42,14 @@ class TaskControlMixin:
             return "paused"
         if task_id in self._pending:
             self._paused[task_id] = None  # queued: placeholder, held when the worker dequeues
+            # Ledger must reflect the pause immediately: the worker only
+            # rewrites the ledger when it dequeues the op, which may be much
+            # later (deep queue). Without this write the tasks tab keeps
+            # showing the pre-click state ("pending") after the user paused
+            # a queued task.
+            op = self._ops_by_id.get(task_id)
+            if op is not None:
+                self._ledger_fire(op, "paused")
             self._push({"type": "paused", "task_id": task_id, "ts": time.time()})
             return "queued"
         op = self._running.get(task_id)
@@ -96,8 +104,24 @@ class TaskControlMixin:
                 self._record(held, "cancelled")
                 self._ledger_fire(held, "cancelled")
                 self._ops_by_id.pop(task_id, None)
-            # else: still queued; the worker finalizes it via the _execute
-            # cancel path
+            elif op is not None:
+                # Queued placeholder: the op object is still inside the async
+                # queue and may not be dequeued for a long time (deep queue),
+                # so finalize the ledger now. Its later dequeue lands in the
+                # _cancelled branch of _execute, which discards and re-writes
+                # the same terminal state (idempotent).
+                self._push(
+                    {
+                        "type": "cancelled",
+                        "task_id": op.task_id,
+                        "kind": op.kind,
+                        "target": op.target,
+                        "ts": time.time(),
+                    }
+                )
+                self._record(op, "cancelled")
+                self._ledger_fire(op, "cancelled")
+                self._ops_by_id.pop(task_id, None)
         self._cancelled.add(task_id)
         if op is not None:
             op.cancel = True

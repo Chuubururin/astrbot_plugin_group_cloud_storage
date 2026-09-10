@@ -13,6 +13,7 @@ import { API } from '../api.js';
 import { confirmEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { mutate } from '../utils/mutate.js';
+import { filterByAccount, sortGroups } from './group-data.js';
 
 /**
  * Batch operations, adapted to the backend action contract
@@ -114,8 +115,25 @@ export async function handleMenuAction(act, selectedGroups) {
     case 'up':
     case 'down': {
       if (selectedGroups.size === 0) { toast('请先选择群', 'warn'); return; }
+      // 后端 groups/order 的契约是整表位置持久化: {ordered_ids: [...]}。
+      // 上/下移是"选中项与其相邻行交换位置"的视图操作, 在这里换算成
+      // 全序再提交 (参考文件管理器行重排惯例: 前端算好新顺序, 端点只收
+      // 一个完整序列)。
+      const filtered = filterByAccount(getState().groups || [], getState().accountFilter || '');
+      const ordered = sortGroups(filtered, getState().groupSort).map((g) => g.group_id);
+      const step = act === 'up' ? -1 : 1;
+      const ids = Array.from(selectedGroups);
+      // 自上而下处理上移、自下而上处理下移, 相邻多选交换互不覆盖。
+      const seq = step === -1 ? ids : ids.reverse();
+      for (const gid of seq) {
+        const i = ordered.indexOf(gid);
+        if (i < 0) continue;
+        const j = i + step;
+        if (j < 0 || j >= ordered.length) continue;
+        [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
+      }
       await mutate('移动', API.GROUPS.ORDER,
-        { group_ids: Array.from(selectedGroups), direction: act },
+        { ordered_ids: ordered },
         { refresh: 'groups', successText: `${act === 'up' ? '上移' : '下移'}成功` });
       break;
     }

@@ -16,7 +16,7 @@ from .routes import RouteRegistry, validate_routes
 from . import resources as _resources
 from . import config as _config_module
 
-for _modname in ("groups", "resources", "tasks", "config", "sync", "albums", "events", "misc", "database", "webapi_ext", "webapi_netdisk", "netdisk_query", "netdisk_mutation", "netdisk_transfer"):
+for _modname in ("groups", "resources", "resources_mutation", "tasks", "config", "sync", "albums", "events", "misc", "database", "webapi_ext", "webapi_netdisk", "netdisk_query", "netdisk_mutation", "netdisk_transfer"):
     _mod = importlib.import_module(f".{_modname}", __package__)
     for _name in dir(_mod):
         if _name.startswith("api_"):

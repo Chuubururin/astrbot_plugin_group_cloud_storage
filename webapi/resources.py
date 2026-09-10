@@ -417,7 +417,10 @@ async def api_file_upload_prepare(s: Services) -> dict:
     lossy_level = str(payload.get("lossy_level") or "medium").lower()
     if lossy_level not in ("high", "medium", "low"):
         lossy_level = "medium"
-    token = uuid4().hex[:16]
+    # Full uuid4 hex = 128 bits of CSPRNG entropy (OWASP Session Management:
+    # tokens should carry at least 128 bits to resist brute force). The token
+    # is URL-safe hex and only ever compared by exact dict match.
+    token = uuid4().hex
     _cleanup_upload_tokens()
     _UPLOAD_TOKENS[token] = {
         "_ts": time.time(),

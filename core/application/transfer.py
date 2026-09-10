@@ -68,8 +68,11 @@ class HttpAdapter(ProtocolAdapter):
     def _resolve_url(self, url: str) -> tuple[str, str | None]:
         """SSRF validation + DNS pinning (blocking, invoked via to_thread).
 
-        Returns (pinned_url, original_hostname_or_None). The caller connects
-        to pinned_url and sets Host: original_hostname to prevent DNS rebinding.
+        Returns (url, original_hostname_or_None). For http hostnames the
+        URL is rewritten to the validated IP and the caller sets Host:
+        original_hostname (no TLS identity to rely on). For https the
+        original URL is kept — TLS binds the hostname (SNI + certificate),
+        and pinning the IP would break certificate verification.
         """
         try:
             return resolve_and_pin_ip(url, allow_private=self._allow_private)
@@ -156,6 +159,20 @@ class SmbAdapter(ProtocolAdapter):
 class SftpAdapter(ProtocolAdapter):
     scheme = "sftp"
 
+    def __init__(
+        self,
+        max_bytes: int,
+        timeout: float,
+        allow_private: bool = False,
+        host_key_store: "Path | None" = None,
+    ):
+        super().__init__(max_bytes, timeout, allow_private)
+        # TOFU host-key store (OpenSSH-style trust on first use, RFC 4251
+        # §4.1): first connection records the fingerprint, later connections
+        # must match. A fresh RSA host key per boot is download_server's
+        # own SFTP endpoint; ingest targets here are long-lived hosts.
+        self._host_key_store = host_key_store
+
     def _conn(self, target: dict):
         import paramiko
 
@@ -169,7 +186,15 @@ class SftpAdapter(ProtocolAdapter):
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if self._host_key_store is not None:
+            # TOFU: AutoAddPolicy against a plugin-owned file — new keys are
+            # persisted per host so a later mismatch is rejected instead of
+            # silently re-trusted (plain AutoAddPolicy never rejects).
+            self._host_key_store.parent.mkdir(parents=True, exist_ok=True)
+            client.load_host_keys(str(self._host_key_store))
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(
             host,
             port=target["port"] or 22,
@@ -222,10 +247,14 @@ class TransferService:
         allow_private = bool(cfg.get("fetch_allow_private_address", False))
         self._allow_private = allow_private
         self._download_info = download_info
+        # SFTP TOFU store: fingerprints persist under the plugin data tmp dir
+        sftp_host_keys = self.tmp_dir / "sftp_known_hosts"
         self._adapters: dict[str, ProtocolAdapter] = {
             "http": HttpAdapter(fetch_max, fetch_timeout, allow_private),
             "https": HttpAdapter(fetch_max, fetch_timeout, allow_private),
-            "sftp": SftpAdapter(fetch_max, fetch_timeout, allow_private),
+            "sftp": SftpAdapter(
+                fetch_max, fetch_timeout, allow_private, host_key_store=sftp_host_keys
+            ),
             "smb": SmbAdapter(fetch_max, fetch_timeout, allow_private),
         }
 

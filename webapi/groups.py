@@ -295,12 +295,18 @@ async def api_groups_order(s: Services) -> dict:
 async def api_groups_remove(s: Services) -> dict:
     """Remove managed entries (managed=0: hidden from the list and not revived by
     scans; the real group is not deleted).
+
+    Contract: {group_ids: [...]} — the same shape as groups/restore, so the
+    remove->removed-view->restore chain speaks one language. {items: [...]}
+    is accepted for backward compatibility with older callers.
     """
     payload = await json_body()
-    items = payload.get("items")
-    if not isinstance(items, list) or not items:
-        return error_response("items required", status_code=400)
-    ids = [str(x) for x in items if str(x)]
+    ids_raw = payload.get("group_ids")
+    if not isinstance(ids_raw, list) or not ids_raw:
+        ids_raw = payload.get("items")
+    if not isinstance(ids_raw, list) or not ids_raw:
+        return error_response("group_ids required", status_code=400)
+    ids = [str(x) for x in ids_raw if str(x)]
     await s.store.set_groups_managed(ids, 0)
     # removed=1 keeps user removals distinct from offline auto-hiding, so
     # account restore / liveness sweeps never resurrect them.
