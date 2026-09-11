@@ -29,7 +29,7 @@ export function registerAllAlbumCommands() {
         { name: 'album_name', label: '相册名称', required: true, placeholder: '如 AstrBot云盘' },
         { name: 'album_desc', label: '相册描述（可选）' },
       ]);
-      if (!res?.album_name?.trim()) return;
+      if (!res?.album_name?.trim()) return false;
       try {
         await apiPost(API.ALBUMS.CREATE, {
           group, album_name: res.album_name.trim(), album_desc: res.album_desc || '',

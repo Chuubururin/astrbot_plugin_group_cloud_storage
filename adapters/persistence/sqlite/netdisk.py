@@ -57,11 +57,21 @@ class NetdiskMixin(StorePart):
     async def set_netdisk_tags(self, remote_path: str, tags: str) -> None:
         def _do(conn: sqlite3.Connection):
             now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                "UPDATE netdisk_meta SET tags=?, registered_at=? WHERE remote_path=?",
-                (tags, now, remote_path),
+            # Upsert, not blind UPDATE: the UI may tag a path that browse/deep
+            # index never registered (a plain UPDATE would silently hit 0 rows
+            # and the tag would be lost on the next registration). The
+            # placeholder row carries only the key; name/size/type stay
+            # inert because browse and list responses always take them from
+            # the live OpenList listing.
+            cur = conn.execute(
+                "INSERT INTO netdisk_meta "
+                "(remote_path, name, is_dir, size, type, tags, registered_at, indexed_at) "
+                "VALUES (?, ?, 0, 0, 'other', ?, ?, '') "
+                "ON CONFLICT(remote_path) DO UPDATE SET tags=excluded.tags",
+                (remote_path, remote_path.rsplit("/", 1)[-1] or remote_path, tags, now),
             )
             conn.commit()
+            return cur.rowcount
 
         await self._conn.exec(_do)
 

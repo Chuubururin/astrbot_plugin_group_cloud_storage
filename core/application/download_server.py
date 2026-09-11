@@ -20,6 +20,7 @@ Semantics (distinct from "egress = push to an external target"):
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import shutil
 import socket
@@ -69,9 +70,13 @@ class DownloadServerService:
         self._smb_server = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sftp_auth = ("cloud", self.token)
-        self._cache_dir = Path(tempfile.gettempdir()) / "cloudsftp"
+        # Cache dirs under a private mkdtemp root (0700, owner-only) instead
+        # of a predictable fixed name in the shared temp dir, which invites
+        # pre-creation/symlink tricks on multi-user hosts.
+        self._cache_root = Path(tempfile.mkdtemp(prefix="cloudstorage-"))
+        self._cache_dir = self._cache_root / "cloudsftp"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._smb_dir = Path(tempfile.gettempdir()) / "cloudsmb"
+        self._smb_dir = self._cache_root / "cloudsmb"
         self._smb_dir.mkdir(parents=True, exist_ok=True)
         # Staged-file registry: token -> {path, name} (essence text exports
         # and other host-generated artifacts served over http/sftp)
@@ -244,6 +249,11 @@ class DownloadServerService:
             except Exception:
                 pass
             self._smb_server = None
+        # Remove the private cache root created in __init__ (mkdtemp is ours
+        # to clean up, per the tempfile contract).
+        if getattr(self, "_cache_root", None) is not None:
+            shutil.rmtree(self._cache_root, ignore_errors=True)
+            self._cache_root = None
 
     # ---------- HTTP ----------
 
@@ -270,17 +280,17 @@ class DownloadServerService:
             if parsed.path != "/download" or method != "GET":
                 await self._reply(writer, 404, b"not found")
                 return
-            if not self.token or q.get("token", [""])[0] != self.token:
+            if not self.token or not hmac.compare_digest(
+                q.get("token", [""])[0].encode("utf-8"), self.token.encode("utf-8")
+            ):
                 await self._reply(writer, 401, b"unauthorized")
                 return
             group = q.get("group", [""])[0]
             rid = q.get("id", [""])[0]
             staged = q.get("staged", [""])[0]
             if staged:
-                # Staged artifact (e.g. essence text export)
-                if not self.token or q.get("token", [""])[0] != self.token:
-                    await self._reply(writer, 401, b"unauthorized")
-                    return
+                # Staged artifact (e.g. essence text export); the token was
+                # already verified above for every request.
                 entry = self._staged.get(staged)
                 if not entry or not Path(entry["path"]).exists():
                     await self._reply(writer, 404, b"staged file not found")
@@ -411,9 +421,13 @@ class DownloadServerService:
                 return "password"
 
             def check_auth_password(self, username, password):
-                if username == svc._sftp_auth[0] and password == svc._sftp_auth[1]:
-                    return paramiko.AUTH_SUCCESSFUL
-                return paramiko.AUTH_FAILED
+                # compare_digest on UTF-8 bytes: constant time, no TypeError
+                # on non-ASCII input (str compare_digest rejects it).
+                a0, a1 = (s.encode("utf-8") for s in svc._sftp_auth)
+                u = str(username or "").encode("utf-8")
+                p = str(password or "").encode("utf-8")
+                ok = hmac.compare_digest(u, a0) and hmac.compare_digest(p, a1)
+                return paramiko.AUTH_SUCCESSFUL if ok else paramiko.AUTH_FAILED
 
             def check_channel_shell_request(self, channel):
                 return False
@@ -537,25 +551,25 @@ class DownloadServerService:
                             f"{info['group']}_{info['id']}_{info['name']}"
                         )
                         if not sp.exists():
-                            # Cloud direct link: stream to the cache file
-                            # (temp + atomic rename; runs in a worker thread
-                            # so the event loop never blocks on IO)
+                            # Cloud direct link (from the cloud API) streamed
+                            # to a cache file; validate + refuse redirects
+                            # like every other outbound fetch (SSRF).
                             import httpx as _hx
 
                             def _fetch():
-                                tmp = cache.with_name(
-                                    cache.name + f".{uuid.uuid4().hex[:8]}.part"
-                                )
+                                from adapters.external.base import assert_fetch_url_allowed
+                                assert_fetch_url_allowed(src, allow_private=False)
+                                tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
                                 try:
                                     with _hx.stream(
-                                        "GET", src, follow_redirects=True,
+                                        "GET", src, follow_redirects=False,
                                         timeout=180.0,
                                     ) as resp:
+                                        if resp.is_redirect:
+                                            raise ValueError("download server: redirect blocked")
                                         resp.raise_for_status()
                                         with tmp.open("wb") as out:
-                                            for chunk in resp.iter_bytes(
-                                                chunk_size=_STREAM_CHUNK
-                                            ):
+                                            for chunk in resp.iter_bytes(chunk_size=_STREAM_CHUNK):
                                                 out.write(chunk)
                                     os.replace(tmp, cache)
                                 finally:

@@ -94,16 +94,21 @@ class FetchMixin:
             # User-selected lossy re-encode for album media (checkbox + tier
             # chosen at upload time, irreversible); non-media payloads skip
             # it. The staged file has a neutral .tmp suffix, so media
-            # detection goes by the name.
+            # detection goes by the name and the detected extension is
+            # passed to compress() explicitly (BUG-12: compress re-checks
+            # src.suffix, which would see .tmp and reject).
+            media_ext = Path(name).suffix.lower()
             if (
                 to_album
                 and op.payload.get("lossy")
                 and self.converter is not None
-                and self.converter.is_media_ext(Path(name).suffix.lower())
+                and self.converter.is_media_ext(media_ext)
             ):
                 downloaded = staged
                 staged = await self.converter.compress(
-                    staged, op.payload.get("lossy_level") or "medium"
+                    staged,
+                    op.payload.get("lossy_level") or "medium",
+                    src_ext=media_ext,
                 )
                 if downloaded != staged:
                     downloaded.unlink(missing_ok=True)
@@ -125,12 +130,22 @@ class FetchMixin:
                 if ext in _IMAGE_EXTS:
                     album_id = await self._album_id(op.target, album_name)
                     await self.queue.pause_check(op)
+                    # The album shows the uploaded file's own name; rename the
+                    # neutral .tmp staging file to the declared name first
+                    # (BUG-14: without this the album lists fetch_xxx.tmp).
+                    upload_path = staged
+                    declared = Path(name).name
+                    if declared and declared != staged.name:
+                        renamed = staged.with_name(declared)
+                        if not renamed.exists():
+                            staged.replace(renamed)
+                            upload_path = renamed
                     await self.api.upload_image_to_qun_album(
-                        op.target, album_id, album_name, staged.as_posix()
+                        op.target, album_id, album_name, upload_path.as_posix()
                     )
-                    albums = await self.api.get_qun_album_list(op.target)
-                    essences = await self.api.get_essence_msg_list(op.target)
-                    await self.store.upsert_album_essence(op.target, albums, essences)
+                    # Refresh must not fail the op after the irreversible
+                    # upload (BUG-13: replay would re-upload the media)
+                    await self._refresh_album_essence(op.target)
                     logger.info(f"[ingest] image -> album '{album_name}' in {op.target}")
                 elif ext in _VIDEO_EXTS:
                     # Hand ownership to the long-video album task before this

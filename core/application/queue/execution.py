@@ -85,8 +85,21 @@ class ExecutionMixin:
         while True:
             op = await self._q_hi.get()
             if op.task_id in self._paused:  # pause hold: wait for resume (ledger records paused)
+                if op.cancel or op.task_id in self._cancelled:
+                    # Interrupted between pause_task() and this dequeue: the
+                    # queued-pause path relies on the worker to finalize the
+                    # ledger; _execute is skipped here, so write "cancelled"
+                    # now (re-writing "paused" would resurrect a dead task).
+                    self._paused.pop(op.task_id, None)
+                    self._cancelled.discard(op.task_id)
+                    self._ops_by_id.pop(op.task_id, None)
+                    self._push({"type": "cancelled", "task_id": op.task_id, "kind": op.kind, "target": op.target, "ts": time.time()})
+                    self._record(op, "cancelled")
+                    await self._ledger_state(op, "cancelled")
+                    continue
                 self._paused[op.task_id] = op
                 await self._ledger_state(op, "paused")
+                self._push({"type": "paused", "task_id": op.task_id, "kind": op.kind, "ts": time.time()})
                 continue
             self._pending.discard(op.task_id)
             await self._execute(op, high=True)
@@ -95,8 +108,21 @@ class ExecutionMixin:
         while True:
             op = await self._q.get()
             if op.task_id in self._paused:  # pause hold: wait for resume (ledger records paused)
+                if op.cancel or op.task_id in self._cancelled:
+                    # Interrupted between pause_task() and this dequeue: the
+                    # queued-pause path relies on the worker to finalize the
+                    # ledger; _execute is skipped here, so write "cancelled"
+                    # now (re-writing "paused" would resurrect a dead task).
+                    self._paused.pop(op.task_id, None)
+                    self._cancelled.discard(op.task_id)
+                    self._ops_by_id.pop(op.task_id, None)
+                    self._push({"type": "cancelled", "task_id": op.task_id, "kind": op.kind, "target": op.target, "ts": time.time()})
+                    self._record(op, "cancelled")
+                    await self._ledger_state(op, "cancelled")
+                    continue
                 self._paused[op.task_id] = op
                 await self._ledger_state(op, "paused")
+                self._push({"type": "paused", "task_id": op.task_id, "kind": op.kind, "ts": time.time()})
                 continue
             self._pending.discard(op.task_id)
             await self._execute(op, high=False)

@@ -9,7 +9,6 @@ import subprocess
 import uuid
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
@@ -63,36 +62,49 @@ class VideoMixin:
         if dest.parent != base or dest.name != f"{safe_key.group(0)}.mp4":
             raise ValueError("invalid video preview destination")
 
-        # BUG-21: SSRF defense — block loopback and private addresses
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(f"_download_video: unsupported scheme: {parsed.scheme}")
-        hostname = parsed.hostname or ""
-        if hostname in ("localhost",):
-            raise ValueError(f"_download_video: blocked loopback hostname: {hostname}")
-        import ipaddress
-        try:
-            addr = ipaddress.ip_address(hostname)
-        except ValueError:
-            addr = None  # hostname is a domain name, not an IP literal
-        if addr is not None:
-            if addr.is_loopback or addr.is_private:
-                raise ValueError(
-                    f"_download_video: blocked private/loopback address: {hostname}"
-                )
-
+        # BUG-21 / SSRF hardening: every hop is re-validated and DNS-pinned
+        # against loopback/private/reserved ranges (same mechanism as the
+        # transfer pipeline); manual redirect loop so a 302 cannot bypass
+        # the per-hop checks.
         timeout = self.fetch_timeout
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                total = 0
-                with dest.open("wb") as f:
-                    async for chunk in resp.aiter_bytes():
-                        total += len(chunk)
-                        if total > VIDEO_PREVIEW_MAX_BYTES:
-                            raise ValueError("视频超过预览大小上限（300MB）")
-                        f.write(chunk)
+        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+            for hop in range(6):  # 1 direct request + up to 5 redirects
+                pinned_url, original_host = await asyncio.to_thread(
+                    self._resolve_fetch_url, url
+                )
+                headers = {}
+                if original_host:
+                    headers["Host"] = original_host
+                async with client.stream("GET", pinned_url, headers=headers) as resp:
+                    if resp.is_redirect and resp.has_redirect_location:
+                        if hop == 5:
+                            raise ValueError("_download_video: redirects exceeded (5)")
+                        from urllib.parse import urljoin
+
+                        url = urljoin(url, resp.headers["location"])
+                        continue
+                    resp.raise_for_status()
+                    total = 0
+                    with dest.open("wb") as f:
+                        async for chunk in resp.aiter_bytes():
+                            total += len(chunk)
+                            if total > VIDEO_PREVIEW_MAX_BYTES:
+                                raise ValueError("视频超过预览大小上限（300MB）")
+                            f.write(chunk)
+                    break
         return dest
+
+    @staticmethod
+    def _resolve_fetch_url(url: str) -> tuple[str, str | None]:
+        """SSRF validation + DNS pinning (http pins the IP; https keeps the
+        hostname for TLS certificate binding — see resolve_and_pin_ip).
+        Blocking; invoke via to_thread."""
+        from adapters.external.base import resolve_and_pin_ip
+
+        try:
+            return resolve_and_pin_ip(url, allow_private=False)
+        except Exception as e:
+            raise ValueError(f"_download_video: url rejected: {e}") from e
 
     async def _run_ffmpeg(self, args: list[str], timeout: int = 600) -> None:
         """Run an ffmpeg subprocess via to_thread (non-blocking); raises a
@@ -296,8 +308,14 @@ class VideoMixin:
                 logger.warning(f"[ingest] post-video sync failed: {result.error}")
             logger.info(f"[ingest] video direct upload: {name} ({dur}s)")
             return
-        # Long video: split storage (single logical resource + part volumes)
-        parent_id = f"vidgroup:{uuid.uuid4().hex[:10]}"
+        # Long video: split storage (single logical resource + part volumes).
+        # Retry reuse: a part-upload failure re-enters this handler; regenerating
+        # the parent id would orphan the first attempt's parts and rows, so the
+        # id is persisted in the payload on first pass and reused on retries.
+        parent_id = op.payload.get("parent_resource_id")
+        if not parent_id:
+            parent_id = f"vidgroup:{uuid.uuid4().hex[:10]}"
+            op.payload["parent_resource_id"] = parent_id
         parent_key = f"{op.target}:file:{parent_id}"
 
         def _hash_source() -> str:
@@ -331,39 +349,47 @@ class VideoMixin:
         )
         seg_dir = self.tmp_dir / f"vid_{parent_id.split(':')[1]}"
         seg_dir.mkdir(parents=True, exist_ok=True)
-        # Lossless video segmentation goes through composition.splitter
-        # (-c copy; same implementation as album splitting)
-        segments = await split_video(src, seg_dir, stem, max_sec)
-        total = len(segments)
-        for seq, seg in enumerate(segments, 1):
-            part_name = f"{stem}.part{seq:02d}.mp4"
-            data = seg.read_bytes()
-            sha = hashlib.sha256(data).hexdigest()
-            await self.api.upload_group_file(
-                op.target, seg.as_posix(), part_name, folder_id=folder
-            )
-            await self.store.insert_volumes(
-                [
-                    VolumeInfo(
-                        parent_resource_id=parent_key,
-                        seq=seq,
-                        part_name=part_name,
-                        size=len(data),
-                        sha256=sha,
-                        status="uploaded",
-                    )
-                ]
-            )
-            self.queue.publish(
-                {
-                    "type": "progress",
-                    "kind": "video_upload",
-                    "target": op.target,
-                    "i": seq,
-                    "n": total,
-                    "part": part_name,
-                }
-            )
+        try:
+            # Lossless video segmentation goes through composition.splitter
+            # (-c copy; same implementation as album splitting)
+            segments = await split_video(src, seg_dir, stem, max_sec)
+            total = len(segments)
+            for seq, seg in enumerate(segments, 1):
+                part_name = f"{stem}.part{seq:02d}.mp4"
+                data = seg.read_bytes()
+                sha = hashlib.sha256(data).hexdigest()
+                await self.queue.pause_check(op)
+                await self.api.upload_group_file(
+                    op.target, seg.as_posix(), part_name, folder_id=folder
+                )
+                await self.store.insert_volumes(
+                    [
+                        VolumeInfo(
+                            parent_resource_id=parent_key,
+                            seq=seq,
+                            part_name=part_name,
+                            size=len(data),
+                            sha256=sha,
+                            status="uploaded",
+                        )
+                    ]
+                )
+                self.queue.publish(
+                    {
+                        "type": "progress",
+                        "kind": "video_upload",
+                        "target": op.target,
+                        "i": seq,
+                        "n": total,
+                        "part": part_name,
+                    }
+                )
+        finally:
+            # Segments are re-generated from the staged source on retry;
+            # a failure must not leak the whole seg_dir.
+            import shutil
+
+            shutil.rmtree(seg_dir, ignore_errors=True)
         # Backfill source_ref/busid (upload_group_file does not return a file_id)
         lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
         result = await self.sync.run_full_sync(op.target, lock)
@@ -385,8 +411,10 @@ class VideoMixin:
         vols = await self.store.list_volumes(parent_key)
         if not vols:
             return
+        # fold_parts=False: part rows are what the by-name lookup needs;
+        # list semantics fold *.partNN.* into their parent and would hide them
         page = await self.store.query_resources(
-            ResourceQuery(group_id=group_id, page_size=200)
+            ResourceQuery(group_id=group_id, page_size=200), fold_parts=False
         )
         by_name = {it.name: it for it in page.items}
         for v in vols:

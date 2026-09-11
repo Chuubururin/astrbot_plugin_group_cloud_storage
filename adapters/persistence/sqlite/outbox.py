@@ -39,6 +39,10 @@ class OutboxMixin(StorePart):
     ) -> None:
         def _do(conn: sqlite3.Connection):
             now = _now_ts()
+            # Terminal-state guard: once a task is cancelled, stale async
+            # writes must not resurrect it to a non-terminal state (out of
+            # order ledger writes race with pause/cancel finalization).
+            # done/failed remain overwritable so retry bookkeeping works.
             conn.execute(
                 """INSERT INTO op_ledger
                    (task_id, kind, target, payload, state, retries, error,
@@ -50,7 +54,9 @@ class OutboxMixin(StorePart):
                      error=CASE WHEN excluded.error IS NOT NULL THEN excluded.error
                                 WHEN excluded.state IN ('done','cancelled') THEN NULL
                                 ELSE op_ledger.error END,
-                     updated_at=excluded.updated_at""",
+                     updated_at=excluded.updated_at
+                   WHERE op_ledger.state != 'cancelled'
+                      OR excluded.state = 'cancelled'""",
                 (
                     task_id,
                     kind,

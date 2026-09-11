@@ -50,6 +50,9 @@ export const EVENT_TYPES = {
   DONE: 'done',
   FAILED: 'failed',
   RETRY: 'retry',
+  PAUSED: 'paused',
+  RESUMED: 'resumed',
+  CANCELLED: 'cancelled',
   DATA_CHANGED: 'data_changed',
   HEARTBEAT: 'heartbeat',
 };
@@ -95,6 +98,7 @@ export const DATA_CHANGED_TOPICS = {
   essence_delete: ['files', 'essence'],
   video_upload: ['files', 'albums'],
   video_album: ['files', 'albums'],
+  image_album: ['files', 'albums'],
   convert_volumes: ['files'],
   batch_delete: ['files'],
   batch_tags: ['files'],

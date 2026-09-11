@@ -145,7 +145,7 @@ function buildGroupRow(g, selectedGroups) {
   tr.innerHTML = `
     <td class="col-chk"><input type="checkbox" ${selected ? 'checked' : ''} /></td>
     <td class="col-name"><span class="group-name">${escapeHtml(g.shown_name || g.group_name || g.group_id)}</span></td>
-    <td class="col-id">${g.group_id}</td>
+    <td class="col-id">${escapeHtml(g.group_id)}</td>
     <td class="col-label">${g.label ? `<span class="tag">${escapeHtml(g.label)}</span>` : ''}</td>
     <td class="col-role">${ROLE_LABELS[g.role] || g.role || '-'}</td>
     <td class="col-size"${g.total_space && g.total_space > 0
@@ -292,6 +292,6 @@ export function renderGroupSelect(groups) {
   sel.innerHTML = '<option value="">全部群（在线）</option>' +
     filtered.map((g) =>
       `<option value="${escapeHtml(g.group_id)}"${g.group_id === currentGroup ? ' selected' : ''}>` +
-      `${escapeHtml(g.shown_name || g.group_name || g.group_id)}（${g.group_id}）</option>`
+      `${escapeHtml(g.shown_name || g.group_name || g.group_id)}（${escapeHtml(g.group_id)}）</option>`
     ).join('');
 }

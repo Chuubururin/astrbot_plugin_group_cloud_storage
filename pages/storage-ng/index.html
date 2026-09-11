@@ -3,7 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self';">
+  <!-- img-src https: http:: album covers/keyframes are hot-linked from the
+     QQ photo CDN (qungz.photo.store.qq.com); measured behaviour: the CDN
+     intermittently 302-redirects some https specs to the same path over
+     plain http, so http must be allowed for those downgrades to render.
+     Everything else stays closed. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; connect-src 'self'; font-src 'self';">
+  <!-- The QQ photo CDN rejects requests carrying a dashboard Referer
+     (302 to a blocked page), so cross-origin album images are loaded
+     with no referrer at all (gallery.js sets referrerpolicy per <img>). -->
+  <meta name="referrer" content="no-referrer">
   <title>群云存储管理</title>
   <!--
     Entry page for the group cloud storage plugin (AstrBot Page).

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import time
@@ -153,6 +154,23 @@ class DownloadMixin:
             raise ValueError("volume refs not ready (仍在上传/回填中)")
         ready = [v for v in vols if v.source_ref]
         missing = [v.seq for v in vols if not v.source_ref]
+        # Lazy self-heal: parts uploaded but never backfilled (post-upload
+        # sync failed once and nothing re-runs backfill) used to fail every
+        # download forever. Try one sync + backfill for the parent, then
+        # re-evaluate before giving up.
+        if missing:
+            try:
+                lock = self._sync_locks.setdefault(group_id, asyncio.Lock())
+                sync_result = await self.sync.run_full_sync(group_id, lock)
+                if sync_result.ok and detail.get("resource_id"):
+                    await self.backfill_volume_refs(
+                        group_id, detail["resource_id"]
+                    )
+                    vols = await self.store.list_volumes(detail["resource_id"])
+                    ready = [v for v in vols if v.source_ref]
+                    missing = [v.seq for v in vols if not v.source_ref]
+            except Exception as e:
+                logger.warning(f"[file-ops] volume self-heal sync failed: {e}")
         if missing and not allow_incomplete:
             raise ValueError(
                 f"volume refs not ready (缺失分卷 {missing}，仍在上传/回填中或已被删除)"
@@ -167,7 +185,7 @@ class DownloadMixin:
                 )
             return await self._recon_video(
                 group_id, name, ready, detail.get("folder_id") or None,
-                (detail.get("meta") or {}).get("total_sha256"),
+                (detail.get("meta") or {}).get("total_seconds"),
             )
         compression = (detail.get("meta") or {}).get("compression")
         out = self.tmp_dir / f"recon_{uuid.uuid4().hex[:10]}_{name}"
@@ -210,12 +228,44 @@ class DownloadMixin:
                 if hashlib.sha256(out.read_bytes()).hexdigest() != meta_total:
                     raise ValueError("total sha256 mismatch")
             # Legacy whole-zip volumes -> extract to restore after verification
-            # (reversible)
+            # (reversible). Extraction runs under a byte/entry budget
+            # (CERT IDS04-J style): count bytes actually read instead of
+            # trusting ZipInfo sizes (the field is attacker-forgeable), so
+            # a high-compression bomb cannot exhaust the disk.
             if compression == "zip":
                 import zipfile
 
+                _ZIP_MAX_UNCOMPRESSED = self._MAX_FETCH_BYTES  # 4 GB budget
+                _ZIP_MAX_ENTRIES = 1024
+                extracted_total = 0
                 with zipfile.ZipFile(out) as zf:
-                    zf.extractall(extract_dir)
+                    names = zf.namelist()
+                    if len(names) > _ZIP_MAX_ENTRIES:
+                        raise ValueError(
+                            f"zip reassemble: too many entries ({len(names)})"
+                        )
+                    for entry_name in names:
+                        # Zip Slip guard: refuse entries that escape the
+                        # extraction dir even before streaming bytes.
+                        dest_entry = (extract_dir / entry_name).resolve()
+                        if not dest_entry.is_relative_to(extract_dir.resolve()):
+                            raise ValueError(
+                                f"zip reassemble: entry escapes extraction dir: {entry_name}"
+                            )
+                        dest_entry.parent.mkdir(parents=True, exist_ok=True)
+                        with dest_entry.open("wb") as entry_out:
+                            with zf.open(entry_name) as inner_fh:
+                                while True:
+                                    chunk = inner_fh.read(1 << 20)
+                                    if not chunk:
+                                        break
+                                    extracted_total += len(chunk)
+                                    if extracted_total > _ZIP_MAX_UNCOMPRESSED:
+                                        raise ValueError(
+                                            "zip reassemble: uncompressed size "
+                                            f"exceeds {_ZIP_MAX_UNCOMPRESSED} bytes"
+                                        )
+                                    entry_out.write(chunk)
                 inner_name = Path((detail.get("meta") or {}).get("original_name") or name).name or name
                 inner = extract_dir / inner_name
                 if not inner.exists():
@@ -246,12 +296,40 @@ class DownloadMixin:
             if not ok:
                 out.unlink(missing_ok=True)
 
+    @staticmethod
+    def _probe_container_duration(path: str) -> float | None:
+        """Container duration in seconds via ffprobe; None when unavailable."""
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=nw=1:nk=1", path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if proc.returncode != 0:
+                return None
+            return float(proc.stdout.strip())
+        except Exception:
+            return None
+
     async def _recon_video(
         self, group_id: str, name: str, vols, folder: str | None = None,
-        total_sha256: str | None = None,
+        total_seconds: float | None = None,
     ) -> tuple[str, str]:
         """Reassembly of losslessly segmented video: fetch each segment
         (sha256 verified) -> merge via ffmpeg concat. Returns (path, name).
+
+        Integrity model: per-part sha256 (checked during fetch) plus the
+        reassembled duration. The original container's sha256 is NOT a valid
+        roundtrip reference — stream-copy concat rewrites container headers
+        and shifts AAC by one priming frame, so identical content still
+        produces different container bytes (verified: video stream bit-exact,
+        audio PCM equal up to a fixed 1024-sample offset).
         """
         import subprocess
         import shutil as _sh
@@ -306,10 +384,15 @@ class DownloadMixin:
             import asyncio as _aio
 
             await _aio.to_thread(_concat)
-            if total_sha256:
-                actual = hashlib.sha256(out.read_bytes()).hexdigest()
-                if actual != total_sha256:
-                    raise ValueError("video total sha256 mismatch")
+            if total_seconds:
+                actual = await _aio.to_thread(self._probe_container_duration, out.as_posix())
+                if actual is None:
+                    raise ValueError("video reassemble: duration probe failed")
+                if abs(actual - float(total_seconds)) > max(1.0, float(total_seconds) * 0.01):
+                    raise ValueError(
+                        f"video reassemble duration mismatch: got {actual:.2f}s, "
+                        f"expect {float(total_seconds):.2f}s"
+                    )
             return out.as_posix(), name
         finally:
             for f in seg_dir.glob("*"):
@@ -322,41 +405,61 @@ class DownloadMixin:
 
     # BUG-13: max response size (4 GB) to prevent memory exhaustion
     _MAX_FETCH_BYTES = 4 * 1024**3
+    # Redirect hops share the transfer pipeline's budget
+    _MAX_REDIRECT_HOPS = 5
+
+    def _resolve_url(self, url: str) -> tuple[str, str | None]:
+        """SSRF validation + DNS pinning (shared with the transfer pipeline).
+
+        http hostnames are pinned to the validated IP (Host header keeps the
+        original name); https keeps the hostname (TLS identity binding —
+        see resolve_and_pin_ip). Raises ValueError for restricted addresses.
+        Blocking call — invoke via to_thread.
+        """
+        from adapters.external.base import resolve_and_pin_ip
+
+        try:
+            return resolve_and_pin_ip(url, allow_private=False)
+        except Exception as e:
+            raise ValueError(f"_fetch_bytes: url rejected: {e}") from e
 
     async def _fetch_bytes(self, url: str) -> bytes:
+        import asyncio
+
         import httpx
-        from urllib.parse import urlparse
+        from urllib.parse import urljoin
 
-        # BUG-5: SSRF defense-in-depth — block loopback and RFC1918 private
-        # addresses. Only these ranges are truly dangerous; reserved ranges
-        # (e.g. 100.64.0.0/10 CGNAT) are used by CDNs and should not be blocked.
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(f"_fetch_bytes: unsupported scheme: {parsed.scheme}")
-        hostname = parsed.hostname or ""
-        if hostname in ("localhost",):
-            raise ValueError(f"_fetch_bytes: blocked loopback hostname: {hostname}")
-        import ipaddress
-        try:
-            addr = ipaddress.ip_address(hostname)
-        except ValueError:
-            addr = None  # hostname is a domain name, not an IP literal
-        if addr is not None:
-            if addr.is_loopback:
-                raise ValueError(f"_fetch_bytes: blocked loopback address: {hostname}")
-            if addr.is_private:
-                raise ValueError(f"_fetch_bytes: blocked private address: {hostname}")
-
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes(chunk_size=1 << 16):
-                    total += len(chunk)
-                    if total > self._MAX_FETCH_BYTES:
-                        raise ValueError(
-                            f"_fetch_bytes: response exceeds {self._MAX_FETCH_BYTES} bytes"
-                        )
-                    chunks.append(chunk)
-                return b"".join(chunks)
+        # BUG-5 / SSRF hardening: every hop (including redirects) is
+        # re-validated and DNS-pinned against loopback/private/reserved
+        # ranges — same model as transfer.HttpAdapter. Manual redirect
+        # loop; blind follow_redirects would skip the re-checks.
+        async with httpx.AsyncClient(follow_redirects=False, timeout=120.0) as client:
+            for _hop in range(self._MAX_REDIRECT_HOPS + 1):
+                pinned_url, original_host = await asyncio.to_thread(
+                    self._resolve_url, url
+                )
+                headers = {}
+                if original_host:
+                    headers["Host"] = original_host
+                async with client.stream("GET", pinned_url, headers=headers) as resp:
+                    if resp.is_redirect and resp.has_redirect_location:
+                        if _hop == self._MAX_REDIRECT_HOPS:
+                            raise ValueError(
+                                f"_fetch_bytes: redirects exceeded "
+                                f"({self._MAX_REDIRECT_HOPS})"
+                            )
+                        url = urljoin(url, resp.headers["location"])
+                        continue
+                    resp.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.aiter_bytes(chunk_size=1 << 16):
+                        total += len(chunk)
+                        if total > self._MAX_FETCH_BYTES:
+                            raise ValueError(
+                                f"_fetch_bytes: response exceeds "
+                                f"{self._MAX_FETCH_BYTES} bytes"
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+        raise ValueError("_fetch_bytes: unreachable redirect loop exit")

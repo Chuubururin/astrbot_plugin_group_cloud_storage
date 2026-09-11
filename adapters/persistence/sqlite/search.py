@@ -120,6 +120,12 @@ class SearchMixin(StorePart):
             )
             rows = conn.execute(sql, params).fetchall()
             result = [{"tag": r[0], "count": r[1]} for r in rows]
+            # BUG-26: bound cache size — evict oldest entries when exceeding
+            # 16 keys (generous for the ~3 expected keys; guards against
+            # unbounded growth if kind is ever user-controlled).
+            if len(self._tag_cloud_cache) >= 16:
+                oldest_key = min(self._tag_cloud_cache, key=lambda k: self._tag_cloud_cache[k][0])
+                self._tag_cloud_cache.pop(oldest_key, None)
             self._tag_cloud_cache[key] = (now, result)
             return result
 

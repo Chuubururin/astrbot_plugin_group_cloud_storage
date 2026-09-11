@@ -47,6 +47,8 @@ class _FakeBridge:
         self.queue = queue
         self.out_tasks: list[str] = []
         self.client = _FakeOpenList()
+        self._dst_dir = "/smb"
+        self.offline_paths: list[str] = []
 
     async def submit_out(self, group_id, rid, *, dst_dir=None, force=False):
         tid = f"out-{rid}"
@@ -58,7 +60,11 @@ class _FakeBridge:
 
 
 class _FakeOpenList:
+    def __init__(self):
+        self._offline_paths: list[str] = []
+
     async def submit_offline_download(self, urls, path):
+        self._offline_paths.append(path)
         return [type("T", (), {"id": f"off-{len(urls)}"})()]
 
     async def get_raw_url(self, path):
@@ -168,11 +174,13 @@ async def test_file_text_to_essence(env):
 
 @pytest.mark.asyncio
 async def test_album_to_netdisk(env):
+    """相册→网盘：离线下载目标目录 = bridge 的 _dst_dir（与 bridge_out 同源；
+    2026-09-07 修复：此前硬编码 "/"，openlist 只挂载子目录时报 storage not found）。"""
     tmp_path, store, api, d, ingest, bridge, dl = env
     api.album_media = {"g1:al1": [{"url": "http://cdn/x.jpg", "name": "x.jpg"}]}
     out = await d.distribute_album("g1", "al1", "x.jpg", "netdisk")
     assert out["target"] == "netdisk" and out["task_id"].startswith("off-")
-
+    assert d._bridge_client(bridge)._offline_paths == ["/smb"]
 
 @pytest.mark.asyncio
 async def test_album_media_url_selects_by_name(env):
@@ -195,6 +203,31 @@ async def test_album_media_url_nested_shape(env):
     ]}, "desc": "nested.jpg"}]}
     url = await d._album_media_url("g1", "al9", "nested.jpg")
     assert url == "http://cdn/nested.jpg"
+
+
+@pytest.mark.asyncio
+async def test_album_media_url_nt_camel_shape(env):
+    """QQ NT 相册驼峰形状（image.photoUrls/defaultUrl）也能取到直链
+    （2026-09-07 修复：此前只认蛇形 photo_url，全部分发报 url unavailable）。"""
+    tmp_path, store, api, d, ingest, bridge, dl = env
+    api.album_media = {"g1:al10": [
+        {"image": {"name": "pic.png", "photoUrls": [
+            {"spec": 5, "url": {"url": "http://cdn/nt-640.png", "width": 0, "height": 0}},
+            {"spec": 1, "url": {"url": "http://cdn/nt-800.png", "width": 0, "height": 0}},
+        ], "defaultUrl": {"url": "http://cdn/nt-default.png"}},
+        "desc": "pic.png"},
+        # 视频条目：videoUrl[] + 平铺播放 url；封面在 video.cover.photoUrls
+        {"video": {"id": "v1", "url": "http://cdn/nt-video.mp4",
+                   "cover": {"photoUrls": [{"url": {"url": "http://cdn/nt-cover.jpg"}}]}},
+         "name": "clip.mp4"},
+    ]}
+    assert await d._album_media_url("g1", "al10", "pic.png") == "http://cdn/nt-640.png"
+    assert await d._album_media_url("g1", "al10", "clip.mp4") == "http://cdn/nt-video.mp4"
+    # 整个媒体列表都无蛇形 photo_url 时，图片经 defaultUrl 兜底也可取到
+    api.album_media = {"g1:al11": [{"image": {
+        "photoUrls": [{"url": {"url": "http://cdn/only-spec.png"}}],
+    }}]}
+    assert await d._album_media_url("g1", "al11", "") == "http://cdn/only-spec.png"
 
 
 @pytest.mark.asyncio

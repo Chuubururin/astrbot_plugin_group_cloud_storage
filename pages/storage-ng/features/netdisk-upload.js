@@ -23,7 +23,23 @@ import { confirmEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 
 const POLL_MS = 1500;               // task-ledger poll interval
-const TIMEOUT_MS = 240000;          // relay timeout (4 min)
+const BASE_TIMEOUT_MS = 240000;     // relay timeout floor (4 min)
+const TIMEOUT_PER_MB_MS = 800;      // extra budget per MB (volume uploads)
+
+/** Timeout scales with total bytes: the backend force-volumes files above
+ * 95MB, and a multi-part upload of 1GB takes minutes more than a 4-minute
+ * fixed window. Floor stays 4min for tiny files. */
+function relayTimeoutMs(files) {
+  const totalMb = files.reduce((s, f) => s + (f.size || 0), 0) / (1024 * 1024);
+  return BASE_TIMEOUT_MS + Math.ceil(totalMb) * TIMEOUT_PER_MB_MS;
+}
+
+/** Ledger terminal states (no further transition): success, failure and
+ * user-intervened cancellation. paused/retry stay non-terminal -- the task
+ * will still run again. Aligned with the Celery READY-states convention
+ * (SUCCESS/FAILURE/REVOKED): a revoked (cancelled) task never completes,
+ * so waiting on it would stall the relay for the full timeout. */
+const TERMINAL_STATES = new Set(['done', 'failed', 'cancelled']);
 
 /** UI entry: confirm the relay semantics, pick files, run the relay. */
 export async function handleNetdiskUploadLocal() {
@@ -106,12 +122,18 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
       if (!r.ok) throw new Error('prepare 未返回 token');
       jobs.push({ name: outName, taskId: r.result?.task_id || '' });
     } catch (e) {
-      failed.push(`${f.name}（上传提交失败）`);
+      // 统一用提交后的名称（与等待步骤的去重判断一致，避免同一文件
+      // 在失败清单里出现两次不同名字的条目）。
+      failed.push(`${outNameFor(f.name, convertTo)}（上传提交失败）`);
     }
   }
 
   // 2) Wait for terminal states on the task ledger; timeouts surface as failures.
-  const done = await waitTasksDone(jobs.map((j) => j.taskId).filter(Boolean), { ...deps, group });
+  const done = await waitTasksDone(
+    jobs.map((j) => j.taskId).filter(Boolean),
+    { ...deps, group },
+    relayTimeoutMs(files),
+  );
   for (const j of jobs) {
     if (!j.taskId || done.get(j.taskId) !== 'done') {
       if (!failed.includes(j.name)) failed.push(`${j.name}（上传未完成）`);
@@ -143,15 +165,15 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
  * @param {number} [timeoutMs]
  * @returns {Promise<Map<string, string>>}
  */
-export async function waitTasksDone(taskIds, deps, timeoutMs = TIMEOUT_MS) {
+export async function waitTasksDone(taskIds, deps, timeoutMs) {
   const result = new Map();
   const pending = new Set(taskIds);
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + (timeoutMs || BASE_TIMEOUT_MS);
   while (pending.size > 0 && Date.now() < deadline) {
     try {
       const r = await deps.apiPost(API.TASKS, { target: deps.group, limit: 100 });
       for (const t of r?.tasks || []) {
-        if (pending.has(t.task_id) && (t.state === 'done' || t.state === 'failed')) {
+        if (pending.has(t.task_id) && TERMINAL_STATES.has(t.state)) {
           result.set(t.task_id, t.state);
           pending.delete(t.task_id);
         }
@@ -175,6 +197,15 @@ async function locateById(deps, group, name) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Output name after optional conversion (same rule as the submit loop). */
+function outNameFor(name, convertTo) {
+  const isVideo = /\.(mp4|mkv|avi|mov|flv|webm|wmv)$/i.test(name);
+  const isImage = /\.(png|jpe?g|webp|bmp|gif)$/i.test(name);
+  const convertOk = (isVideo && ['mp4', 'mkv', 'webm'].includes(convertTo))
+    || (isImage && ['png', 'jpg', 'jpeg', 'webp'].includes(convertTo));
+  return convertOk ? `${name.replace(/\.[^.]+$/, '')}.${convertTo}` : name;
 }
 
 function report(st) {

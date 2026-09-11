@@ -103,6 +103,47 @@ class PollingMixin:
         )
         logger.info("[bridge] ledger task started")
 
+    async def read_repair_row(self, row: dict) -> None:
+        """Read repair for one ledger row: reconcile against OpenList.
+
+        Mirrors the poll-loop decision tree (undone list -> done list ->
+        stat probe); state changes are persisted and renamed on done. Best
+        effort: ExternalApiError leaves the row untouched.
+        """
+        task_id = row.get("task_id", "")
+        try:
+            undone = {t.id: t for t in await self._client.tasks_undone()}
+            done = {t.id: t for t in await self._client.tasks_done()}
+            task = undone.get(task_id) or done.get(task_id)
+            if task is None:
+                stat = await self._client.stat(row.get("remote_path", ""))
+                if not stat:
+                    return  # still in flight (or retry window) — keep pending
+                state = BridgeTaskState.DONE.value
+            else:
+                state = normalize_task_state(task.state)
+            if state == row.get("state"):
+                return
+            if state == BridgeTaskState.DONE.value:
+                await self._maybe_rename_to_intended(row)
+            await self._store.update_archive_state(row, state)
+            self._publish(row, state, percent=100.0 if task is None else task.progress)
+        except ExternalApiError as e:
+            logger.warning(f"[bridge] read repair failed ({task_id}): {e.message}")
+
+    async def read_repair_pending(self) -> None:
+        """Read repair for all actionable out rows (manual mode aggregate)."""
+        rows = await self._store.list_archive_map(
+            states=(
+                BridgeTaskState.PENDING.value,
+                BridgeTaskState.RUNNING.value,
+                BridgeTaskState.UNKNOWN.value,
+            ),
+            direction="out",
+        )
+        for row in rows:
+            await self.read_repair_row(row)
+
     def _ensure_poll_task(self) -> None:
         """Lazy create poll task; interval=0 means manual mode."""
         if self._interval <= 0:
@@ -225,11 +266,27 @@ class PollingMixin:
         return len(rows) > 0
 
     async def status(self, task_id: str | None = None) -> dict:
-        """Query task status (single task by id, or aggregate counters)."""
+        """Query task status (single task by id, or aggregate counters).
+
+        Read repair: with auto-polling disabled (interval=0) nothing else
+        converges pending out-rows, so a status read reconciles against
+        OpenList first (single row or the pending set). Polling-enabled
+        deployments skip this: the poll loop is the converger.
+        """
         if task_id:
             row = await self._store.get_archive_map_by_task(task_id)
             if row is None:
                 return {"task_id": task_id, "state": BridgeTaskState.UNKNOWN.value}
+            if self._interval <= 0 and row.get("state") in (
+                BridgeTaskState.PENDING.value,
+                BridgeTaskState.RUNNING.value,
+                BridgeTaskState.UNKNOWN.value,
+            ):
+                await self.read_repair_row(row)
+                row = (
+                    await self._store.get_archive_map_by_task(task_id)
+                    or row
+                )
             return {
                 "task_id": task_id,
                 "state": row.get("state", BridgeTaskState.UNKNOWN.value),
@@ -238,6 +295,9 @@ class PollingMixin:
                 "remote_path": row.get("remote_path", ""),
                 "updated_at": row.get("updated_at", ""),
             }
+
+        if self._interval <= 0:
+            await self.read_repair_pending()
 
         rows_out = await self._store.list_archive_map(
             states=(

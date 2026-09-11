@@ -131,3 +131,56 @@ test('legacy key-less rows are NOT managed by keyed diff (documented behavior)',
   await flushRAF();
   assert.equal(tbody.children.length, 2, 'keyless row still present (must never be created)');
 });
+
+test('reorder where moved rows also changed data keeps want order (2026-09-07 move-up bug)', async () => {
+  // 群组上移真机 bug: 被移动的行 sort_order 变化 → 走 replace 路径；
+  // 旧实现 replace 在帧期 push 进 finalEls、keep 在计划期 push，
+  // 最终 append 变成 [keep..., replace...] → [C..J,B,A] 错序。
+  // 修复后 finalEls 按槽位（want 顺序）装配。
+  const tbody = el('tbody');
+  const A = { id: 'A', name: 'a', so: 1 };
+  const B = { id: 'B', name: 'b', so: 2 };
+  const C = { id: 'C', name: 'c', so: 3 };
+  applyKeyedDiff(tbody, [A, B, C], render, (x) => x.id);
+  await flushRAF();
+  assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['A', 'B', 'C']);
+
+  // 上移: B 换到头部，两个被移动行的 so 字段都变了（replace 路径）
+  const B2 = { id: 'B', name: 'b', so: 1 };
+  const A2 = { id: 'A', name: 'a', so: 2 };
+  const C2 = { id: 'C', name: 'c', so: 3 };
+  applyKeyedDiff(tbody, [B2, A2, C2], render, (x) => x.id);
+  await flushRAF();
+  assert.deepEqual(
+    tbody.children.map((c) => c.dataset.key),
+    ['B', 'A', 'C'],
+    `moved rows must land in want order, got [${tbody.children.map((c) => c.dataset.key)}]`,
+  );
+  // replace 出的新行必须带 __data，否则后续渲染会无限重替换
+  for (const row of tbody.children) assert.ok(row.__data, `row ${row.dataset.key} has __data`);
+});
+
+test('replace-in-place (no reorder) also lands at its own position', async () => {
+  const tbody = el('tbody');
+  applyKeyedDiff(tbody, [
+    { id: '1', name: 'a' }, { id: '2', name: 'b' }, { id: '3', name: 'c' },
+  ], render, (x) => x.id);
+  await flushRAF();
+  applyKeyedDiff(tbody, [
+    { id: '1', name: 'a' }, { id: '2', name: 'CHANGED' }, { id: '3', name: 'c' },
+  ], render, (x) => x.id);
+  await flushRAF();
+  assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['1', '2', '3']);
+  assert.equal(tbody.children[1].dataset.name, 'CHANGED');
+});
+
+test('create ops during reorder land in want order, not at the tail', async () => {
+  const tbody = el('tbody');
+  applyKeyedDiff(tbody, [{ id: '2', name: 'b' }], render, (x) => x.id);
+  await flushRAF();
+  applyKeyedDiff(tbody, [
+    { id: '1', name: 'a' }, { id: '2', name: 'b' }, { id: '3', name: 'c' },
+  ], render, (x) => x.id);
+  await flushRAF();
+  assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['1', '2', '3']);
+});

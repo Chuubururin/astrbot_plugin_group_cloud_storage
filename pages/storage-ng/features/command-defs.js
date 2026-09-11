@@ -64,7 +64,7 @@ export function registerAllCommands() {
     icon: 'DOWNLOAD',
     async run(ctx) {
       const r = await downloadItems(ctx, 'local', { confirmVolumes });
-      if (r.cancelled) return;
+      if (r.cancelled) return false; // 取消: 命令层保持现状
       summarize('local', r);
     },
     refresh: 'files',
@@ -101,10 +101,13 @@ export function registerAllCommands() {
     async run(ctx) {
       // One entry, all download forms: CDN 直链 / 本机服务地址 / 转存到
       // 网盘/相册/精华 all hang off the same unified executor.
-      const target = await promptDownloadTarget();
-      if (!target) { toast('已取消', 'info'); return; }
+      // The offered targets must be the subset downloadItems() implements
+      // (group/copy belong to the cross-module distribute commands).
+      const target = await promptDownloadTarget(
+        ['local', 'link', 'address', 'netdisk', 'album', 'essence']);
+      if (!target) { toast('已取消', 'info'); return false; }
       const r = await downloadItems(ctx, target, { confirmVolumes });
-      if (r.cancelled) return;
+      if (r.cancelled) return false;
       if (r.address) {
         const copied = await showDownloadAddress(r.address);
         if (copied) toast('HTTP 地址已复制', 'success');
@@ -121,8 +124,16 @@ export function registerAllCommands() {
     icon: 'MOVE',
     needsGroup: true,
     async run(ctx) {
-      const target = await pickFolder(rowGroup(ctx.state, ctx.rows[0]));
-      if (!target) return;
+      // 聚合视图跨群选择时，目录树只来自第一行的群，选出的 folder_id 对
+      // 其他群的行不存在（QQ 也没有跨群转移文件的能力）——整体拒绝而不是
+      // 提交一批注定部分失败的移动任务。
+      const groups = [...new Set(ctx.rows.map((f) => rowGroup(ctx.state, f)))];
+      if (groups.length > 1) {
+        toast('移动仅支持群内操作：选中的文件来自多个群，请分群分别移动', 'warn');
+        return false;
+      }
+      const target = await pickFolder(groups[0]);
+      if (!target) return false; // 取消: 命令层保持现状
       // Batch endpoint carries per-item groups (aggregated view safe).
       await apiPost(API.FILES.BATCH_MOVE, {
         items: ctx.rows.map((f) => ({ id: Number(f.id), group: rowGroup(ctx.state, f) })),
@@ -140,7 +151,7 @@ export function registerAllCommands() {
     needsSingle: true,
     async run(ctx) {
       const name = await promptEx('改名重传', `当前: ${ctx.rows[0].name}`, { value: ctx.rows[0].name });
-      if (name === null || name === ctx.rows[0].name) return;
+      if (name === null || name === ctx.rows[0].name) return false;
       // OneBot has no rename action: rename = replace upload with the new name.
       // Backend contract: {id, group, new_name} (files/replace_name).
       await apiPost(API.FILES.REPLACE_NAME, {
@@ -174,7 +185,7 @@ export function registerAllCommands() {
     icon: 'CHECK',
     async run(ctx) {
       const res = await promptEx('设置标签', '输入标签（逗号分隔，最多 10 个）');
-      if (res === null) return;
+      if (res === null) return false;
       const tags = res.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 10);
       // Backend contract: items=[{id,group}] + tags (batch-tags).
       await apiPost(API.FILES.BATCH_TAGS, {

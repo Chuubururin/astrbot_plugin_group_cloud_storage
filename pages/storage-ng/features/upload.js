@@ -173,6 +173,7 @@ export async function handleFileUpload(files) {
   if (!named) return;
 
   let success = 0;
+  const failed = [];
   const folder = getState().folder || '';
   for (const file of named) {
     try {
@@ -194,14 +195,17 @@ export async function handleFileUpload(files) {
         lossy_level: toAlbum ? (modes.lossy || undefined) : undefined,
       });
       if (r.ok) success++;
+      else failed.push(`${file.name}: ${r.error || 'prepare 被拒绝'}`);
     } catch (e) {
-      toast(`上传失败: ${file.name}`, 'error');
+      failed.push(`${file.name}: ${e.message || e}`);
     }
   }
-  if (success > 0) {
+  if (failed.length) {
+    toast(`${success}/${named.length} 个文件上传成功；失败: ${failed.join('；')}`, 'warn');
+  } else if (success > 0) {
     toast(`${success}/${named.length} 个文件上传成功`, 'success');
-    refresh('files');
   }
+  if (success > 0) refresh('files');
 }
 
 /**

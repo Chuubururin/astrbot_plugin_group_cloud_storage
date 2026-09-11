@@ -25,24 +25,30 @@ const DETAIL_BY_SOURCE = {
   group: (state, row) =>
     apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row) }),
   album: (state, row) => {
-    const albumId = row.album_id || (row.meta && row.meta.album_id) || '';
-    return albumId
-      ? apiGet(API.ALBUMS.DETAIL, { album_id: albumId, name: row.name || '' })
-      : apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row), kind: 'album' });
+    // albums/detail requires the numeric resource id (it resolves album_id
+    // from stored meta and self-heals a stale one); album_id alone 400s.
+    return apiGet(API.ALBUMS.DETAIL, { id: Number(row.id), group: rowGroup(state, row) });
   },
   essence: (state, row) =>
     apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row), kind: 'essence' }),
 };
 
-/** Re-list the netdisk directory and return a path->row map. */
+/** Re-list the netdisk directory and return a path->row map.
+ * Always page 1 with the max page size: the goal is a superset of the
+ * visible rows, and continuing from the current page would skip them
+ * (page numbers beyond the visible slice enumerate entries the table
+ * never showed). An empty result is treated as "unknown", not as
+ * "everything deleted" — a filter/pagination quirk must not wipe rows. */
 async function netdiskRows() {
   try {
     const data = await apiPost(API.BRIDGE.NETDISK, {
       path: getState().netdiskPath || '/',
-      page: getState().netdiskPage || 1,
+      page: 1,
       page_size: 500,
     });
-    return new Map((data.items || []).map((f) => [f.remote_path || f.name, f]));
+    const items = data.items || [];
+    if (!items.length) return null;
+    return new Map(items.map((f) => [f.remote_path || f.name, f]));
   } catch {
     return null; // re-list failed too: leave rows untouched
   }
@@ -78,7 +84,8 @@ export async function refetchRows(sourceId, rows) {
   if (!fetcher) return false;
   const itemsKey = sourceId === 'album' ? 'albumItems'
     : sourceId === 'essence' ? 'essenceItems' : 'fileItems';
-  const gone = new Set(); // rows no longer resolvable on the cloud
+  const gone = new Set(); // rows confirmed absent on the cloud (empty detail)
+  const skipped = new Set(); // fetch errors: keep the stale row
   for (const row of usable) {
     try {
       const detail = await fetcher(state, row);
@@ -97,7 +104,9 @@ export async function refetchRows(sourceId, rows) {
         changed = true;
       }
     } catch {
-      gone.add(String(row.id));
+      // 单行 detail 拉取失败（含 30s 超时/网络抖动）不能证明云端已删除：
+      // 保留该行并保持陈旧数据，行消失的判定只信任明确的 404 语义。
+      skipped.add(String(row.id));
     }
   }
   if (gone.size) changed = true;

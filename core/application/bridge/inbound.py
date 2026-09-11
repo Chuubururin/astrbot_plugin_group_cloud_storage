@@ -9,6 +9,25 @@ from core.application.bridge import _now, _basename
 class InboundMixin:
     """Handle bridge_in operations (OpenList -> group)."""
 
+    async def _converge_index(self, group_id: str) -> None:
+        """Queue one group sync after a URL direct-upload lands in QQ cloud
+        storage: the upload itself never enters the local index (zero disk
+        IO path), so without this the file stays invisible until the periodic
+        scan or a manual sync (live 2026-09-11: archive_map showed done
+        while the file page had no row). The sync op runs under the group
+        lock; dedup keeps consecutive transfers to the same group from
+        stacking redundant scans. Failure to queue must not fail the
+        already-successful upload."""
+        try:
+            if not self._queue.has_pending("sync", "_bridge_in", group_id):
+                await self._queue.submit(
+                    "sync", target=group_id, payload={"_bridge_in": group_id}
+                )
+        except Exception as e:
+            logger.warning(
+                f"[bridge] post-upload index sync not queued for {group_id}: {e}"
+            )
+
     async def handle_bridge_in(self, op) -> None:
         """Handle bridge_in operation (OpenList -> group)."""
         path = op.payload["path"]
@@ -40,6 +59,7 @@ class InboundMixin:
                     }
                 )
                 self._publish(op, state="done", percent=100.0)
+                await self._converge_index(gid)
                 logger.info(f"[bridge] bridge_in done (URL upload): {path} -> {gid}")
                 return
             except Exception as e:

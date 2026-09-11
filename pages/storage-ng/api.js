@@ -254,8 +254,8 @@ export function subscribeSSE(handler, onError) {
       try { handler(ev); } catch (e) { console.error('[sse] handler error:', e); }
     },
     onError(err) {
-      // Signal the resilient SSE client so it arms the watchdog /
-      // triggers immediate reconnect instead of silently idling.
+      // Resilient SSE client resubscribes immediately on channel errors;
+      // the heartbeat watchdog remains the fallback for silent deaths.
       if (typeof onError === 'function') {
         try { onError(err); } catch (e) { /* swallow */ }
       }

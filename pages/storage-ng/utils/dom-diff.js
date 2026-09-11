@@ -22,6 +22,10 @@ const diffStats = {
   violations: 0,
 };
 
+/** Per-container render generation: a newer applyKeyedDiff supersedes any
+ * still-chunked older render on the same container (stale-tail guard). */
+const runSeq = new WeakMap();
+
 /** Snapshot of the render statistics . */
 export function getDiffStats() {
   return { ...diffStats };
@@ -83,36 +87,47 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
     ops.push(() => { if (el.isConnected) el.remove(); });
   }
 
-  const finalEls = [];
-  for (const step of plan) {
+  // finalEls has one slot per plan step in want order: keep-steps fill
+  // synchronously, create/replace-steps fill their own slot at frame time.
+  // A shared push array would strand created/replaced rows at the tail and
+  // break the reorder append (2026-09-07 move-up misorder bug).
+  const finalEls = new Array(plan.length);
+  plan.forEach((step, i) => {
+    if (!step.create && !step.replace) {
+      finalEls[i] = step.el;
+      step.el.__data = step.item;
+    }
+  });
+
+  for (let i = 0; i < plan.length; i++) {
+    const step = plan[i];
     if (step.create) {
       ops.push((liveKeys) => {
         let el = liveKeys.get(step.key);
-        if (el) { finalEls.push(el); return; }        // raced render already made it
-        el = renderFn(step.item);
-        el.dataset.key = step.key;
-        el.__data = step.item;
-        liveKeys.set(step.key, el);
-        finalEls.push(el);
-        rewritten += 1;
+        if (!el) {
+          el = renderFn(step.item);
+          el.dataset.key = step.key;
+          el.__data = step.item;
+          liveKeys.set(step.key, el);
+          rewritten += 1;
+        }
+        finalEls[i] = el; // raced render already made it
       });
     } else if (step.replace) {
       ops.push((liveKeys) => {
         let el = step.el;
         if (!el.isConnected) {
           const cur = liveKeys.get(step.key);
-          if (cur) { finalEls.push(cur); return; }     // superseded by a newer render
+          if (cur) { finalEls[i] = cur; return; } // superseded by a newer render
         }
         const fresh = renderFn(step.item);
         fresh.dataset.key = step.key;
+        fresh.__data = step.item;
         el.replaceWith(fresh);
         liveKeys.set(step.key, fresh);
-        finalEls.push(fresh);
+        finalEls[i] = fresh;
         rewritten += 1;
       });
-    } else {
-      finalEls.push(step.el);
-      step.el.__data = step.item;
     }
   }
 
@@ -124,6 +139,10 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
     });
   }
 
+  const state = runSeq.get(container) || { seq: 0 };
+  const myRun = ++state.seq;
+  runSeq.set(container, state);
+
   requestAnimationFrame(() => {
     let frame = 0;
     // Live key set at frame time: concurrent renders of the same list are
@@ -133,6 +152,7 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
       if (el.dataset && el.dataset.key != null) liveKeys.set(el.dataset.key, el);
     }
     const runChunk = () => {
+      if (runSeq.get(container)?.seq !== myRun) return; // superseded
       const chunk = ops.slice(frame * MAX_ROWS_PER_FRAME, (frame + 1) * MAX_ROWS_PER_FRAME);
       for (const op of chunk) op(liveKeys);
       frame += 1;

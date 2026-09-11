@@ -137,29 +137,31 @@ class ConverterService:
         "low": (33, 8, 65),  # strongest compression
     }
 
-    async def compress(self, src: Path, level: str = "medium") -> Path:
+    async def compress(self, src: Path, level: str = "medium", src_ext: str = "") -> Path:
         """Lossy-compress a local image or video for album upload.
 
         Images are re-encoded (gif/bmp fall back to jpeg); videos are
         re-encoded to mp4 (libx264 + aac). The tier (high/medium/low) is the
         user's per-upload choice. Returns the compressed file path and never
-        mutates the original file in place.
+        mutates the original file in place. ``src_ext`` overrides the type
+        detection for neutrally-suffixed staging files (e.g. .tmp); it must
+        name a supported media extension.
         """
         level = str(level or "medium").lower()
         if level not in self._LOSSY_LEVELS:
             level = "medium"
-        ext = src.suffix.lower()
+        ext = (src_ext or src.suffix).lower()
         if self.is_image_ext(ext) or ext in (".gif", ".bmp"):
-            return await self._compress_image(src, level)
+            return await self._compress_image(src, level, ext)
         if ext in (".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".wmv"):
-            return await self._compress_video(src, level)
+            return await self._compress_video(src, level, ext)
         raise ValueError(f"compress only supports images/videos: {src.name}")
 
-    async def _compress_image(self, src: Path, level: str = "medium") -> Path:
+    async def _compress_image(self, src: Path, level: str = "medium", src_ext: str = "") -> Path:
         if not shutil.which("ffmpeg"):
             raise ValueError("ffmpeg not available for image compression")
         crf, q_jpeg, q_webp = self._LOSSY_LEVELS[level]
-        ext = src.suffix.lower()
+        ext = (src_ext or src.suffix).lower()
         if ext == ".webp":
             args = ["ffmpeg", "-y", "-i", src.as_posix(),
                     "-c:v", "libwebp", "-q:v", str(q_webp)]
@@ -175,11 +177,11 @@ class ConverterService:
             target = src.with_name(f"{src.stem}_lossy{target.suffix}")
         return await self._run(args + [target.as_posix()], target)
 
-    async def _compress_video(self, src: Path, level: str = "medium") -> Path:
+    async def _compress_video(self, src: Path, level: str = "medium", src_ext: str = "") -> Path:
         if not shutil.which("ffmpeg"):
             raise ValueError("ffmpeg not available for video compression")
         crf, _q_jpeg, _q_webp = self._LOSSY_LEVELS[level]
-        target = src.with_suffix(".mp4")
+        target = src.with_suffix((src_ext or src.suffix).lower())
         if target == src:
             target = src.with_name(f"{src.stem}_lossy.mp4")
         args = [

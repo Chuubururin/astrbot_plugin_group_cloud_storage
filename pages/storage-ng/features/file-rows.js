@@ -95,12 +95,18 @@ export function buildRow(source, item) {
     source.selection.toggle(source.rowKey(item), e.target.checked);
   });
   if (!isFolderRow) {
-    tr.addEventListener('dblclick', () => openPreview(item, source.id));
+    tr.addEventListener('dblclick', () => {
+      openPreview(item, source.id).catch((e) => {
+        // preview 的 download 策略可能抛错（下载请求失败等）：
+        // 双击路径必须给出反馈，不能静默落进 unhandledrejection。
+        toast(`打开预览失败: ${e.message || e}`, 'error');
+      });
+    });
     tr.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, source, item, {
         selection: source.selection,
-        onAction: (cmdId, ctx) => runCommand(cmdId, ctx),
+        onAction: (cmdId, ctx) => runCommand(cmdId, { ...ctx, rowAware: true }),
       });
     });
   } else if (isUp) {
@@ -166,11 +172,12 @@ function navigateRow(source, item, isUp) {
     if (source.id === 'group') {
       set('folder', '');
       set('folderChain', []);
+      set('filePage', 1);
     } else {
       const segs = (getState().netdiskPath || '/').split('/').filter(Boolean);
       set('netdiskPath', segs.length > 1 ? `/${segs.slice(0, -1).join('/')}` : '/');
+      set('netdiskPage', 1);
     }
-    set('filePage', 1);
     refresh(source.id === 'group' ? 'files' : 'netdisk');
     return;
   }

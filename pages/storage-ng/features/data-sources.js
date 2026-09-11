@@ -148,7 +148,8 @@ export const NETDISK_SOURCE = {
   // already covers that path.
   capabilities: [
     'netdisk-link', 'netdisk-download', 'netdisk-rename',
-    'netdisk-tags', 'netdisk-delete', 'clear', 'netdisk-distribute',
+    'netdisk-tags', 'netdisk-detail', 'netdisk-delete', 'clear',
+    'netdisk-distribute',
   ],
   async list(state, params) {
     const data = await apiPost(API.BRIDGE.NETDISK, {

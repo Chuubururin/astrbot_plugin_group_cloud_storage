@@ -115,11 +115,13 @@ export async function showAlbumUploadModal(fileInput) {
       { value: 'low', label: '强力（体积优先）' },
     ] },
   ]);
-  if (!res?.source) return;
-  albumUploadOptions = {
-    convertTo: res.convert_to || '',
-    lossy: res.lossy || '',
-  };
+  if (res?.source) {
+    albumUploadOptions = {
+      convertTo: res.convert_to || '',
+      lossy: res.lossy || '',
+      albumName: res.album || 'AstrBotCloud',
+    };
+  }
 
   if (res.source === 'netdisk') {
     const file = await pickNetdiskFile();
@@ -142,7 +144,7 @@ export async function showAlbumUploadModal(fileInput) {
     ]);
     if (!url?.url) return;
     await mutate('相册上传', API.FETCH, {
-      group, url: url.url, to_album: true, album_name: res.album || 'AstrBotCloud',
+      group, url: url.url, to_album: true, album_name: albumUploadOptions.albumName || 'AstrBotCloud',
       convert_to: res.convert_to || '',
       lossy: Boolean(albumUploadOptions.lossy),
       lossy_level: albumUploadOptions.lossy || undefined,
@@ -195,7 +197,7 @@ export async function showEssenceUploadModal() {
     toast('保存成功', 'success');
     refresh('essence');
   } catch (e) {
-    toast(`Text ingest failed: ${e.message || ''}`, 'error');
+    toast(`保存失败: ${e.message || ''}`, 'error');
   }
 }
 
@@ -209,18 +211,22 @@ export async function handleEssenceFileUpload(files) {
   const group = await resolveUploadGroup(getState().essenceGroup, 'essence');
   if (!group) { toast('无可用目标群', 'warn'); return; }
   let ok = 0;
+  const failed = [];
   for (const f of fileArr) {
     try {
       const r = await uploadOnce(group, { file: f }, { mode: 'text' });
       if (r.ok) ok++;
+      else failed.push(`${f.name}: ${r.error || 'prepare 被拒绝'}`);
     } catch (e) {
-      toast(`文档读取失败: ${f.name}`, 'error');
+      failed.push(`${f.name}: ${e.message || e}`);
     }
   }
-  if (ok > 0) {
+  if (failed.length) {
+    toast(`${ok}/${fileArr.length} 个文档已保存；失败: ${failed.join('；')}`, 'warn');
+  } else if (ok > 0) {
     toast(`${ok}/${fileArr.length} 个文档已保存为精华消息`, 'success');
-    refresh('essence');
   }
+  if (ok > 0) refresh('essence');
 }
 
 /**
@@ -251,6 +257,7 @@ export async function handleAlbumFileUpload(files) {
   const group = await resolveUploadGroup(getState().albumGroup, 'album');
   if (!group) { toast('无可用目标群（请先在群组 Tab 加载群列表）', 'warn'); return; }
   let ok = 0;
+  const failed = [];
   for (const f of images) {
     try {
       // Client-side media type guess; the backend re-detects from bytes.
@@ -261,17 +268,21 @@ export async function handleAlbumFileUpload(files) {
       const r = await uploadOnce(group, { file: f }, {
         mode,
         to_album: true,
+        album_name: albumUploadOptions.albumName || 'AstrBotCloud',
         convert_to: convertOk ? albumUploadOptions.convertTo : undefined,
         lossy: Boolean(albumUploadOptions.lossy),
         lossy_level: albumUploadOptions.lossy || undefined,
       });
       if (r.ok) ok++;
+      else failed.push(`${f.name}: ${r.error || 'prepare 被拒绝'}`);
     } catch (e) {
-      toast(`相册上传失败: ${f.name}`, 'error');
+      failed.push(`${f.name}: ${e.message || e}`);
     }
   }
-  if (ok > 0) {
+  if (failed.length) {
+    toast(`${ok}/${images.length} 个媒体上传成功；失败: ${failed.join('；')}`, 'warn');
+  } else if (ok > 0) {
     toast(`${ok}/${images.length} 个媒体上传成功`, 'success');
-    refresh('albums');
   }
+  if (ok > 0) refresh('albums');
 }

@@ -17,6 +17,7 @@ import { getIcon } from '../icons.js';
 import { escapeHtml, debounce } from '../utils/helpers.js';
 import { toast } from '../components/toast.js';
 import { confirmEx } from '../components/modal.js';
+import { invalidatePolicyCache } from '../features/preview.js';
 
 /**
  * Initialize the config view.
@@ -174,6 +175,9 @@ async function saveConfig() {
   try {
     const r = await apiPost(API.CONFIG_SAVE, { values });
     toast(`已保存 ${(r.saved || []).length} 项配置`, 'success');
+    // preview_policy 等键后端即时生效，前端策略缓存必须同步失效，
+    // 否则保存后预览仍按旧模式路由（直到刷新页面）。
+    invalidatePolicyCache();
     if (r.reload_required && r.reload_required.length) {
       setTimeout(async () => {
         const yes = await confirmEx('应用配置',

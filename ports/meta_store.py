@@ -85,6 +85,10 @@ class MetaStorePort(Protocol):
     async def list_volumes(self, parent_resource_id: str) -> list[VolumeInfo]:
         """Return a parent resource's volumes in sequence order."""
 
+    async def has_volume_part(self, group_id: str, part_name_pattern: str) -> bool:
+        """True when the group has any volume part whose name matches the
+        regex (identity guard for re-conversion after meta loss)."""
+
     async def update_volume_fields(
         self, parent_resource_id: str, seq: int, **fields
     ) -> None:
@@ -200,7 +204,9 @@ class MetaStorePort(Protocol):
         """Return tagged rows by directory prefix (remote_path LIKE dir_prefix%)."""
 
     async def set_netdisk_tags(self, remote_path: str, tags: str) -> None:
-        """Set tags for a single file (overwrites)."""
+        """Set tags for a single path (overwrites; upserts a placeholder
+        row when the path was never registered, so a tag on an unregistered
+        path survives the next browse/index registration)."""
 
     async def mark_netdisk_indexed(self, remote_paths: list[str]) -> None:
         """Backfill indexed_at after deep indexing."""

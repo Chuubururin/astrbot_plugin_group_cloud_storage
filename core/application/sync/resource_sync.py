@@ -151,6 +151,7 @@ class ResourceSyncService:
                 files_indexed=indexed,
                 complete=True,
             )
+            await self.store.finish_sync_log(log_id, result)
             logger.info(
                 f"[group_cloud_storage] full sync {group_id}: found={found} indexed={indexed}"
             )

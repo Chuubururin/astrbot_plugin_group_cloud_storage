@@ -206,6 +206,18 @@ test('download: target option table covers the canonical forms', () => {
   );
 });
 
+test('download: promptDownloadTarget offers only implemented targets', async () => {
+  // 缺陷回归: files-distribute 曾渲染全量 8 项, 但 downloadItems 未实现
+  // group/copy -> "unknown download target"。模态必须只给执行器支持的子集。
+  // ES module 导出只读, 这里直接断言 targetOptions 的过滤契约。
+  const { targetOptions } = await import('../../features/download-targets.js');
+  const values = targetOptions(['local', 'link', 'address', 'netdisk', 'album', 'essence'])
+    .map((t) => t.value);
+  assert.deepEqual(values, ['local', 'link', 'address', 'netdisk', 'album', 'essence']);
+  assert.ok(!values.includes('group') && !values.includes('copy'),
+    'unimplemented targets must not be offered');
+});
+
 test('runEachWithFailures: labels failures with item name/id, keeps going', async () => {
   const { done, failed } = await runEachWithFailures(
     [{ name: 'a' }, { id: 7 }, { name: 'c' }],

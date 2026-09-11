@@ -37,6 +37,19 @@ class CrudMixin:
         path = op.payload["path"]
         name = op.payload["name"]
         folder = op.payload.get("folder_id") or None
+        # BUG-10: the web prepare layer stores the frontend's folder VALUE,
+        # which is the folder NAME (the files-list contract keys folders by
+        # name), while upload_group_file needs the QQ folder_id ("/uuid").
+        # A name passed as folder_id fails remotely with a generic -300.
+        # Resolve here (execution time): id-like values pass through, names
+        # are looked up in the folders table; an unknown name fails fast
+        # with an explicit reason instead of a misleading remote error.
+        if folder and not folder.startswith("/"):
+            resolved = await self._resolve_folder_id(op.target, folder)
+            if resolved:
+                folder = resolved
+            else:
+                raise ValueError(f"目标文件夹不存在: {folder}")
         logger.info(f"[file-ops] upload {name} -> group {op.target} ({path})")
         src = Path(path)
         if not src.exists() or not src.is_file():
@@ -124,6 +137,25 @@ class CrudMixin:
             Path(path).unlink(missing_ok=True)
         except Exception:
             pass
+
+    async def _resolve_folder_id(self, group_id: str, name: str) -> str:
+        """Map a folder NAME to the QQ folder_id ("/uuid") via the folders
+        table; falls back to a live cloud listing when the table is stale
+        (e.g. the folder was created moments ago and the post-create sync
+        was rejected by a concurrent one). Empty string when truly unknown.
+        """
+        rows = await self.store.list_folders_detail(group_id)
+        for r in rows or []:
+            if r.get("folder_name") == name:
+                return str(r.get("folder_id") or "")
+        try:
+            listing = await self.api.list_group_folder(group_id, folder_id="")
+        except Exception:
+            return ""
+        for f in listing.folders or []:
+            if getattr(f, "name", "") == name:
+                return str(getattr(f, "folder_id", "") or "")
+        return ""
 
     # ---------- Delete ----------
 
@@ -255,23 +287,25 @@ class CrudMixin:
             raise ValueError("download returned empty content")
         staged = self.tmp_dir / f"replace_{op.payload['id']}_{int(_t.time())}.tmp"
         staged.write_bytes(data)
-        await self.api.upload_group_file(
-            op.target,
-            staged.as_posix(),
-            op.payload["new_name"],
-            folder_id=op.payload.get("folder") or None,
-        )
-        # Delete the old file (re-resolve a fresh id: the old name still
-        # exists after the reupload)
-        fresh2 = await self._resolve_file_ref(
-            op.target,
-            op.payload["name"],
-            0,
-            op.payload.get("folder") or None,
-        )
-        fid2, busid2 = fresh2 or (op.payload["file_id"], op.payload["busid"] or 0)
-        await self.api.delete_group_file(op.target, fid2, busid2)
-        staged.unlink(missing_ok=True)
+        try:
+            await self.api.upload_group_file(
+                op.target,
+                staged.as_posix(),
+                op.payload["new_name"],
+                folder_id=op.payload.get("folder") or None,
+            )
+            # Delete the old file (re-resolve a fresh id: the old name still
+            # exists after the reupload)
+            fresh2 = await self._resolve_file_ref(
+                op.target,
+                op.payload["name"],
+                0,
+                op.payload.get("folder") or None,
+            )
+            fid2, busid2 = fresh2 or (op.payload["file_id"], op.payload["busid"] or 0)
+            await self.api.delete_group_file(op.target, fid2, busid2)
+        finally:
+            staged.unlink(missing_ok=True)
         # Index replacement: record the new file name (the new source_ref is
         # backfilled by a later file refresh; the old record is soft-deleted)
         await self.store.update_resource_fields(
@@ -346,6 +380,15 @@ class CrudMixin:
             if op.payload.get("folder_id")
             else "!/",
         )
-        await self.store.update_resource_fields(
-            op.payload["id"], folder_id=op.payload["folder_id"]
-        )
+        # Mirror the successful-sync write shape: the move payload's "!/"
+        # sentinel (or empty) means cloud root, which sync stores as NULL;
+        # a real folder keeps its "/uuid" id plus the folders-table name.
+        raw_folder = str(op.payload.get("folder_id") or "")
+        index_folder = None if raw_folder in ("", "!/") else raw_folder
+        next_folder = {"folder_id": index_folder, "folder_name": None}
+        if index_folder:
+            for fd in await self.store.list_folders_detail(op.target):
+                if fd.get("folder_id") == index_folder:
+                    next_folder["folder_name"] = fd.get("folder_name")
+                    break
+        await self.store.update_resource_fields(op.payload["id"], **next_folder)

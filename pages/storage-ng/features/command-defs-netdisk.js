@@ -14,7 +14,7 @@ import { API, apiGet, apiPost } from '../api.js';
 import { getState } from '../store.js';
 import { promptEx, detailEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
-import { copyToClipboard, formatSize } from '../utils/helpers.js';
+import { copyToClipboard, formatSize, openExternal } from '../utils/helpers.js';
 import { netdiskRename, netdiskRemovePaths } from './netdisk-ops.js';
 
 /** Register every netdisk command. */
@@ -40,7 +40,7 @@ export function registerAllNetdiskCommands() {
     needsSingle: true,
     async run(ctx) {
       const d = await apiPost(API.BRIDGE.NETDISK_LINK, { path: ctx.keys[0] });
-      if (d?.url) window.open(d.url, '_blank');
+      await openExternal(d?.url || '');
     },
     keepSelection: true,
   });
@@ -54,7 +54,7 @@ export function registerAllNetdiskCommands() {
       const name = await promptEx('重命名', `当前: ${ctx.rows[0]?.name || ctx.keys[0]}`, {
         value: ctx.rows[0]?.name || '',
       });
-      if (!name) return;
+      if (!name) return false;
       await netdiskRename(ctx.keys[0], name);
       toast('重命名成功', 'success');
     },
@@ -68,7 +68,7 @@ export function registerAllNetdiskCommands() {
     needsSingle: true,
     async run(ctx) {
       const res = await promptEx('设置标记', '输入标签（逗号分隔）', { value: ctx.rows[0]?.tags || '' });
-      if (res === null) return;
+      if (res === null) return false;
       const tags = res.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 10);
       await apiPost(API.BRIDGE.NETDISK_META, { path: ctx.keys[0], tags });
       toast('标记已保存', 'success');

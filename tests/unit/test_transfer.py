@@ -91,6 +91,7 @@ def test_download_to_sftp_stub(env, monkeypatch):
     class FakeSSHClient:
         def __init__(self): pass
         def load_system_host_keys(self): pass
+        def load_host_keys(self, filename): pass
         def set_missing_host_key_policy(self, policy): pass
         def connect(self, host, port, username, password, timeout, **kw):
             captured["host"] = host

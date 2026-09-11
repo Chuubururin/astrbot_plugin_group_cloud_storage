@@ -208,7 +208,13 @@ class DistributorService:
             if not self.bridge:
                 raise ValueError("bridge not enabled")
             url = await self._album_media_url(group_id, album_id, name)
-            tasks = await self._bridge_client(bridge=self.bridge).submit_offline_download([url], "/")
+            # Media lands on the same netdisk destination as bridge_out
+            # (openlist_dst_dir + template): a hard-coded "/" breaks OpenList
+            # mounts that only expose a subdirectory.
+            client = self._bridge_client(bridge=self.bridge)
+            tasks = await client.submit_offline_download(
+                [url], getattr(self.bridge, "_dst_dir", "") or "/"
+            )
             tid = tasks[0].id if tasks else ""
             return {"target": "netdisk", "task_id": tid, "via": "media-offline"}
         if target == "group":
@@ -267,20 +273,46 @@ class DistributorService:
 
     @staticmethod
     def _extract_media_url(m: dict) -> str:
-        """Support both shapes: flat {url} and the nested QQ
-        image.photo_url[].url.url."""
+        """Support both shapes: flat {url} and the nested QQ album image.
+
+        The QQ NT album service returns camelCase media entries
+        (image.photoUrls[].url.url plus image.defaultUrl.url); legacy
+        NapCat-style adapters return snake_case (image.photo_url). Video
+        entries carry videoUrl[]/video_url[] specs and a flat playback url.
+        Mirrors the gallery frontend normalization (album-media.js).
+        """
         if not isinstance(m, dict):
             return ""
         flat = m.get("url") or m.get("file") or ""
         if isinstance(flat, str) and flat:
             return flat
-        photos = (m.get("image") or {}).get("photo_url") or []
-        for p in photos:
-            u = (p or {}).get("url")
-            if isinstance(u, dict) and u.get("url"):
-                return str(u["url"])
-            if isinstance(u, str) and u:
-                return u
+        image = m.get("image") or {}
+        for key in ("photoUrls", "photo_url"):
+            for p in image.get(key) or []:
+                u = (p or {}).get("url")
+                if isinstance(u, dict) and u.get("url"):
+                    return str(u["url"])
+                if isinstance(u, str) and u:
+                    return u
+        default_url = image.get("defaultUrl")
+        if isinstance(default_url, dict) and default_url.get("url"):
+            return str(default_url["url"])
+        video = m.get("video") or {}
+        if isinstance(video.get("url"), str) and video["url"]:
+            return video["url"]
+        for key in ("videoUrl", "video_url"):
+            for spec in video.get(key) or []:
+                u = (spec or {}).get("url")
+                if isinstance(u, dict) and u.get("url"):
+                    return str(u["url"])
+                if isinstance(u, str) and u:
+                    return u
+        cover = video.get("cover") or {}
+        for key in ("photoUrls", "photo_url"):
+            for p in cover.get(key) or []:
+                u = (p or {}).get("url")
+                if isinstance(u, dict) and u.get("url"):
+                    return str(u["url"])
         return ""
 
     # ---------- Essence text distribution (kind=essence) ----------
@@ -338,7 +370,7 @@ class DistributorService:
             if not self.ingest or not self.tmp_dir:
                 raise ValueError("ingest / tmp dir required")
             img_path = await self._render_text_to_image(text, group_id, rid)
-            album_name = "AstrBot精华"
+            album_name = await self._resolve_essence_album(group_id)
             if self.dlserver and self.dlserver.enabled:
                 staged = self.dlserver.register_staged(img_path, f"精华_{rid}.png")
                 url = staged.get("http_url", "")
@@ -373,6 +405,33 @@ class DistributorService:
         staged = self.tmp_dir / f"ess_{group_id}_{rid}_{int(time.time())}.txt"
         staged.write_text(text, encoding="utf-8")
         return staged
+
+    async def _resolve_essence_album(self, group_id: str) -> str:
+        """Album name for essence->album distribution (BUG-8).
+
+        Prefers the dedicated album "AstrBot精华"; when it does not exist in
+        the group, falls back to the first existing album instead of failing
+        (the protocol side cannot create albums, and upstream fetch has
+        always suggested "use an existing album name" as the remedy).
+        """
+        preferred = "AstrBot精华"
+        try:
+            albums = await self.api.get_qun_album_list(group_id)
+        except Exception as e:
+            logger.warning(f"[distribute] album list failed, using default: {e}")
+            return preferred
+        names = [
+            str(a.get("name") or a.get("album_name") or "").strip()
+            for a in albums or []
+            if isinstance(a, dict)
+        ]
+        if preferred in names or not names:
+            return preferred
+        logger.info(
+            f"[distribute] album '{preferred}' not in {group_id}, "
+            f"falling back to existing album '{names[0]}'"
+        )
+        return names[0]
 
     async def _render_text_to_image(self, text: str, group_id: str, rid: int) -> Path:
         """Render essence text to a PNG image (for album import). Pure

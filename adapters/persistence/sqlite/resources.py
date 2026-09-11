@@ -70,7 +70,7 @@ class ResourcesMixin(StorePart):
         # (a handful per group), so this stays small even on 20k upserts.
         comp_rows = conn.execute(
             """
-            SELECT resource_id, group_id, name, source_ref, meta FROM resources
+            SELECT resource_id, group_id, name, size, source_ref, meta FROM resources
             WHERE type='file'
               AND json_extract(meta, '$.composition.kind') = 'volumes'
             """
@@ -92,6 +92,16 @@ class ResourcesMixin(StorePart):
                 or succ.resource_id == pred["resource_id"]
                 or pred["source_ref"] in incoming_refs
             ):
+                continue
+            # Size gate: a different logical file can share a name (a new
+            # small re-upload after the big original became volumes). Only
+            # sizes covering the predecessor are eligible — equal sizes are
+            # ambiguous (live 2026-09-10: a 2KB vol_test.bin inherited the
+            # 200MB original's composition and parts), smaller ones are not
+            # (the cloud original was deleted after conversion, so a same-
+            # name successor smaller than it cannot be that same file).
+            pred_size = pred["size"] or 0
+            if succ.size < pred_size:
                 continue
             pred_id, pred_meta = pred["resource_id"], pred["meta"]
             try:
@@ -147,7 +157,9 @@ class ResourcesMixin(StorePart):
             n = 0
             for i in range(0, len(rows), 500):
                 chunk = rows[i : i + 500]
-                conn.execute("BEGIN")
+                # BUG-2 fix: removed explicit BEGIN — Python sqlite3 auto-begins
+                # transactions before DML; an explicit BEGIN would conflict with
+                # any implicit transaction already in progress.
                 try:
                     cur = conn.executemany(
                         """

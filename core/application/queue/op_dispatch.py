@@ -18,6 +18,7 @@ from core.log import logger
 from core.opctx import account_scope
 from .health import HealthCircuitBreaker
 from .capacity import CapacityMixin
+from .op import OpCancelError, OpPausedError
 
 
 class OpDispatcher(CapacityMixin):
@@ -215,7 +216,7 @@ class OpDispatcher(CapacityMixin):
         return False
 
     async def _run_scan_for_bot(
-        self, bot, mode: str, group_filter: list[str] | None = None
+        self, bot, mode: str, group_filter: list[str] | None = None, op=None
     ) -> None:
         """Run a scan for one bot with a dedicated adapter (no global state
         contention).
@@ -246,12 +247,12 @@ class OpDispatcher(CapacityMixin):
                 if mode == "incremental":
                     result = await self.scan.scan_owned_incremental(
                         account_bot=bot, api_override=bot_api,
-                        group_filter=group_filter,
+                        group_filter=group_filter, op=op,
                     )
                 else:
                     result = await self.scan.scan_owned(
                         account_bot=bot, api_override=bot_api,
-                        group_filter=group_filter,
+                        group_filter=group_filter, op=op,
                     )
                 # Circuit breaker signal: failure ratio >50% counts as a
                 # failure for this bot
@@ -265,6 +266,12 @@ class OpDispatcher(CapacityMixin):
                     )
                 else:
                     health.record_success()
+            except (OpPausedError, OpCancelError):
+                # Pause/cancel is control flow, not a bot failure: re-raise so
+                # the worker's OpPausedError/OpCancelError paths hold or
+                # cancel the task (swallowing here would turn 中断/暂停 into a
+                # spurious circuit-breaker failure).
+                raise
             except Exception as e:
                 health.record_failure()
                 logger.warning(
@@ -287,9 +294,9 @@ class OpDispatcher(CapacityMixin):
                 # Single bot or none: scan directly on one account (zero overhead)
                 b = bots[0] if bots else None
                 if mode == "incremental":
-                    await self.scan.scan_owned_incremental(account_bot=b, group_filter=group_filter)
+                    await self.scan.scan_owned_incremental(account_bot=b, group_filter=group_filter, op=op)
                 else:
-                    await self.scan.scan_owned(account_bot=b, group_filter=group_filter)
+                    await self.scan.scan_owned(account_bot=b, group_filter=group_filter, op=op)
             else:
                 # Global circuit breaker check
                 if self._check_global_circuit_breaker(bots):
@@ -307,12 +314,21 @@ class OpDispatcher(CapacityMixin):
                 # group lists)
                 tasks = [
                     asyncio.create_task(
-                        self._run_scan_for_bot(b, mode, assignment.get(i, [])),
+                        self._run_scan_for_bot(b, mode, assignment.get(i, []), op),
                         name=f"scan-{self._bot_id(b)}",
                     )
                     for i, b in enumerate(bots_sorted)
                 ]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # return_exceptions=True traps the per-bot pause/cancel: any
+                # control-flow exception must re-raise here so the worker's
+                # OpPausedError/OpCancelError paths take over (hold/cancel),
+                # otherwise the scan would keep going after 中断/暂停.
+                for r in results:
+                    if isinstance(r, (OpPausedError, OpCancelError)):
+                        raise r
+                    if isinstance(r, asyncio.CancelledError):
+                        raise r
             # Per-group chaining already queued file scans as groups were
             # scanned; the bulk fallback only applies when the callback is
             # not wired (e.g. minimal test assemblies).
@@ -360,7 +376,21 @@ class OpDispatcher(CapacityMixin):
             "video_album",
             "image_album",  # import a single image into the group album
         ):
-            await self.ingest.handle(op)
+            try:
+                await self.ingest.handle(op)
+            finally:
+                # Ingest results land in albums/essence/files listings; the
+                # frontend topic map covers these kinds but had no events to
+                # listen for. Announce even on failure (failure paths also
+                # refresh task state client-side).
+                self.queue.publish(
+                    {
+                        "type": "data_changed",
+                        "kind": op.kind,
+                        "target": op.target,
+                        "ts": time.time(),
+                    }
+                )
         elif op.kind == "netdisk_index":
             # Deep indexing: manual task, rate-limited at directory
             # granularity and cancellable

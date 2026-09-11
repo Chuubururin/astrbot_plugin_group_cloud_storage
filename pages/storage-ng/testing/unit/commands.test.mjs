@@ -75,7 +75,7 @@ test('runCommand: lifecycle smoke (busy on/off + run + done)', async () => {
   });
   const busyCalls = [];
   let doneCall = 0;
-  await commands.runCommand('test-ping', { keys: [1], rows: [] }, {
+  await commands.runCommand('test-ping', { keys: [1], rows: [{ id: 1 }] }, {
     onBusy: (id) => { busyCalls.push(id); },
     onDone: () => { doneCall++; },
   });
@@ -122,4 +122,48 @@ test('runCommand: needsGroup precondition (row-aware path)', async () => {
   await commands.runCommand('test-ng', { keys: [1], rows: [{ id: 1, group_id: 'g1' }], rowAware: true }, {});
   assert.equal(ran, true, 'row-aware group context -> runs');
   commands.unregisterCommand('test-ng');
+});
+
+test('runCommand: user-facing gate reasons are localized', () => {
+  // 行业惯例: 用户可见文案与代码内部消息隔离 (MS .NET localization model);
+  // canRun 的 reason 直接进 toast, 必须是中文。
+  for (const [id, env] of [
+    ['delete', { count: 0 }],
+    ['rename', { count: 2 }],
+    ['move', { count: 1, hasGroup: false }],
+  ]) {
+    const check = commands.canRun(id, env);
+    assert.equal(check.ok, false);
+    assert.ok(!/[a-z]{4,}/i.test(check.reason.replace(/[zh]/g, '')) || /[\u4e00-\u9fff]/.test(check.reason),
+      `reason should be localized: ${check.reason}`);
+  }
+});
+
+test('runCommand: cancel keeps the selection and skips refresh (no side effects)', async () => {
+  // 取消对话框不应产生副作用 (各 HIG 通用要求): 选择保持、不刷新。
+  const cleared = { sel: false };
+  commands.registerCommand({
+    id: 'test-cancel',
+    label: 'cancelable',
+    refresh: ['files'],
+    run() { return null; }, // 模态取消路径: run 正常返回 null
+  });
+  const fakeSel = { clear: () => { cleared.sel = true; } };
+  await commands.runCommand('test-cancel', {
+    keys: ['1'], rows: [{ id: 1 }], source: { selection: fakeSel }, rowAware: true,
+  }, {});
+  assert.equal(cleared.sel, false, 'cancel must not clear the selection');
+
+  // 非 null 返回值: 照常清选择
+  commands.registerCommand({
+    id: 'test-ok',
+    label: 'ok',
+    run() { return Promise.resolve('done'); },
+  });
+  await commands.runCommand('test-ok', {
+    keys: ['1'], rows: [{ id: 1 }], source: { selection: fakeSel }, rowAware: true,
+  }, {});
+  assert.equal(cleared.sel, true, 'successful run clears the selection');
+  commands.unregisterCommand('test-cancel');
+  commands.unregisterCommand('test-ok');
 });

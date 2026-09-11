@@ -12,7 +12,7 @@
 
 import { getState, refresh } from '../store.js';
 import { API, apiGet, apiPost, download } from '../api.js';
-import { formatSize } from '../utils/helpers.js';
+import { formatSize, openExternal } from '../utils/helpers.js';
 import { rowGroupFor } from '../utils/group.js';
 import { detailEx } from '../components/modal.js';
 import { showTextViewer } from '../components/text-viewer.js';
@@ -22,6 +22,13 @@ import { normalizeMedia } from './album-media.js';
 
 /** ext -> policy cache (backend default table + config overrides). */
 const policyCache = new Map();
+
+/** Invalidate the policy cache: preview_policy is read live from the
+ * backend config, so after a config save the cached modes would keep
+ * steering previews until the page reloads. */
+export function invalidatePolicyCache() {
+  policyCache.clear();
+}
 
 async function policyFor(name) {
   const dot = name.lastIndexOf('.');
@@ -104,9 +111,12 @@ export async function openPreview(row, sourceId = 'group') {
   if (policy.mode === 'download') {
     if (sourceId === 'netdisk') {
       const d = await apiPost(API.BRIDGE.NETDISK_LINK, { path: row.remote_path || row.name });
-      window.open(d.url || '', '_blank', 'noopener');
+      await openExternal(d.url || '');
     } else {
-      await download(API.FILES.DOWNLOAD, { id: row.id, group: rowGroupFor(getState(), row, sourceId) }, row.name);
+      // 不完整分卷同下载命令：带 allow_incomplete 跳过缺卷报错
+      const params = { id: row.id, group: rowGroupFor(getState(), row, sourceId) };
+      if (row.volume_total && !row.volume_complete) params.allow_incomplete = 1;
+      await download(API.FILES.DOWNLOAD, params, row.name);
       // 预览触发的下载也是用户操作：必须给出可见反馈，不留静默副作用
       toast(`已开始下载: ${row.name}`, 'success');
     }
@@ -120,7 +130,7 @@ export async function openPreview(row, sourceId = 'group') {
       const target = policy.template
         ? policy.template.replace('{src}', encodeURIComponent(url))
         : url;
-      window.open(target, '_blank', 'noopener');
+      await openExternal(target);
       return;
     } catch (e) { /* fall through to builtin */ }
   }
