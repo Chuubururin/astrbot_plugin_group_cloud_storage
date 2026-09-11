@@ -119,7 +119,7 @@ jobs:
             range="$tag"
             comparison=""
           fi
-          changes="$(git log --no-merges --pretty=format:'- %s ([%h](https://github.com/${GITHUB_REPOSITORY}/commit/%H))' "$range" || true)"
+          changes="$(git log --no-merges --pretty=format:"- %s ([%h](https://github.com/${GITHUB_REPOSITORY}/commit/%H))" "$range" || true)"
           [[ -z "$changes" ]] && changes="- 无提交记录。"
           {
             echo "# 群云存储管理器 ${tag}"
