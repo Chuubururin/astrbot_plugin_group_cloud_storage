@@ -115,11 +115,13 @@ export async function showAlbumUploadModal(fileInput) {
       { value: 'low', label: '强力（体积优先）' },
     ] },
   ]);
-  if (!res?.source) return;
-  albumUploadOptions = {
-    convertTo: res.convert_to || '',
-    lossy: res.lossy || '',
-  };
+  if (res?.source) {
+    albumUploadOptions = {
+      convertTo: res.convert_to || '',
+      lossy: res.lossy || '',
+      albumName: res.album || 'AstrBotCloud',
+    };
+  }
 
   if (res.source === 'netdisk') {
     const file = await pickNetdiskFile();
@@ -142,7 +144,7 @@ export async function showAlbumUploadModal(fileInput) {
     ]);
     if (!url?.url) return;
     await mutate('相册上传', API.FETCH, {
-      group, url: url.url, to_album: true, album_name: res.album || 'AstrBotCloud',
+      group, url: url.url, to_album: true, album_name: albumUploadOptions.albumName || 'AstrBotCloud',
       convert_to: res.convert_to || '',
       lossy: Boolean(albumUploadOptions.lossy),
       lossy_level: albumUploadOptions.lossy || undefined,
@@ -266,6 +268,7 @@ export async function handleAlbumFileUpload(files) {
       const r = await uploadOnce(group, { file: f }, {
         mode,
         to_album: true,
+        album_name: albumUploadOptions.albumName || 'AstrBotCloud',
         convert_to: convertOk ? albumUploadOptions.convertTo : undefined,
         lossy: Boolean(albumUploadOptions.lossy),
         lossy_level: albumUploadOptions.lossy || undefined,

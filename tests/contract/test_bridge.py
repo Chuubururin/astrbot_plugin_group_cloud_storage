@@ -66,6 +66,15 @@ async def env(tmp_path, monkeypatch):
             await routing["bridge"].handle_bridge_out(op)
         elif op.kind == "bridge_in":
             await routing["bridge"].handle_bridge_in(op)
+        elif op.kind == "sync":
+            # 镜像生产 op_dispatch 的 sync 分支（bridge_in 直传成功后会
+            # 入队组级 sync 收敛索引）
+            await sync.run_full_sync(
+                op.target,
+                routing.setdefault("_sync_locks", {}).setdefault(
+                    op.target, asyncio.Lock()
+                ),
+            )
         else:
             await routing["ingest"].handle(op)
 
@@ -307,3 +316,114 @@ async def test_in_url_upload_degrades_to_fetch(env, monkeypatch):
     else:
         raise TimeoutError("pending_in row never converged to done")
     assert ns.bridge._ledger_task is None or ns.bridge._ledger_task.done()
+
+
+@pytest.mark.asyncio
+async def test_in_url_upload_queues_index_sync(env):
+    """直传成功后文件不经本地管线 → 需要自动入队一次组级 sync 让索引收敛；
+    去重生效（同组已有 sync 时不再叠加）。"""
+    ns = env
+    tid = await ns.bridge.submit_in("netdisk/movie.mp4", group_id="g1")
+    await drain_op(ns.queue, tid)
+    row = await ns.store.list_archive_map(
+        states=("done",), direction="in"
+    )
+    assert row and row[0]["state"] == BridgeTaskState.DONE.value
+    # 收敛 sync 已入队（可能已执行完）：从 ledger 最近记录里确认 sync 出现过
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        status = await ns.queue.status()
+        sync_ops = [r for r in status["recent"] if r["kind"] == "sync"]
+        if sync_ops:
+            assert sync_ops[0]["target"] == "g1"
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise TimeoutError("post-upload sync never queued")
+
+
+# ---------- 手动模式读修复（Bug：poll=0 时单任务/聚合查询永停 pending） ----------
+
+
+@pytest.mark.asyncio
+async def test_status_read_repairs_pending_row_in_manual_mode(env):
+    """interval=0（手动模式）下，status(task_id) 读到 pending 行时对账 OpenList。"""
+    ns = env
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    ol_tid = next(iter(ns.client.undone))
+    # OpenList 侧任务已完成，但本地无轮询，ledger 仍 pending
+    ns.client.undone.clear()
+    ns.client.done_tasks[ol_tid] = OfflineTask(
+        id=ol_tid,
+        name="video.mp4",
+        state="succeeded",
+        status="done",
+        progress=100.0,
+        error="",
+    )
+    ns.client.files["/g1"] = [
+        NetFile(name="video.mp4", size=1024, is_dir=False, modified=""),
+    ]
+    st = await ns.bridge.status(ol_tid)
+    assert st["state"] == BridgeTaskState.DONE.value
+    row = await ns.store.get_archive_map("g1", ns.rid, "out")
+    assert row["state"] == BridgeTaskState.DONE.value
+
+
+@pytest.mark.asyncio
+async def test_status_no_repair_when_polling_enabled(env):
+    """interval>0（自动轮询）时 status 是纯 DB 读：不触 OpenList。"""
+    ns = env
+    ns.bridge._interval = 10
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    ol_tid = next(iter(ns.client.undone))
+    before = len(ns.client.submitted)
+    st = await ns.bridge.status(ol_tid)
+    assert st["state"] == BridgeTaskState.PENDING.value
+    assert len(ns.client.submitted) == before  # 未发生任何控制面调用
+
+
+@pytest.mark.asyncio
+async def test_read_repair_pending_aggregate_converges_rows(env):
+    """聚合读修复把所有 actionable out 行收敛；无变化行保持原状。"""
+    ns = env
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    ol_tid = next(iter(ns.client.undone))
+    ns.client.undone.clear()
+    ns.client.done_tasks[ol_tid] = OfflineTask(
+        id=ol_tid,
+        name="video.mp4",
+        state="succeeded",
+        status="done",
+        progress=100.0,
+        error="",
+    )
+    ns.client.files["/g1"] = [
+        NetFile(name="video.mp4", size=1024, is_dir=False, modified=""),
+    ]
+    ns.bridge._interval = 0
+    await ns.bridge.read_repair_pending()
+    row = await ns.store.get_archive_map("g1", ns.rid, "out")
+    assert row["state"] == BridgeTaskState.DONE.value
+    # 再跑一次：已 done 的行不再 actionable，修复幂等
+    await ns.bridge.read_repair_pending()
+    assert ns.client.renames == []  # 目标名已正确，无需二次改名
+
+
+@pytest.mark.asyncio
+async def test_read_repair_missing_task_and_remote_stays_pending(env):
+    """任务不在 undone/done 且远端文件未出现 → 行保持 pending（仍在重试窗口）。"""
+    ns = env
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    ol_tid = next(iter(ns.client.undone))
+    ns.client.undone.clear()  # OpenList 列表里消失，远端也没有文件
+    await ns.bridge.read_repair_row(
+        await ns.store.get_archive_map("g1", ns.rid, "out")
+    )
+    row = await ns.store.get_archive_map("g1", ns.rid, "out")
+    assert row["state"] == BridgeTaskState.PENDING.value
+    assert row["task_id"] == ol_tid

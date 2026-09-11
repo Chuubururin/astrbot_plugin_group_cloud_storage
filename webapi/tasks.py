@@ -101,19 +101,42 @@ async def api_tasks_resume_pending(s: Services) -> dict:
     Finds tasks in op_ledger with state=pending and kind in the whitelist,
     then re-enqueues each for recovery. Whitelist: convert_volumes,
     video_upload, netdisk_index (kept in sync with ledger_reconcile).
+
+    Resumability pre-check (Bug-13, live 2026-09-11): a stale "pending" row
+    can reference inputs that no longer exist (converted resource, deleted
+    staged file, moved netdisk path). Re-submitting such a task yields a
+    zombie: the ledger is pre-marked running, the run crashes without a
+    terminal write, and undo reports "interrupted" while nothing is running.
+    Pre-check each kind's inputs and fail the row instead of re-submitting.
     """
     await _ensure_ready(s)
-    pending = await s.task_control.list_tasks(state="pending", limit=200)
-    if not pending:
-        return json_response({"resumed": 0, "note": "无待恢复任务"})
     _BREAKPOINT_KINDS = {"convert_volumes", "video_upload", "netdisk_index"}
+    # Page instead of a single capped query: the ledger routinely holds
+    # hundreds of pending file_scan rows (one scan per hot-reload), so a
+    # capped read can cut off before reaching the breakpoint rows.
+    breakpoint_rows: list[dict] = []
+    total_pending = 0
+    offset = 0
+    while True:
+        page = await s.task_control.list_tasks(
+            state="pending", limit=100, offset=offset
+        )
+        total_pending += len(page)
+        if not page:
+            break
+        breakpoint_rows.extend(
+            row for row in page if row.get("kind") in _BREAKPOINT_KINDS
+        )
+        if len(page) < 100:
+            break
+        offset += 100
+    if not breakpoint_rows:
+        return json_response({"resumed": 0, "total_pending": total_pending,
+                              "note": "无待恢复任务"})
     resumed = 0
-    skipped = 0
-    for row in pending:
+    failed_preflight = 0
+    for row in breakpoint_rows:
         kind = row.get("kind", "")
-        if kind not in _BREAKPOINT_KINDS:
-            skipped += 1
-            continue
         task_id = row.get("task_id", "")
         target = row.get("target", "")
         payload = {}
@@ -126,15 +149,69 @@ async def api_tasks_resume_pending(s: Services) -> dict:
                 payload = raw
         except Exception:
             payload = {}
+        precheck_error = await _resume_precheck(s, kind, target, payload)
+        if precheck_error:
+            failed_preflight += 1
+            logger.warning(
+                f"[tasks-resume] {task_id} ({kind}) preflight failed: {precheck_error}"
+            )
+            await s.task_control.on_state(
+                task_id, kind, target, payload, "failed", precheck_error
+            )
+            continue
         try:
             await s.queue.submit(kind, target=target, payload=payload)
             resumed += 1
-            # Mark as running (prevents duplicate re-submission)
-            await s.task_control.on_state(task_id, kind, target, payload, "running")
         except Exception as e:
             logger.warning(f"[tasks-resume] re-submit {task_id} ({kind}) failed: {e}")
     return json_response({
         "resumed": resumed,
-        "skipped": skipped,
-        "total_pending": len(pending),
+        "failed_preflight": failed_preflight,
+        "total_pending": total_pending,
     })
+
+
+async def _resume_precheck(
+    s: Services, kind: str, target: str, payload: dict
+) -> str | None:
+    """Validate that a breakpoint task's inputs still exist before
+    re-submitting. Returns an error string, or None when resumable."""
+    if kind == "convert_volumes":
+        from core.application.composition.spec import is_composite
+
+        rid = payload.get("resource_id") or ""
+        # Legacy rows carry "group:file:<numeric-id>" (pre-Bug-16 rekeying);
+        # newer ones key by the cloud file id ("group:file:<uuid>").
+        detail = None
+        if rid:
+            detail = await s.store.get_resource_by_resource_id(rid)
+        if detail is None:
+            tail = str(rid).rsplit(":", 1)[-1] if rid else ""
+            numeric: int | None = None
+            if tail.isdigit():
+                numeric = int(tail)
+            elif isinstance(payload.get("id"), int):
+                numeric = payload["id"]
+            if numeric is not None:
+                detail = (
+                    await s.store.get_resource_detail(target, numeric)
+                    or await s.store.get_resource_any(numeric)
+                )
+        if detail is None:
+            return f"资源不存在（resource_id={rid or payload.get('id')}）"
+        meta = detail.get("meta") or {}
+        if is_composite(meta if isinstance(meta, dict) else None):
+            return (
+                f"资源 {detail.get('name') or detail.get('id')} "
+                "已是分卷/组合形态"
+            )
+    elif kind == "video_upload":
+        import os
+
+        path = payload.get("path") or ""
+        if not path or not os.path.isfile(path):
+            return f"暂存文件不存在: {path or '(空)'}"
+    elif kind == "netdisk_index":
+        if not payload.get("path"):
+            return "payload 缺少 path"
+    return None

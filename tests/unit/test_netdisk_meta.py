@@ -64,3 +64,17 @@ async def test_set_tags_empty_allowed(store):
     await store.set_netdisk_tags("/g/x.bin", "")
     metas = await store.get_netdisk_meta("/g/")
     assert metas[0]["tags"] == ""
+
+
+@pytest.mark.asyncio
+async def test_set_tags_unregistered_path_survives_registration(store):
+    # 对未登记路径打标：upsert 占位行，标签不丢（链⑬ 真机复现）
+    await store.set_netdisk_tags("/g/fresh.bin", "孤儿标签")
+    metas = await store.get_netdisk_meta("/g/")
+    assert [m["tags"] for m in metas] == ["孤儿标签"]
+    # 登记同路径：幂等不覆盖标注
+    await store.upsert_netdisk_rows([_row("/g/fresh.bin", "fresh.bin")])
+    metas = await store.get_netdisk_meta("/g/")
+    assert len(metas) == 1
+    assert metas[0]["tags"] == "孤儿标签"
+    assert metas[0]["name"] == "fresh.bin"

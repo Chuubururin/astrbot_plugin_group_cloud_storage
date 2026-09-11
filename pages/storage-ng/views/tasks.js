@@ -80,6 +80,7 @@ export function initTasksView(container) {
         <select id="task-state-filter">${STATE_FILTERS.map((f) =>
           `<option value="${f.value}">${f.label}</option>`).join('')}</select>
         <button id="task-refresh" class="icon-btn" title="刷新列表">${getIcon('REFRESH', 14)}</button>
+        <button id="task-resume-pending" class="btn-act" title="重提重启后遗留的可恢复任务（分卷转换/长视频上传/网盘索引；预检失败的任务会直接落失败态）">断点恢复</button>
       </div>
       <div class="toolbar-right">
         <span id="task-count" class="count-badge"></span>
@@ -108,6 +109,7 @@ export function initTasksView(container) {
     set('taskStateFilter', e.target.value);
   });
   container.querySelector('#task-refresh')?.addEventListener('click', loadTasks);
+  container.querySelector('#task-resume-pending')?.addEventListener('click', resumePending);
 
   return () => { subs.forEach((u) => u()); };
 }
@@ -207,6 +209,24 @@ function renderTasks(tasks) {
   tbody.querySelectorAll('[data-act]').forEach((btn) => {
     btn.addEventListener('click', () => handleAction(btn.dataset.act, btn.dataset.id));
   });
+}
+
+/** 断点恢复：重提重启后遗留的可恢复 pending 任务（白名单 + 预检在后端）。 */
+async function resumePending() {
+  try {
+    const r = await apiPost(API.TASKS_RESUME_PENDING, {});
+    if (r.resumed > 0) {
+      toast(`已重提 ${r.resumed} 个断点任务` +
+        (r.failed_preflight ? `，${r.failed_preflight} 个预检失败已落失败态` : ''), 'success');
+    } else if (r.failed_preflight > 0) {
+      toast(`${r.failed_preflight} 个断点任务预检失败（输入已不存在），已落失败态`, 'warn');
+    } else {
+      toast(r.note || '无待恢复任务', 'info');
+    }
+    loadTasks();
+  } catch (e) {
+    toast(`断点恢复失败: ${e.message || e}`, 'error');
+  }
 }
 
 async function handleAction(act, taskId) {

@@ -204,7 +204,9 @@ class MetaStorePort(Protocol):
         """Return tagged rows by directory prefix (remote_path LIKE dir_prefix%)."""
 
     async def set_netdisk_tags(self, remote_path: str, tags: str) -> None:
-        """Set tags for a single file (overwrites)."""
+        """Set tags for a single path (overwrites; upserts a placeholder
+        row when the path was never registered, so a tag on an unregistered
+        path survives the next browse/index registration)."""
 
     async def mark_netdisk_indexed(self, remote_paths: list[str]) -> None:
         """Backfill indexed_at after deep indexing."""

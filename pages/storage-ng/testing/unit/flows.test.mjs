@@ -151,3 +151,18 @@ test('upload: resolveUploadGroup falls back to recommend when no focus group', a
   const group = await resolveUploadGroup('', 'file', 100);
   assert.equal(group, '', 'no SDK in node -> recommend fails quietly, returns ""');
 });
+
+test('netdisk-ops: remove strips trailing slash so dir rows delete themselves, not the parent', async () => {
+  const { netdiskRemovePaths } = await import('../../features/netdisk-ops.js');
+  const calls = [];
+  globalThis.window = { AstrBotPluginPage: {
+    apiPost: async (path, body) => { calls.push({ path, body }); return { ok: true }; },
+  } };
+  try {
+    const st = await netdiskRemovePaths(['/smb/dirA/', '/smb/dirB/sub/', '/smb/file.txt']);
+    assert.equal(st.done, 3);
+    assert.deepEqual(calls[0].body, { dir: '/smb', names: ['dirA'] });
+    assert.deepEqual(calls[1].body, { dir: '/smb/dirB', names: ['sub'] });
+    assert.deepEqual(calls[2].body, { dir: '/smb', names: ['file.txt'] });
+  } finally { delete globalThis.window; }
+});

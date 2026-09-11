@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 
-from core.domain.enums import ResourceType
+from core.domain.enums import OneBotApiError, OneBotErrorKind, ResourceType
 from core.domain.resource import Resource
 from core.log import logger
 from core.application.composition.spec import encode_composition
@@ -39,24 +39,26 @@ class EssenceMixin:
         self, group_id: str, title: str, seq: int, total: int, chunk: str
     ) -> str:
         """Send one part and set it as essence, with cloud read-back
-        verification (QQ occasionally drops the essence flag -> resend and
-        re-set, up to 3 attempts).
+        verification (QQ occasionally drops the essence flag -> re-set only,
+        up to 3 attempts).
 
         The trailing chunk marker is a semantic composition identifier placed
         at the **end** of the text (the QQ essence list preview shows the
         beginning, so a trailing marker does not cover the body). Returns the
-        final message_id; on resend the old message automatically becomes a
-        normal message (no side effects).
+        final message_id; on re-set the same message is used (re-sending the
+        message would flood the group when the set itself keeps failing —
+        live 2026-09-11: NapCat silently drops server rejections, so every
+        retry re-sent a duplicate message while the essence never landed).
         """
         marker = self._marker(title, seq, total)
         msg = f"{chunk}\n{marker}"
+        r = await self.api.send_group_msg(
+            group_id, [{"type": "text", "data": {"text": msg}}]
+        )
+        mid = str((r or {}).get("message_id") or "")
+        if not mid:
+            raise ValueError("send_group_msg returned no message_id")
         for attempt in range(3):
-            r = await self.api.send_group_msg(
-                group_id, [{"type": "text", "data": {"text": msg}}]
-            )
-            mid = str((r or {}).get("message_id") or "")
-            if not mid:
-                raise ValueError("send_group_msg returned no message_id")
             await self.api.set_essence_msg(mid)
             try:
                 timeout = CLOUD_CALL_TIMEOUT
@@ -71,8 +73,17 @@ class EssenceMixin:
             logger.warning(
                 f"[ingest] essence part {seq}/{total} not confirmed, retry {attempt + 1}"
             )
-            await asyncio.sleep(1.5)
-        raise ValueError(f"essence part {seq}/{total} not confirmed after 3 attempts")
+            if attempt < 2:
+                await asyncio.sleep(1.5)
+        # The set step is where server-side rejection surfaces (permissions /
+        # rate limits; NapCat still reports success). Re-running the whole
+        # task would re-send every part again, so fail without queue-level
+        # retries and let the local parts record keep the text recoverable.
+        raise OneBotApiError(
+            OneBotErrorKind.LOCAL_ERROR,
+            "essence_save",
+            f"essence part {seq}/{total} not confirmed after 3 attempts",
+        )
 
     @staticmethod
     def _has_marker(text: str, marker: str) -> bool:

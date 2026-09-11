@@ -104,8 +104,10 @@ export async function runCommand(id, ctx, hooks = {}) {
   const cmd = registry.get(id);
   if (!cmd) { toast(`未知操作: ${id}`, 'error'); return; }
 
+  // 计数以 rows 为准: keys 是选区全集（翻页/框选目录行会残留无效 key），
+  // 而 run() 实际只提交 rows —— 确认框写 keys.length 会虚报数量。
   const env = {
-    count: (ctx.keys || []).length,
+    count: (ctx.rows || []).length,
     hasGroup: Boolean(ctx.state?.currentGroup),
     rowsHaveGroup: (ctx.rows || []).some((r) => r.group_id),
   };

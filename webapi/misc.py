@@ -62,6 +62,12 @@ async def api_fetch(s: Services) -> dict:
                 "convert_to is not applicable to essence text ingest", status_code=400
             )
     try:
+        # lossy/lossy_level: user-selected album compression (irreversible);
+        # forwarded to submit_fetch which applies it on the album path
+        # (previously dropped here, silently ignoring the user's choice).
+        lossy_level = str(payload.get("lossy_level") or "medium").lower()
+        if lossy_level not in ("high", "medium", "low"):
+            lossy_level = "medium"
         task_id = await s.ingest.submit_fetch(
             group,
             url,
@@ -70,6 +76,8 @@ async def api_fetch(s: Services) -> dict:
             album_name=str(payload.get("album_name") or "").strip(),
             to_essence=bool(payload.get("to_essence")),
             convert_to=convert_to,
+            lossy=bool(payload.get("lossy")),
+            lossy_level=lossy_level,
         )
     except ValueError as e:
         return error_response(str(e), status_code=400)

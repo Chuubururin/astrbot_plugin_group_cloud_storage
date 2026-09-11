@@ -137,10 +137,21 @@ class TaskControlService:
         if state == "done":
             return await self._compensate(task_id, row)
         # running/retry: undo = cooperative interrupt (no compensation, no
-        # running state preserved)
-        self.queue.interrupt_task(task_id)
-        return {"ok": True, "task_id": task_id, "action": "interrupted",
-                "note": "运行中任务已中断（不做补偿）"}
+        # running state preserved). If the task is not in the live queue the
+        # row is a stale zombie (e.g. a resumed run crashed without a terminal
+        # write) -- converge it to failed instead of claiming an interrupt
+        # that lands nowhere (Bug-13, live 2026-09-11).
+        if self.queue.interrupt_task(task_id):
+            return {"ok": True, "task_id": task_id, "action": "interrupted",
+                    "note": "运行中任务已中断（不做补偿）"}
+        await self.store.ledger_upsert(
+            task_id, row.get("kind", ""), row.get("target", ""),
+            row.get("payload") or {}, "failed",
+            retries=int(row.get("retries") or 0),
+            error=row.get("error") or "stale running row (task not in queue)",
+        )
+        return {"ok": True, "task_id": task_id, "action": "discard",
+                "note": "任务不在运行队列中（陈旧记录），已标记为失败"}
 
     async def _undo_direct_tags(self, group_id: str, resource_id: int) -> dict:
         """Undo a direct tags operation: locate the latest snapshot for the

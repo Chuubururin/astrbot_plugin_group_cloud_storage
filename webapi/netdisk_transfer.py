@@ -75,6 +75,12 @@ async def api_bridge_tasks(s: Services) -> dict:
     direction = pick(payload, "direction", default="")
     state_filter = pick(payload, "state", default="")
 
+    # Read repair (manual mode): reconcile actionable out rows against
+    # OpenList before reading, so the panel list converges without a
+    # background poller. Polling-enabled deployments skip this.
+    if s.bridge.poll_interval <= 0:
+        await s.bridge.read_repair_pending()
+
     # Query tasks from archive_map
     if direction:
         directions = [direction]

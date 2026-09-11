@@ -269,3 +269,34 @@ async def test_undo_tags_snapshot_restore(env):
     assert r2["ok"] is True and r2["action"] == "tags_restored"
     detail = await env.store.get_resource_detail("g1", rid)
     assert json.loads(detail["tags"]) == sorted(["old", "new"])
+
+
+# ---------- Bug-13: 僵尸 running 行的撤销兑底 ----------
+
+@pytest.mark.asyncio
+async def test_undo_stale_running_row_converges_to_failed(env):
+    """账本 state=running 但任务不在队列（僵尸行）：撤销不谎报
+    interrupted，而是收敛为 failed（真机 2026-09-11：resume-pending
+    预标 running 后运行崩溃无终态写入，undo 假装中断成功）。"""
+    await env.store.ledger_upsert(
+        "t_zombie", "convert_volumes", "g1", {"resource_id": "g1:file:9"},
+        "running", retries=2, error="[Errno 2] No such file or directory",
+    )
+    r = await env.tc.undo(task_id="t_zombie")
+    assert r["ok"] is True and r["action"] == "discard"
+    assert "不在运行队列" in r["note"]
+    row = await env.store.ledger_get("t_zombie")
+    assert row["state"] == "failed"
+    assert row["error"] == "[Errno 2] No such file or directory"
+    assert row["retries"] == 2  # 重试计数保留
+
+
+@pytest.mark.asyncio
+async def test_undo_running_task_still_interrupts(env):
+    """真运行中的任务撤销仍走协作式中断（回归保护）。"""
+    t1 = await env.queue.submit("move_file", "g1", _steps({}, 200))
+    await _wait_handler_started(env.calls)
+    await env.store.ledger_upsert(t1, "move_file", "g1", {}, "running")
+    r = await env.tc.undo(task_id=t1)
+    assert r["ok"] is True and r["action"] == "interrupted"
+    await _wait_state(env.store, t1, "cancelled", timeout=5.0)

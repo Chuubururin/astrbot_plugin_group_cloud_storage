@@ -239,8 +239,27 @@ async def api_groups_batch_actions(s: Services) -> dict:
 
 
 async def api_groups_batch_update(s: Services) -> dict:
-    """Batch rename/label: body = [{group_id, display_name?, label?, set_remote?}]."""
+    """Batch rename/label: body = [{group_id, display_name?, label?, set_remote?}].
+
+    Label maintenance actions are also accepted as top-level keys (the
+    frontend group menu sends {action: "auto_label"|"clear_labels"}):
+    - auto_label: fill labels for unlabeled groups (GroupScanService.auto_fill_labels)
+    - clear_labels: clear every group's label
+    """
     payload = await json_body()
+    # Label maintenance actions (whole-table scope, no per-group items)
+    action = str(payload.get("action") or "") if isinstance(payload, dict) else ""
+    if action == "auto_label":
+        filled = await s.scan.auto_fill_labels()
+        return json_response({"ok": True, "action": action, "filled": filled})
+    if action == "clear_labels":
+        groups = await s.store.list_groups()
+        cleared = 0
+        for g in groups:
+            if g.label:
+                await s.store.update_group_fields(g.group_id, label="")
+                cleared += 1
+        return json_response({"ok": True, "action": action, "cleared": cleared})
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list) or not items:
         return error_response("items required", status_code=400)

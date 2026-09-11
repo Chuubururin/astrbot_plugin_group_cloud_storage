@@ -8,6 +8,24 @@ from core.log import logger
 
 
 class AlbumMixin:
+    async def _refresh_album_essence(self, group_id: str) -> None:
+        """Best-effort album/essence resource refresh after an upload.
+
+        The upload above this call is irreversible, so a refresh failure must
+        not surface as an op error: the queue would replay the whole task and
+        re-upload the same media (BUG-13). The next group scan reconciles the
+        rows anyway (scan.py wraps the same calls in try/except).
+        """
+        try:
+            albums = await self.api.get_qun_album_list(group_id)
+            essences = await self.api.get_essence_msg_list(group_id)
+            await self.store.upsert_album_essence(group_id, albums, essences)
+        except Exception as e:
+            logger.warning(
+                f"[ingest] album/essence refresh skipped for {group_id} "
+                f"(upload already done): {e}"
+            )
+
     async def _album_id(self, group_id: str, album_name: str) -> str:
         async def _find(albums: list) -> str:
             for album in albums:
@@ -83,14 +101,22 @@ class AlbumMixin:
         if not src.exists():
             raise ValueError(f"staged image missing: {src.name}")
         album_id = await self._album_id(op.target, op.payload["album_name"])
+        # The album shows the uploaded file's own name; staged uploads arrive
+        # under a uuid-prefixed name, so rename to the declared name first
+        # (BUG-14: without this the album lists the staging name).
+        upload_path = src
+        declared = Path(op.payload["name"] or "").name
+        if declared and declared != src.name:
+            renamed = src.with_name(declared)
+            if not renamed.exists():
+                src.replace(renamed)
+                upload_path = renamed
         await self.api.upload_image_to_qun_album(
-            op.target, album_id, op.payload["album_name"], src.as_posix()
+            op.target, album_id, op.payload["album_name"], upload_path.as_posix()
         )
         # Album resource refresh (essence rows kept: both types re-collected
         # for this group)
-        albums = await self.api.get_qun_album_list(op.target)
-        essences = await self.api.get_essence_msg_list(op.target)
-        await self.store.upsert_album_essence(op.target, albums, essences)
+        await self._refresh_album_essence(op.target)
         self.queue.publish(
             {
                 "type": "done",
@@ -124,9 +150,7 @@ class AlbumMixin:
             await self.api.upload_image_to_qun_album(
                 op.target, album_id, album_name, src.as_posix()
             )
-            albums = await self.api.get_qun_album_list(op.target)
-            essences = await self.api.get_essence_msg_list(op.target)
-            await self.store.upsert_album_essence(op.target, albums, essences)
+            await self._refresh_album_essence(op.target)
             self.queue.publish(
                 {
                     "type": "done",
@@ -166,9 +190,7 @@ class AlbumMixin:
                     }
                 )
             # Album resource refresh (essence rows kept)
-            albums = await self.api.get_qun_album_list(op.target)
-            essences = await self.api.get_essence_msg_list(op.target)
-            await self.store.upsert_album_essence(op.target, albums, essences)
+            await self._refresh_album_essence(op.target)
             logger.info(
                 f"[ingest] media -> album '{album_name}' "
                 f"({total} segments) in {op.target}"

@@ -23,6 +23,13 @@ import { normalizeMedia } from './album-media.js';
 /** ext -> policy cache (backend default table + config overrides). */
 const policyCache = new Map();
 
+/** Invalidate the policy cache: preview_policy is read live from the
+ * backend config, so after a config save the cached modes would keep
+ * steering previews until the page reloads. */
+export function invalidatePolicyCache() {
+  policyCache.clear();
+}
+
 async function policyFor(name) {
   const dot = name.lastIndexOf('.');
   const ext = dot > -1 ? name.slice(dot).toLowerCase() : '';

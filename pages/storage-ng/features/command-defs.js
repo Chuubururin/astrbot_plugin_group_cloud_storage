@@ -124,7 +124,15 @@ export function registerAllCommands() {
     icon: 'MOVE',
     needsGroup: true,
     async run(ctx) {
-      const target = await pickFolder(rowGroup(ctx.state, ctx.rows[0]));
+      // 聚合视图跨群选择时，目录树只来自第一行的群，选出的 folder_id 对
+      // 其他群的行不存在（QQ 也没有跨群转移文件的能力）——整体拒绝而不是
+      // 提交一批注定部分失败的移动任务。
+      const groups = [...new Set(ctx.rows.map((f) => rowGroup(ctx.state, f)))];
+      if (groups.length > 1) {
+        toast('移动仅支持群内操作：选中的文件来自多个群，请分群分别移动', 'warn');
+        return false;
+      }
+      const target = await pickFolder(groups[0]);
       if (!target) return false; // 取消: 命令层保持现状
       // Batch endpoint carries per-item groups (aggregated view safe).
       await apiPost(API.FILES.BATCH_MOVE, {

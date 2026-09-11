@@ -370,7 +370,7 @@ class DistributorService:
             if not self.ingest or not self.tmp_dir:
                 raise ValueError("ingest / tmp dir required")
             img_path = await self._render_text_to_image(text, group_id, rid)
-            album_name = "AstrBot精华"
+            album_name = await self._resolve_essence_album(group_id)
             if self.dlserver and self.dlserver.enabled:
                 staged = self.dlserver.register_staged(img_path, f"精华_{rid}.png")
                 url = staged.get("http_url", "")
@@ -405,6 +405,33 @@ class DistributorService:
         staged = self.tmp_dir / f"ess_{group_id}_{rid}_{int(time.time())}.txt"
         staged.write_text(text, encoding="utf-8")
         return staged
+
+    async def _resolve_essence_album(self, group_id: str) -> str:
+        """Album name for essence->album distribution (BUG-8).
+
+        Prefers the dedicated album "AstrBot精华"; when it does not exist in
+        the group, falls back to the first existing album instead of failing
+        (the protocol side cannot create albums, and upstream fetch has
+        always suggested "use an existing album name" as the remedy).
+        """
+        preferred = "AstrBot精华"
+        try:
+            albums = await self.api.get_qun_album_list(group_id)
+        except Exception as e:
+            logger.warning(f"[distribute] album list failed, using default: {e}")
+            return preferred
+        names = [
+            str(a.get("name") or a.get("album_name") or "").strip()
+            for a in albums or []
+            if isinstance(a, dict)
+        ]
+        if preferred in names or not names:
+            return preferred
+        logger.info(
+            f"[distribute] album '{preferred}' not in {group_id}, "
+            f"falling back to existing album '{names[0]}'"
+        )
+        return names[0]
 
     async def _render_text_to_image(self, text: str, group_id: str, rid: int) -> Path:
         """Render essence text to a PNG image (for album import). Pure

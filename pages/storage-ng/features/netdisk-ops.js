@@ -44,13 +44,17 @@ export async function netdiskRename(path, name) {
 /**
  * Remove netdisk entries given as full paths (splits dir/name per entry).
  * Collects per-item failures instead of stopping at the first.
+ * Directory rows arrive with a trailing slash (remote_path convention);
+ * strip it so the split yields the real name — an empty name would make
+ * OpenList remove the parent directory instead.
  * @param {string[]} paths
  * @returns {Promise<{done: number, failed: string[]}>}
  */
 export async function netdiskRemovePaths(paths) {
   return runEachWithFailures(paths, async (p) => {
-    const dir = p.replace(/\/[^/]+$/, '') || '/';
-    await apiPost(API.BRIDGE.REMOVE, { dir, names: [p.split('/').pop()] });
+    const clean = p.replace(/\/+$/, '') || '/';
+    const dir = clean.replace(/\/[^/]+$/, '') || '/';
+    await apiPost(API.BRIDGE.REMOVE, { dir, names: [clean.split('/').pop()] });
   });
 }
 

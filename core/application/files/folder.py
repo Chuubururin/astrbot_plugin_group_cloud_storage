@@ -33,5 +33,15 @@ class FolderMixin:
         lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
         result = await self.sync.run_full_sync(op.target, lock)
         if not result.ok:
+            # BUG-9: a concurrent sync on the same group (another folder
+            # creation, an upload, a manual scan) makes run_full_sync reject
+            # without scheduling anything, so the new folder row would be
+            # missing until the next periodic sync. Retry after a short
+            # backoff (Celery-style: transient contention -> retry with
+            # backoff; full sync is idempotent so a re-run is safe), and
+            # only log when both attempts hit contention.
+            await asyncio.sleep(3.0)
+            result = await self.sync.run_full_sync(op.target, lock)
+        if not result.ok:
             logger.warning(f"[file-ops] post-folder sync failed: {result.error}")
         logger.info(f"[file-ops] folder created: {op.payload['name']} in {op.target}")

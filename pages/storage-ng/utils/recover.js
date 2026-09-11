@@ -25,10 +25,9 @@ const DETAIL_BY_SOURCE = {
   group: (state, row) =>
     apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row) }),
   album: (state, row) => {
-    const albumId = row.album_id || (row.meta && row.meta.album_id) || '';
-    return albumId
-      ? apiGet(API.ALBUMS.DETAIL, { album_id: albumId, name: row.name || '' })
-      : apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row), kind: 'album' });
+    // albums/detail requires the numeric resource id (it resolves album_id
+    // from stored meta and self-heals a stale one); album_id alone 400s.
+    return apiGet(API.ALBUMS.DETAIL, { id: Number(row.id), group: rowGroup(state, row) });
   },
   essence: (state, row) =>
     apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row), kind: 'essence' }),

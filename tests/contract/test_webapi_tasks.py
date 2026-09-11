@@ -59,13 +59,32 @@ def _patch_responses(monkeypatch):
 # ---------------------------------------------------------------------------
 
 class _FakeStore:
-    """Minimal store stub for ops_last_for_resource."""
+    """Minimal store stub for ops_last_for_resource + resume precheck."""
 
     def __init__(self):
         self._ops_last = None
+        # resource_id(int) -> detail dict (resume precheck for convert_volumes)
+        self._resources: dict[int, dict | None] = {}
+        # full resource_id key -> detail dict (new-format precheck lookup)
+        self._by_rid: dict[str, dict] = {}
 
     async def ops_last_for_resource(self, kind, rid):
         return self._ops_last
+
+    async def get_resource_detail(self, group_id, id):
+        d = self._resources.get(int(id))
+        if d is None:
+            return None
+        return {**d, "id": int(id), "group_id": group_id}
+
+    async def get_resource_any(self, id):
+        return await self.get_resource_detail("", id)
+
+    async def get_resource_by_resource_id(self, resource_id):
+        for rid_key, d in self._by_rid.items():
+            if rid_key == resource_id:
+                return {**d}
+        return None
 
 
 class _FakeTaskControl:
@@ -373,13 +392,21 @@ class TestApiResumePending:
     @pytest.mark.asyncio
     async def test_resume_pending_whitelist(self, monkeypatch):
         svc = _make_services()
+        # 可恢复预检通过的资源（convert_volumes 需要存在且非组合形态）
+        svc.store._resources = {77: {"name": "big.zip", "meta": {}}}
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "convert_volumes", "target": "g1", "payload": "{}"},
-            {"task_id": "t2", "kind": "video_upload", "target": "g1", "payload": "{}"},
-            {"task_id": "t3", "kind": "netdisk_index", "target": "g1", "payload": "{}"},
+            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
+             "payload": '{"resource_id": "g1:file:77"}'},
+            {"task_id": "t2", "kind": "video_upload", "target": "g1",
+             "payload": '{"path": "/tmp/fake_staged.mp4"}'},
+            {"task_id": "t3", "kind": "netdisk_index", "target": "g1",
+             "payload": '{"path": "/media"}'},
             {"task_id": "t4", "kind": "move_file", "target": "g1", "payload": "{}"},
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        monkeypatch.setattr(
+            "os.path.isfile", lambda p: p == "/tmp/fake_staged.mp4"
+        )
         result = await api_tasks_resume_pending(svc)
         assert result["resumed"] == 3
         # move_file should be skipped (not in whitelist)
@@ -390,11 +417,88 @@ class TestApiResumePending:
     async def test_resume_pending_invalid_json_payload(self, monkeypatch):
         svc = _make_services()
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "convert_volumes", "target": "g1", "payload": "not-json"},
+            {"task_id": "t1", "kind": "netdisk_index", "target": "g1", "payload": "not-json"},
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         result = await api_tasks_resume_pending(svc)
-        assert result["resumed"] == 1  # should handle invalid JSON gracefully
+        # not-json -> payload {} -> precheck: missing path -> failed_preflight
+        assert result["resumed"] == 0
+        assert result["failed_preflight"] == 1
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_precheck_convert_gone(self, monkeypatch):
+        """Bug-13: 已转换/已删除资源不再重提，改为落终态 failed。"""
+        svc = _make_services()
+        svc.store._resources = {}  # resource missing (numeric + rid lookups miss)
+        svc.task_control._tasks = [
+            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
+             "payload": '{"resource_id": "g1:file:10092", "id": 10092}'},
+        ]
+        states: list[tuple] = []
+
+        async def _on_state(task_id, kind, target, payload, state, error=None):
+            states.append((task_id, state, error))
+
+        svc.task_control.on_state = _on_state
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 0
+        assert result["failed_preflight"] == 1
+        assert states[0][0] == "t1" and states[0][1] == "failed"
+        assert "资源不存在" in states[0][2]
+        assert svc.queue.submitted == []
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_precheck_already_composite(self, monkeypatch):
+        """Bug-13: 资源已是分卷形态时不再重提（防重复分卷）。
+
+        新格式 payload 的 resource_id 以云文件 id 结尾（非数字），预检按
+        resource_id 键命中 detail 后再查 meta.composition。"""
+        svc = _make_services()
+        from core.application.composition.spec import encode_composition
+
+        detail = {"name": "big.zip",
+                  "meta": {"composition": encode_composition("volumes", 3, "binary", "abc")}}
+        svc.store._by_rid = {"g1:file:uuid-x": detail}
+        svc.task_control._tasks = [
+            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
+             "payload": '{"resource_id": "g1:file:uuid-x"}'},
+        ]
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 0
+        assert result["failed_preflight"] == 1
+        assert svc.queue.submitted == []
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_precheck_passes_legacy_numeric(self, monkeypatch):
+        """旧格式 resource_id（数字结尾）+ 数字 id：资源存在且非组合 -> 正常重提。"""
+        svc = _make_services()
+        svc.store._resources = {10092: {"name": "big.zip", "meta": {}}}
+        svc.task_control._tasks = [
+            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
+             "payload": '{"resource_id": "g1:file:10092", "id": 10092}'},
+        ]
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 1
+        assert result["failed_preflight"] == 0
+        assert [k for k, _ in svc.queue.submitted] == ["convert_volumes"]
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_precheck_video_missing(self, monkeypatch):
+        """Bug-13: 暂存文件已丢失的 video_upload 不再重提。"""
+        svc = _make_services()
+        svc.task_control._tasks = [
+            {"task_id": "t1", "kind": "video_upload", "target": "g1",
+             "payload": '{"path": "/tmp/definitely_missing_zz.mp4"}'},
+        ]
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        monkeypatch.setattr("os.path.isfile", lambda p: False)
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 0
+        assert result["failed_preflight"] == 1
+        assert svc.queue.submitted == []
 
 
 # ---------------------------------------------------------------------------

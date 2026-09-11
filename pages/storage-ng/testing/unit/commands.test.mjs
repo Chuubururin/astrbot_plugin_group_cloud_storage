@@ -75,7 +75,7 @@ test('runCommand: lifecycle smoke (busy on/off + run + done)', async () => {
   });
   const busyCalls = [];
   let doneCall = 0;
-  await commands.runCommand('test-ping', { keys: [1], rows: [] }, {
+  await commands.runCommand('test-ping', { keys: [1], rows: [{ id: 1 }] }, {
     onBusy: (id) => { busyCalls.push(id); },
     onDone: () => { doneCall++; },
   });
@@ -150,7 +150,7 @@ test('runCommand: cancel keeps the selection and skips refresh (no side effects)
   });
   const fakeSel = { clear: () => { cleared.sel = true; } };
   await commands.runCommand('test-cancel', {
-    keys: ['1'], rows: [], source: { selection: fakeSel }, rowAware: true,
+    keys: ['1'], rows: [{ id: 1 }], source: { selection: fakeSel }, rowAware: true,
   }, {});
   assert.equal(cleared.sel, false, 'cancel must not clear the selection');
 
@@ -161,7 +161,7 @@ test('runCommand: cancel keeps the selection and skips refresh (no side effects)
     run() { return Promise.resolve('done'); },
   });
   await commands.runCommand('test-ok', {
-    keys: ['1'], rows: [], source: { selection: fakeSel }, rowAware: true,
+    keys: ['1'], rows: [{ id: 1 }], source: { selection: fakeSel }, rowAware: true,
   }, {});
   assert.equal(cleared.sel, true, 'successful run clears the selection');
   commands.unregisterCommand('test-cancel');

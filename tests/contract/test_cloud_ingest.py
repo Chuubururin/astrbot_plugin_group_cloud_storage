@@ -391,7 +391,7 @@ async def test_video_recon_concat(env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_essence_save_retries_on_dropped_set(env):
-    """v1.2：QQ 偶发丢设精华 → 逐段回读验证 + 重发重设，最终全部确认。"""
+    """v1.2：QQ 偶发丢设精华 → 逐段回读验证 + 仅重设精华（不重发消息），最终全部确认。"""
     tmp_path, store, api, queue, ingest = env
     api.drop_first_set = 1
     text = "A" * 1200 + "\n" + "B" * 800
@@ -407,7 +407,34 @@ async def test_essence_save_retries_on_dropped_set(env):
     # 硬切分会在切点引入换行：重建结果 = 分片拼接（切分函数幂等口径）
     limit = effective_chunk_limit("丢设重试", 3, ingest.essence_chunk_chars)
     assert full == "\n".join(split_text(text, limit))
-    assert len(api.sent_messages) >= 3  # 至少一段重发过
+    # 2026-09-11：确认失败只重设精华、不重发消息（真机上 NapCat 静默吞掉
+    # 服务端拒绝时，重发只会刷屏而精华永远不落地）→ 发送数恒等于分片数
+    assert len(api.sent_messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_essence_save_unconfirmable_fails_without_resend(env):
+    """设精始终不落地（权限不足被 NapCat 静默吞掉）→ 每分片只发一条消息，
+    任务失败且不触发队列级重试（LOCAL_ERROR），避免刷屏。"""
+    tmp_path, store, api, queue, ingest = env
+    real_set = api.set_essence_msg
+
+    async def silent_fail(message_id: str) -> None:
+        await real_set(message_id)
+        api.essence_set = [
+            m for m in api.essence_set if m != str(message_id)
+        ]
+        api.essences = {
+            g: [e for e in items if str(e.get("message_id")) != str(message_id)]
+            for g, items in api.essences.items()
+        }
+
+    api.set_essence_msg = silent_fail
+    tid = await ingest.submit_essence_save("g1", "设精失败", "x" * 300)
+    r = await drain_op(queue, tid, timeout=30)
+    assert r["state"] == "failed"
+    assert "not confirmed" in str(r.get("error") or "")
+    assert len(api.sent_messages) == 1  # 无队列级重跑 → 不重发
 
 
 @pytest.mark.asyncio

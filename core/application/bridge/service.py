@@ -69,6 +69,11 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
     # The webapi layer calls these instead of reaching into _client, so the
     # OpenList client stays an internal detail of the bridge service.
 
+    @property
+    def poll_interval(self) -> float:
+        """Configured auto-poll interval (0 = manual mode)."""
+        return self._interval
+
     async def submit_offline_download(
         self,
         urls: list[str],
