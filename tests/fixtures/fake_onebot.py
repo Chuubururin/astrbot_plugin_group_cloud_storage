@@ -40,6 +40,7 @@ class FakeOneBotApi(OneBotApiPort):
         self.sent_messages: list[dict] = []      # {group_id, text, message_id}
         self.essence_set: list[str] = []         # message_id 列表（设为精华）
         self.essences: dict[str, list] = {}      # group_id -> 精华条目（回读验证）
+        self.albums: dict[str, list] = {}        # group_id -> 相册列表
         self.album_uploads: list[dict] = []      # {group_id, album_id, album_name, file}
         self.essence_deleted: list[str] = []     # delete_essence_msg 记录
         self.next_message_id = 90001

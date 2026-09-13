@@ -219,7 +219,14 @@ class CrudMixin:
             0,
             (detail or {}).get("folder_id") or None,
         )
-        fid, busid = fresh or (op.payload["file_id"], op.payload["busid"])
+        if fresh is not None:
+            fid, busid = fresh
+        elif op.payload.get("file_id"):
+            fid, busid = op.payload["file_id"], op.payload.get("busid") or 0
+        else:
+            raise ValueError(
+                "cloud listing no longer has the file and payload carries no file_id"
+            )
         try:
             await self.api.delete_group_file(op.target, fid, busid)
         except Exception as e:
@@ -231,7 +238,7 @@ class CrudMixin:
         await self.store.update_resource_fields(
             op.payload["id"], status=ResourceStatus.DELETED.value
         )
-        logger.info(f"[file-ops] deleted {op.payload['file_id']} in {op.target}")
+        logger.info(f"[file-ops] deleted {fid} in {op.target}")
 
     # ---------- Rename / Move ----------
 
