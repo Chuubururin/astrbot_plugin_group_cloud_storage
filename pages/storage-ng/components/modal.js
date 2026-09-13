@@ -75,6 +75,12 @@ function close(value) {
 }
 
 function open() {
+  // 单例 overlay 复用：若上一次对话尚未关闭（resolveCurrent 挂起），先以
+  // null 结束它——否则旧 Promise 永不 resolve，其调用方的 busy 锁泄漏。
+  if (resolveCurrent) {
+    resolveCurrent(null);
+    resolveCurrent = null;
+  }
   lastFocused = document.activeElement;
   overlay.classList.remove('hidden');
 }

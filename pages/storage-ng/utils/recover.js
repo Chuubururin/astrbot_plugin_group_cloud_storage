@@ -86,29 +86,43 @@ export async function refetchRows(sourceId, rows) {
     : sourceId === 'essence' ? 'essenceItems' : 'fileItems';
   const gone = new Set(); // rows confirmed absent on the cloud (empty detail)
   const skipped = new Set(); // fetch errors: keep the stale row
-  for (const row of usable) {
-    try {
-      const detail = await fetcher(state, row);
-      if (!detail) {
-        gone.add(String(row.id));
-        continue;
+  // 受限并发重拉（每行一次 detail GET，各自 30s 超时）：串行在批量失败时
+  // 会把命令收尾阻塞到 20×30s；worker 数封顶 4。patch 全在 fetcher 返回后
+  // 同步完成（getState→set 之间无 await），并发 worker 不会互相覆盖。
+  const REFETCH_CONCURRENCY = 4;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < usable.length) {
+      const row = usable[cursor++];
+      try {
+        const detail = await fetcher(state, row);
+        if (!detail) {
+          gone.add(String(row.id));
+          continue;
+        }
+        // Patch the live list in place: replace the stale copy so the keyed
+        // row diff re-renders it with fresh info on the next paint.
+        const cur = getState()[itemsKey] || [];
+        const idx = cur.findIndex((r) => String(r.id) === String(detail.id ?? row.id));
+        if (idx >= 0) {
+          const next = cur.slice();
+          next[idx] = { ...cur[idx], ...detail };
+          set(itemsKey, next);
+          changed = true;
+        }
+      } catch {
+        // 单行 detail 拉取失败（含 30s 超时/网络抖动）不能证明云端已删除：
+        // 保留该行并保持陈旧数据，行消失的判定只信任明确的 404 语义。
+        skipped.add(String(row.id));
       }
-      // Patch the live list in place: replace the stale copy so the keyed
-      // row diff re-renders it with fresh info on the next paint.
-      const cur = getState()[itemsKey] || [];
-      const idx = cur.findIndex((r) => String(r.id) === String(detail.id ?? row.id));
-      if (idx >= 0) {
-        const next = cur.slice();
-        next[idx] = { ...cur[idx], ...detail };
-        set(itemsKey, next);
-        changed = true;
-      }
-    } catch {
-      // 单行 detail 拉取失败（含 30s 超时/网络抖动）不能证明云端已删除：
-      // 保留该行并保持陈旧数据，行消失的判定只信任明确的 404 语义。
-      skipped.add(String(row.id));
     }
-  }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(REFETCH_CONCURRENCY, usable.length) },
+      () => worker(),
+    ),
+  );
   if (gone.size) changed = true;
   if (changed) {
     // Drop rows that no longer resolve, then repaint the tab.

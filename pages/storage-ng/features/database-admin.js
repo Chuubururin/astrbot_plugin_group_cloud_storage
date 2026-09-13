@@ -20,9 +20,35 @@ import { confirmEx } from '../components/modal.js';
 
 const TOKEN_KEY = 'gcs_db_admin_token';
 
+/** 沙箱 iframe（无 allow-same-origin）里 sessionStorage getter 本身抛
+ * SecurityError —— 与 router.js 同款守卫：访问必须包 try/catch，token
+ * 拿不到就退化为仅在内存里传（本次会话内重输）。 */
+function sessionStore() {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 /** Database admin token lives per-tab only; never persisted to disk. */
 function dbToken() {
-  return sessionStorage.getItem(TOKEN_KEY) || '';
+  const ss = sessionStore();
+  try {
+    return (ss && ss.getItem(TOKEN_KEY)) || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveDbToken(value) {
+  const ss = sessionStore();
+  if (!ss) return;
+  try {
+    ss.setItem(TOKEN_KEY, value);
+  } catch {
+    /* opaque origin: 保存不可用，token 仅在本视图内存中有效 */
+  }
 }
 
 function withToken(extra) {
@@ -87,7 +113,7 @@ export function initDatabaseAdmin(container) {
 
   container.querySelector('#db-token').value = dbToken();
   container.querySelector('#db-token').addEventListener('change', (e) => {
-    sessionStorage.setItem(TOKEN_KEY, e.target.value.trim());
+    saveDbToken(e.target.value.trim());
   });
 
   container.querySelector('#db-health').addEventListener('click', async () => {

@@ -171,7 +171,11 @@ export async function waitTasksDone(taskIds, deps, timeoutMs) {
   const deadline = Date.now() + (timeoutMs || BASE_TIMEOUT_MS);
   while (pending.size > 0 && Date.now() < deadline) {
     try {
-      const r = await deps.apiPost(API.TASKS, { target: deps.group, limit: 100 });
+      // task_ids 精确匹配：目标群台账超过一页（limit=100）时分页窗口可能
+      // 不含自己的任务，按 id 过滤后不受截断影响（不再误判为超时失败）。
+      const r = await deps.apiPost(API.TASKS, {
+        target: deps.group, limit: 100, task_ids: [...pending],
+      });
       for (const t of r?.tasks || []) {
         if (pending.has(t.task_id) && TERMINAL_STATES.has(t.state)) {
           result.set(t.task_id, t.state);

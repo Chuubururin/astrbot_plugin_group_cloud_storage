@@ -125,6 +125,21 @@ async def test_ledger_upsert_and_query(store):
 
 
 @pytest.mark.asyncio
+async def test_ledger_query_task_ids_filter(store):
+    """task_ids 精确过滤：接力链按已知 id 轮询，不受无过滤分页窗口影响。"""
+    for i in range(5):
+        await store.ledger_upsert(f"t{i}", "upload", "g1", None, "done")
+    # 无过滤 + 小窗口：只回 2 条（截断语义保持不变）
+    assert len(await store.ledger_query(limit=2)) == 2
+    # task_ids 过滤：精确命中存在的 id，不存在的忽略
+    got = await store.ledger_query(task_ids=["t0", "t3", "t9"])
+    assert {r["task_id"] for r in got} == {"t0", "t3"}
+    assert len(await store.ledger_query(task_ids=["t1"])) == 1
+    # 空列表等价于不过滤（falsy 分支，向后兼容）
+    assert len(await store.ledger_query(task_ids=[])) == 5
+
+
+@pytest.mark.asyncio
 async def test_ledger_reconcile(store):
     # 白名单（断点续传候选）：转分卷/长视频/网盘索引
     await store.ledger_upsert("t1", "convert_volumes", "g1", None, "running")

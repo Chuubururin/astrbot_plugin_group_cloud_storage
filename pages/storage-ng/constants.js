@@ -54,6 +54,7 @@ export const EVENT_TYPES = {
   RESUMED: 'resumed',
   CANCELLED: 'cancelled',
   DATA_CHANGED: 'data_changed',
+  BRIDGE: 'bridge',              // bridge transfer lifecycle (per-task progress)
   HEARTBEAT: 'heartbeat',
 };
 
@@ -74,11 +75,19 @@ export const EVENT_KINDS = {
   UPLOAD: 'upload',
   DELETE: 'delete',
   MOVE_FILE: 'move_file',
+  REPLACE_NAME: 'replace_name',
+  CONVERT_VOLUMES: 'convert_volumes',
+  CREATE_FOLDER: 'create_folder',
   BRIDGE_OUT: 'bridge_out',
   BRIDGE_IN: 'bridge_in',
   FETCH: 'fetch',
   ESSENCE_SAVE: 'essence_save',
   ESSENCE_DELETE: 'essence_delete',
+  VIDEO_UPLOAD: 'video_upload',
+  VIDEO_ALBUM: 'video_album',
+  IMAGE_ALBUM: 'image_album',
+  NETDISK_INDEX: 'netdisk_index',
+  BATCH_GROUPS: 'batch_groups',
 };
 
 /**

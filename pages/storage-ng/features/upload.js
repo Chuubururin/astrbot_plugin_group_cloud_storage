@@ -66,7 +66,16 @@ export async function uploadOnce(group, spec, prepareOpts = {}, deps = {}) {
     size: spec.size ?? spec.file.size,
     ...prepareOpts,
   });
-  if (!prep?.token) return { ok: false, prep: prep || null, result: null };
+  if (!prep?.token) {
+    // prepare 拒绝原因必须透传：调用方读 r.error 展示（4xx body 形状
+    // 因桥实现而异，error/message 双字段兜底）。
+    return {
+      ok: false,
+      error: prep?.error || prep?.message || 'prepare 被拒绝',
+      prep: prep || null,
+      result: null,
+    };
+  }
   const result = await upload(`${API.FILES.UPLOAD}/${prep.token}`, spec.file);
   return { ok: true, prep, result };
 }

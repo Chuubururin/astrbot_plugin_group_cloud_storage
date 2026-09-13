@@ -107,10 +107,16 @@ class OutboxMixin(StorePart):
         target: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        task_ids: list[str] | None = None,
     ) -> list[dict]:
         def _do(conn: sqlite3.Connection):
             sql = "SELECT * FROM op_ledger WHERE 1=1"
             args: list = []
+            if task_ids:
+                # 精确匹配：接力链按已知 task_id 轮询时不受分页截断影响
+                placeholders = ",".join("?" * len(task_ids))
+                sql += f" AND task_id IN ({placeholders})"
+                args.extend(str(t) for t in task_ids)
             if state:
                 sql += " AND state=?"
                 args.append(state)

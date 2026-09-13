@@ -220,6 +220,9 @@ export function initDataTable(container, source) {
       set('filePage', 1);
       set('folder', '');
       set('folderChain', []);
+      // 切群必须清选区：旧群的选中 id 对应的行已不在列表里，残留会让
+      // 操作条显示"已选 N 项"而命令层按 rows 过滤后什么都选不中。
+      set('fileSelected', new Set());
       load();
     }));
   } else if (source.id === 'netdisk') {

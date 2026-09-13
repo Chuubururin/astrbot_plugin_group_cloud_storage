@@ -19,6 +19,7 @@ import { initTaskPanel } from './components/task-panel.js';
 import { initStatBar } from './components/stat-bar.js';
 import { EVENT_TYPES, DATA_CHANGED_TOPICS, EVENT_KINDS } from './constants.js';
 import { createResilientSSE } from './utils/sse.js';
+import { startQueueIndicator } from './utils/queue-indicator.js';
 import { toast } from './components/toast.js';
 
 // ---------- SSE  ----------
@@ -68,12 +69,15 @@ function debouncedTopicRefresh(topics) {
 }
 
 function handleSSEEvent(ev) {
-  const { type, task_id, kind, state: taskState, percent, detail } = ev;
+  const { type, task_id, kind, state: taskState, percent, i, n, detail } = ev;
 
   if (TASK_LOG_TYPES.has(type)) {
+    // i/n 是 OpQueue progress 的主形状（percent 为 bridge 专属回退）；
+    // CANCELLED 是终态，与 DONE/FAILED 一致地清顶栏指示器。
     set('activeTask', type === EVENT_TYPES.DONE || type === EVENT_TYPES.FAILED
+      || type === EVENT_TYPES.CANCELLED
       ? null
-      : { kind, task_id, i: percent || 0, n: 100, detail: detail || type });
+      : { kind, task_id, i: i ?? percent ?? 0, n: n ?? 100, detail: detail || type });
     pushTaskLog(ev);
   }
 
@@ -105,6 +109,16 @@ function handleSSEEvent(ev) {
       // 中断同样是部分写入后的终态（批量任务可能已改了一半云状态）：
       // 与 FAILED 同样处理, 避免表格停留在中断前的旧数据上。
       debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
+      break;
+
+    case EVENT_TYPES.BRIDGE:
+      // 转存任务级事件（type:"bridge"）：OpQueue 对 bridge_out/bridge_in 的
+      // op 层终态只说明调度成功，传输失败只从这里可见。成功 toast 由
+      // DONE 分支负责，这里只补失败可见性。
+      if (taskState === 'failed') {
+        toast(`转存失败: ${detail || task_id || ''}`, 'error');
+        debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
+      }
       break;
 
     case EVENT_TYPES.PAUSED:
@@ -141,6 +155,7 @@ function initSSE() {
   });
   sse.start();
   window.addEventListener('unload', () => sse.stop());
+  startQueueIndicator(); // 队列深度：SSE 只有单任务进度，全局深度靠轮询
 
   // Visibility staleness guard: after a long time in a hidden tab, missed
   // SSE events (or silent connection decay) can leave stale rows; a re-

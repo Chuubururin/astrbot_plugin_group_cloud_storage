@@ -184,18 +184,23 @@ async function resumePending() {
 async function handleAction(act, taskId) {
   try {
     switch (act) {
-      case 'pause':
-        await apiPost(API.TASKS_PAUSE, { task_id: taskId });
+      case 'pause': {
+        const r = await apiPost(API.TASKS_PAUSE, { task_id: taskId });
+        if (!r?.ok) { toast(r?.reason || '暂停失败（任务不存在或已终态）', 'error'); break; }
         toast('已暂停（运行中为协作式，下一检查点生效）', 'success');
         break;
-      case 'resume':
-        await apiPost(API.TASKS_RESUME, { task_id: taskId });
+      }
+      case 'resume': {
+        const r = await apiPost(API.TASKS_RESUME, { task_id: taskId });
+        if (!r?.ok) { toast(r?.reason || '继续失败（任务不在暂停态）', 'error'); break; }
         toast('已继续', 'success');
         break;
+      }
       case 'interrupt': {
         const ok = await confirmEx('中断任务', `确定中断任务？`, { danger: true });
         if (!ok) return;
-        await apiPost(API.TASKS_INTERRUPT, { task_id: taskId });
+        const r = await apiPost(API.TASKS_INTERRUPT, { task_id: taskId });
+        if (!r?.ok) { toast(r?.reason || '中断失败（任务不存在或已终态）', 'error'); break; }
         toast('已中断', 'success');
         break;
       }

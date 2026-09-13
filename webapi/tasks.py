@@ -11,15 +11,25 @@ from .webapi_base import _ensure_ready
 
 
 async def api_tasks(s: Services) -> dict:
-    """Task record query (tasks tab): state/kind/target filters plus pagination."""
+    """Task record query (tasks tab): state/kind/target filters plus pagination.
+    task_ids narrows to exact ids (relay chains poll their own tasks without
+    the pagination window hiding them)."""
     payload = await json_body()
     state = pick(payload, "state", default=None) if payload else None
     kind = pick(payload, "kind", default=None) if payload else None
     target = pick(payload, "target", default=None) if payload else None
     limit = int(pick(payload, "limit", default=100) or 100) if payload else 100
     offset = int(pick(payload, "offset", default=0) or 0) if payload else 0
+    task_ids = pick(payload, "task_ids", default=None) if payload else None
+    if isinstance(task_ids, str):
+        task_ids = [task_ids]
+    elif isinstance(task_ids, list):
+        task_ids = [str(t) for t in task_ids if t]
+    else:
+        task_ids = None
     tasks = await s.task_control.list_tasks(
-        state=state, kind=kind, target=target, limit=limit, offset=offset
+        state=state, kind=kind, target=target, limit=limit, offset=offset,
+        task_ids=task_ids,
     )
     return json_response({"tasks": tasks, "total": len(tasks), "limit": limit, "offset": offset})
 

@@ -103,9 +103,15 @@ async function loadBridgeStatus() {
   }
 }
 
+// last-request-wins 守卫：快速来回切方向时两个 POST 并发，旧响应后到
+// 会覆盖新方向的数据（同 data-table.js 的 seq 模式）。
+let tasksSeq = 0;
+
 async function loadBridgeTasks(direction) {
+  const seq = ++tasksSeq;
   try {
     const data = await apiPost(API.BRIDGE.TASKS, { direction });
+    if (seq !== tasksSeq) return;
     set('tasks', data.tasks || []);
     renderBridgeTasks();
   } catch (e) {
