@@ -30,9 +30,13 @@ async def env(tmp_path):
     await store.init()
     client = FakeOpenListClient()
     config = PluginConfig({"type_ext_overrides": {".xyz": "video"}})
+    async def _pause_check(op):
+        pass
+
     queue = SimpleNamespace(
         publish=lambda ev: published.append(ev),
         submit=None,
+        pause_check=_pause_check,
     )
     published: list[dict] = []
     netdisk = NetdiskService(client, store, config, queue)
@@ -117,3 +121,28 @@ async def test_direct_link_memory_only(env):
     # 直链不落库（REQ-06/HL-07）
     metas = await ns.store.get_netdisk_meta("/g/")
     assert all("url" not in (m or {}) for m in metas)
+
+
+@pytest.mark.asyncio
+async def test_deep_index_cancel_checkpoint(env):
+    """深度索引在目录间经过协作检查点：已取消的任务不再继续遍历。"""
+    from core.application.queue.op import OpCancelError
+
+    ns = env
+
+    async def _cancel_check(op):
+        raise OpCancelError()
+
+    ns.queue.pause_check = _cancel_check
+    ns.client.files["/"] = [_nf("a.bin"), _nf("sub", 0, True)]
+
+    class _Op:
+        kind = "netdisk_index"
+        target = "/"
+        payload = {"path": "/"}
+        task_id = "idx_cancel"
+
+    with pytest.raises(OpCancelError):
+        await ns.netdisk.handle_index(_Op())
+    # 取消发生在首个目录检查点：任何条目都未登记
+    assert await ns.store.get_netdisk_meta("/") == []

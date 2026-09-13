@@ -13,6 +13,36 @@ if TYPE_CHECKING:
 
 LEDGER_BREAKPOINT_KINDS = ("convert_volumes", "video_upload", "netdisk_index")
 
+# Parameterized upsert (values bind via ?, see _do below). The WHERE clause is
+# the terminal-state guard: ledger writes race by design (fire-and-forget
+# pause/resume/cancel fires vs awaited worker writes over the connection
+# pool), so ordering cannot be relied on — the guard makes terminal states win
+# under EITHER arrival order. A terminal write always overwrites a
+# non-terminal row; a non-terminal write (pending/running/paused/retry)
+# arriving after done/failed is dropped. cancelled stays absolutely sticky:
+# only a cancelled write itself (idempotent rewrite) may touch a cancelled
+# row. done/failed may still overwrite each other so retry/reconcile
+# bookkeeping keeps working.
+_LEDGER_UPSERT_SQL = """
+INSERT INTO op_ledger
+   (task_id, kind, target, payload, state, retries, error,
+    created_at, updated_at)
+   VALUES (?,?,?,?,?,?,?,?,?)
+   ON CONFLICT(task_id) DO UPDATE SET
+     state=excluded.state,
+     retries=excluded.retries,
+     error=CASE WHEN excluded.error IS NOT NULL THEN excluded.error
+                WHEN excluded.state IN ('done','cancelled') THEN NULL
+                ELSE op_ledger.error END,
+     updated_at=excluded.updated_at
+   WHERE (op_ledger.state != 'cancelled'
+          AND op_ledger.state != 'done'
+          AND op_ledger.state != 'failed')
+      OR excluded.state = 'cancelled'
+      OR (op_ledger.state != 'cancelled'
+          AND (excluded.state = 'done' OR excluded.state = 'failed'))
+"""
+
 
 def _now_ts() -> str:
     # UTC ISO-8601, the store-wide standard (see archive.py / common.utc_now_iso).
@@ -39,24 +69,8 @@ class OutboxMixin(StorePart):
     ) -> None:
         def _do(conn: sqlite3.Connection):
             now = _now_ts()
-            # Terminal-state guard: once a task is cancelled, stale async
-            # writes must not resurrect it to a non-terminal state (out of
-            # order ledger writes race with pause/cancel finalization).
-            # done/failed remain overwritable so retry bookkeeping works.
             conn.execute(
-                """INSERT INTO op_ledger
-                   (task_id, kind, target, payload, state, retries, error,
-                    created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(task_id) DO UPDATE SET
-                     state=excluded.state,
-                     retries=excluded.retries,
-                     error=CASE WHEN excluded.error IS NOT NULL THEN excluded.error
-                                WHEN excluded.state IN ('done','cancelled') THEN NULL
-                                ELSE op_ledger.error END,
-                     updated_at=excluded.updated_at
-                   WHERE op_ledger.state != 'cancelled'
-                      OR excluded.state = 'cancelled'""",
+                _LEDGER_UPSERT_SQL,
                 (
                     task_id,
                     kind,

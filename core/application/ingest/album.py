@@ -108,9 +108,14 @@ class AlbumMixin:
         declared = Path(op.payload["name"] or "").name
         if declared and declared != src.name:
             renamed = src.with_name(declared)
-            if not renamed.exists():
-                src.replace(renamed)
-                upload_path = renamed
+            # Same-declared-name reruns leave a stale tmp file behind (same
+            # live failure as fetch BUG-14: the leftover made the rename a
+            # no-op and QQ listed the staging name); staged files are
+            # transient, so replace it.
+            if renamed.exists():
+                renamed.unlink()
+            src.replace(renamed)
+            upload_path = renamed
         await self.api.upload_image_to_qun_album(
             op.target, album_id, op.payload["album_name"], upload_path.as_posix()
         )
@@ -125,7 +130,10 @@ class AlbumMixin:
                 "detail": op.payload["name"],
             }
         )
-        src.unlink(missing_ok=True)
+        # Clean the actually-uploaded file: after a rename it lives under the
+        # declared name, and a leftover here is what trips the stale-name
+        # guard above on the next same-name upload.
+        upload_path.unlink(missing_ok=True)
 
     async def _do_video_album(self, op) -> None:
         """Album video import (framework retained; the protocol side does not
@@ -146,9 +154,20 @@ class AlbumMixin:
         dur = await self._probe_duration(src.as_posix()) if hasattr(self, "_probe_duration") else None
         # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split)
         if dur is not None and dur < max_sec:
-            # Short video: direct upload, no split
+            # Short video: direct upload, no split. The album shows the
+            # uploaded file's own name, and fetch-origin staging arrives as
+            # fetch_video_<uuid>.ext -> rename to the declared name first
+            # (same as _do_image_album / fetch BUG-14).
+            upload_path = src
+            declared = Path(op.payload["name"] or "").name
+            if declared and declared != src.name:
+                renamed = src.with_name(declared)
+                if renamed.exists():
+                    renamed.unlink()
+                src.replace(renamed)
+                upload_path = renamed
             await self.api.upload_image_to_qun_album(
-                op.target, album_id, album_name, src.as_posix()
+                op.target, album_id, album_name, upload_path.as_posix()
             )
             await self._refresh_album_essence(op.target)
             self.queue.publish(
@@ -159,7 +178,7 @@ class AlbumMixin:
                     "detail": f"{op.payload['name']} (direct {int(dur)}s)",
                 }
             )
-            src.unlink(missing_ok=True)
+            upload_path.unlink(missing_ok=True)
             logger.info(
                 f"[ingest] video -> album '{album_name}' direct ({int(dur)}s) in {op.target}"
             )

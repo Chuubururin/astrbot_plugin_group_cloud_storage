@@ -13,6 +13,7 @@ from core.domain.enums import ResourceType
 from core.domain.resource import Resource
 from core.domain.sync import ResourceQuery, VolumeInfo
 from core.log import logger
+from core.application.common import sha256_file
 
 from . import consts
 
@@ -94,7 +95,7 @@ class VolumeMixin:
                     zf.write(_raw, arcname=f"{_stem}.part{_seq:02d}of{_total:02d}")
                 _raw.unlink(missing_ok=True)
                 zsize = _zpath.stat().st_size
-                sha = hashlib.sha256(_zpath.read_bytes()).hexdigest()
+                sha = sha256_file(_zpath)
                 return zsize, sha
 
             zsize, vol_sha = await asyncio.to_thread(_compress_and_hash)
@@ -434,17 +435,21 @@ class VolumeMixin:
             op.payload.get("folder") or None,
         )
         fid, busid = fresh or (op.payload["file_id"], op.payload["busid"] or 0)
-        data = await self._fetch_bytes(
-            await self.api.get_group_file_url(op.target, fid, busid, op.payload["name"])
-        )
-        if not data:
-            raise ValueError("download returned empty content")
+        # Stream the original straight to disk: conversion targets are
+        # >95MB by definition and _fetch_bytes would hold the whole body
+        # (multi-GB possible) in RAM.
         src = self.tmp_dir / f"conv_{op.payload['id']}_{uuid.uuid4().hex[:8]}.tmp"
-        src.write_bytes(data)
+        n = await self._download_to_file(
+            await self.api.get_group_file_url(op.target, fid, busid, op.payload["name"]),
+            src,
+        )
+        if n <= 0:
+            src.unlink(missing_ok=True)
+            raise ValueError("download returned empty content")
         # Split first, compress after: the raw download goes straight into
         # the volume pipeline (each volume is zipped individually there;
         # download reassembly extracts it automatically)
-        op.payload["original_size"] = src.stat().st_size
+        op.payload["original_size"] = n
         try:
             # Reuse the volume upload pipeline: use the existing resource_id as
             # the parent key (in-place index conversion)

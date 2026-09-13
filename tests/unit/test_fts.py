@@ -110,6 +110,9 @@ async def test_fts_benchmark_20k(store):
     t0 = time.monotonic()
     ids2 = await _ids(store, None, "归档")
     q2 = (time.monotonic() - t0) * 1000
-    assert ids and ids[0] in {r[0] for r in [(ids[0],)]}
+    # 命中的必须是目标行本身：唯一匹配 b_19999，而非任意一行
+    assert len(ids) == 1, f"expected single hit, got {len(ids)}"
+    hit = await store.get_resource_any(ids[0])
+    assert hit["source_ref"] == "b_19999"
     assert len(ids2) > 0
     assert q1 < 500 and q2 < 2000, f"q1={q1:.1f}ms q2={q2:.1f}ms build={build:.1f}s"

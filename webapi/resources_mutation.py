@@ -254,6 +254,9 @@ async def api_folder_delete(s: Services) -> dict:
         except Exception as e:
             logger.warning(f"[webapi] delete folder failed: {e}", exc_info=True)
             return error_response("delete folder failed", status_code=502)
+    # Read-your-writes: drop the local folder entity now (a full sync rebuilds
+    # the table anyway, but the tree must not show a deleted folder until then)
+    await s.store.delete_folder(group, folder_id)
     return json_response({"ok": True, "group": group, "folder_id": folder_id})
 
 
@@ -272,6 +275,9 @@ async def api_folder_rename(s: Services) -> dict:
         except Exception as e:
             logger.warning(f"[webapi] rename folder failed: {e}", exc_info=True)
             return error_response("rename folder failed", status_code=502)
+    # Read-your-writes: rename the local folder entity now (a full sync
+    # rebuilds the table anyway, but the tree must not show the old name)
+    await s.store.rename_folder(group, folder_id, name)
     return json_response({"ok": True, "group": group, "folder_id": folder_id, "name": name})
 
 
@@ -299,11 +305,7 @@ async def api_file_download(s: Services) -> dict | object:
         # Global fallback: id missing in the given group -> locate it across groups
         # (rows in the unified management view may carry a stale group id)
         try:
-            d2 = (
-                await s.store.get_resource_detail("*", fid)
-                if False
-                else await s.store.get_resource_any(fid)
-            )
+            d2 = await s.store.get_resource_any(fid)
         except Exception:
             d2 = None
         if d2:
@@ -531,7 +533,7 @@ async def api_files_batch_tags(s: Services) -> dict:
         return error_response("tag must be string(<=24)", status_code=400)
     clean = sorted({t.strip() for t in tags if t.strip()})
     skipped: list[str] = []
-    ids: list[int] = []
+    tagged: list[tuple[int, str, list]] = []
     async for fid, gid in _managed_items(s, items, skipped):
         # Group-scope the write: the tag lands on the resource the item
         # claims, not on any row that happens to share the numeric id.
@@ -539,10 +541,25 @@ async def api_files_batch_tags(s: Services) -> dict:
         if not d:
             skipped.append(f"id={fid}: not found in {gid}")
             continue
-        ids.append(fid)
-    for fid in ids:
+        try:
+            old_tags = json.loads(d.get("tags") or "[]")
+        except (TypeError, ValueError):
+            old_tags = []
+        if not isinstance(old_tags, list):
+            old_tags = []
+        tagged.append((fid, gid, old_tags))
+    for fid, gid, old_tags in tagged:
         await s.store.update_resource_tags(fid, clean)
-    return json_response({"updated": len(ids), "tags": clean, "skipped": skipped})
+        # Snapshot for undo (same shape as the single-file files/tags
+        # endpoint): without it the batch path's tags are un-undoable
+        # (live 2026-09-11: undo reported 无标签操作流记录).
+        await s.queue.record_op(
+            "",
+            "tags",
+            before={"group_id": gid, "id": fid, "tags": old_tags},
+            after={"group_id": gid, "id": fid, "tags": clean},
+        )
+    return json_response({"updated": len(tagged), "tags": clean, "skipped": skipped})
 
 
 async def api_files_links(s: Services) -> dict:

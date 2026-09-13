@@ -75,6 +75,19 @@ class TaskControlMixin:
                 self._q_hi.put_nowait(entry)
             else:
                 self._q.put_nowait(entry)
+            self._ledger_fire(entry, "pending")
+        else:
+            # Queued placeholder: pause already rewrote the ledger to
+            # "paused" (deep-queue reasoning in pause_task); resume must
+            # write through symmetrically or the row stays "paused" until
+            # the worker dequeues — hours behind a scan wave (live
+            # 2026-09-12: resume→interrupt left the tasks tab "paused").
+            # The _pending guard skips the fire if the worker is dequeuing
+            # right now: that path writes running/done itself, and a late
+            # "pending" would only be transient (superseded on terminal).
+            op = self._ops_by_id.get(task_id)
+            if op is not None and task_id in self._pending:
+                self._ledger_fire(op, "pending")
         self._push({"type": "resumed", "task_id": task_id, "ts": time.time()})
         return "resumed"
 
@@ -125,6 +138,25 @@ class TaskControlMixin:
         self._cancelled.add(task_id)
         if op is not None:
             op.cancel = True
+            if task_id in self._pending:
+                # Queued (not pause-held): the worker may not dequeue for a
+                # long time (deep queue), so write the terminal state now —
+                # the later dequeue lands in the _execute cancelled branch,
+                # which discards and re-writes the same state (idempotent,
+                # same reasoning as the pause-held branch above).
+                self._pending.discard(task_id)
+                self._push(
+                    {
+                        "type": "cancelled",
+                        "task_id": op.task_id,
+                        "kind": op.kind,
+                        "target": op.target,
+                        "ts": time.time(),
+                    }
+                )
+                self._record(op, "cancelled")
+                self._ledger_fire(op, "cancelled")
+                self._ops_by_id.pop(task_id, None)
         return hit
 
     def interrupt_task(self, task_id: str) -> bool:

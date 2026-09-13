@@ -7,19 +7,24 @@
  *      filter/sort, ../ up-level navigation)
  *   3. action bar (link, download, rename, tags, delete, distribute
  *      local/group/album/essence)
+ *   4. bridge panel (transfer task table with direction tabs, failed-task
+ *      retry / pending-task cancel, bridge health strip, OpenList
+ *      connection config modal)
  *
- * OpenList connection config lives in the config tab (config center
- * grouping); transfer tasks live in the tasks tab (where the four
- * ledger actions are recorded).
+ * The bridge panel is mounted here (not in the tasks tab): its rows are
+ * OpenList-side archive_map entries carrying remote_path/direction, which
+ * the op_queue ledger does not show, and bridge/retry + bridge/cancel are
+ * its only UI. OpenList keys are also editable from the config center;
+ * the panel's config modal exposes the bridge-scoped subset.
  *
  * @module views/netdisk
  */
 
 import { initDataTable } from '../components/data-table.js';
 import { initActionBar } from '../components/action-bar.js';
+import { initBridgePanel } from '../components/bridge-panel.js';
 import { initNetdiskToolbar } from '../components/toolbar.js';
 import { NETDISK_SOURCE } from '../features/data-sources.js';
-import { set } from '../store.js';
 
 /**
  * Initialize the netdisk view.
@@ -42,9 +47,14 @@ export function initNetdiskView(container) {
   container.appendChild(actionBar);
   const barCleanup = initActionBar(actionBar, NETDISK_SOURCE);
 
+  const bridgeHost = document.createElement('div');
+  bridgeHost.id = 'netdisk-bridge-panel';
+  container.appendChild(bridgeHost);
+  const bridgeCleanup = initBridgePanel(bridgeHost);
+
   return () => {
     tableCleanup();
     barCleanup();
-    set('viewMode', 'files');
+    bridgeCleanup();
   };
 }

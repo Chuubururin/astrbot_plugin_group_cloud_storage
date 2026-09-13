@@ -122,10 +122,15 @@ export async function handleMenuAction(act, selectedGroups) {
       const filtered = filterByAccount(getState().groups || [], getState().accountFilter || '');
       const ordered = sortGroups(filtered, getState().groupSort).map((g) => g.group_id);
       const step = act === 'up' ? -1 : 1;
-      const ids = Array.from(selectedGroups);
-      // 自上而下处理上移、自下而上处理下移, 相邻多选交换互不覆盖。
-      const seq = step === -1 ? ids : ids.reverse();
-      for (const gid of seq) {
+      // 选择集是点击顺序而非位置顺序; 必须先按当前位置排序再逐个交换
+      // (上移自上而下、下移自下而上, 与多选列表重排的通用做法一致),
+      // 选中块整体挪一格且相对次序不变——否则两个相邻选中项会互相抵消。
+      const ids = Array.from(selectedGroups)
+        .map((gid) => ({ gid, pos: ordered.indexOf(gid) }))
+        .filter((e) => e.pos >= 0)
+        .sort((a, b) => (step === -1 ? a.pos - b.pos : b.pos - a.pos))
+        .map((e) => e.gid);
+      for (const gid of ids) {
         const i = ordered.indexOf(gid);
         if (i < 0) continue;
         const j = i + step;

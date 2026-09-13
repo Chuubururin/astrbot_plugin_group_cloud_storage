@@ -18,6 +18,7 @@ import { escapeHtml, debounce } from '../utils/helpers.js';
 import { toast } from '../components/toast.js';
 import { confirmEx } from '../components/modal.js';
 import { invalidatePolicyCache } from '../features/preview.js';
+import { initDatabaseAdmin } from '../features/database-admin.js';
 
 /**
  * Initialize the config view.
@@ -36,6 +37,7 @@ export function initConfigView(container) {
       </div>
     </div>
     <div id="config-groups" class="config-groups"></div>
+    <div id="database-admin" class="database-admin"></div>
     <div id="config-status" class="config-status"></div>
   `;
 
@@ -43,14 +45,20 @@ export function initConfigView(container) {
 
   const unsubRefresh = subscribe('refresh:config', loadConfig);
 
+  // Database administration section (database/* endpoints; token-gated).
+  initDatabaseAdmin(container.querySelector('#database-admin'));
+
   // Convenience search filter : group name or item key match.
   const search = container.querySelector('#config-search');
   search?.addEventListener('input', debounce(() => {
     const q = (search.value || '').toLowerCase();
+    // The key match goes into an attribute selector: strip quote/backslash
+    // so a keystroke like '"' cannot throw a SyntaxError mid-filter.
+    const safe = q.replace(/["\\]/g, '');
     container.querySelectorAll('.config-group').forEach((g) => {
       const name = g.dataset.groupName || '';
       let visible = !q || name.toLowerCase().includes(q);
-      if (!visible) visible = !!g.querySelector(`.config-item[data-key*="${q}"]`);
+      if (!visible && safe) visible = !!g.querySelector(`.config-item[data-key*="${safe}"]`);
       g.classList.toggle('hidden', !visible);
     });
   }, 150));
@@ -189,7 +197,7 @@ async function saveConfig() {
           toast('插件正在热重载，完成后自动刷新…', 'success');
           // Reload rebuilds the runtime and reconnects SSE; refetch the
           // config afterwards to show the latest state.
-          setTimeout(() => { loadConfig(); set('refresh:all', Date.now()); }, 2500);
+          setTimeout(() => { loadConfig(); }, 2500);
         } catch (e2) {
           toast(`热重载失败: ${e2.message || e2}`, 'error');
         }

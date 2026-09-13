@@ -210,9 +210,27 @@ async def test_priority_set_and_high_queue_routing():
     term = _Terminal()
     q = _tracking_queue(term, )
     assert "rename" in DEFAULT_HIGH_PRIORITY
+    # 2026-09-12 真机坏链补遗：用户交互 kind 漏出默认高优集合，
+    # replace_name 在 292 任务扫描波后排队 ~1h。
+    for kind in ("replace_name", "image_album", "bridge_out", "bridge_in"):
+        assert kind in DEFAULT_HIGH_PRIORITY, kind
     tid = await q.submit("rename")
     assert q._q_hi.qsize() == 1  # 高优队列
     await _wait_terminals(q, term, [tid])
     tid2 = await q.submit("__unknown_kind__")
     assert q._q_hi.qsize() == 0  # 非高优走常规队列
     await _wait_terminals(q, term, [tid2])
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_kinds_route_to_normal_queue():
+    """对账 kind（sync/file_scan）不走 hi 队列（2026-09-12 真机坏链）：
+    全群扫描波在 FIFO hi 队列里排在交互操作之前，把 delete 饿了 30+ 分钟。
+    对账任务落在常规 worker 池，hi worker 留给用户发起的操作。"""
+    assert "file_scan" not in DEFAULT_HIGH_PRIORITY
+    assert "sync" not in DEFAULT_HIGH_PRIORITY
+    term = _Terminal()
+    q = _tracking_queue(term)
+    tid = await q.submit("file_scan")
+    assert q._q_hi.qsize() == 0 and q._q.qsize() == 1
+    await _wait_terminals(q, term, [tid])

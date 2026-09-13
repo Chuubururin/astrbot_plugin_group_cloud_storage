@@ -137,9 +137,14 @@ class FetchMixin:
                     declared = Path(name).name
                     if declared and declared != staged.name:
                         renamed = staged.with_name(declared)
-                        if not renamed.exists():
-                            staged.replace(renamed)
-                            upload_path = renamed
+                        # Same-declared-name reruns leave a stale tmp file
+                        # behind (live 2026-09-12: the leftover made the
+                        # rename a no-op and QQ showed fetch_xxx.tmp);
+                        # staged files are transient, so replace it.
+                        if renamed.exists():
+                            renamed.unlink()
+                        staged.replace(renamed)
+                        upload_path = renamed
                     await self.api.upload_image_to_qun_album(
                         op.target, album_id, album_name, upload_path.as_posix()
                     )

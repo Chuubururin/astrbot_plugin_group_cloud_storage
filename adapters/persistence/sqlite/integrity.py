@@ -12,6 +12,7 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
+from .connection import ConnectionManager
 from .state import StorePart
 
 
@@ -48,7 +49,15 @@ class IntegrityMixin(StorePart):
             finally:
                 dst.close()
                 src.close()
-        await asyncio.to_thread(_copy)
+        # Same pattern as reset_and_rebuild: retire pooled handles first so
+        # no connection keeps stale page cache / WAL state across the
+        # restore, then swap in a fresh manager (a closed manager refuses
+        # new checkouts) -- on failure too, so the store stays usable.
+        await self._conn.close()
+        try:
+            await asyncio.to_thread(_copy)
+        finally:
+            self._state.conn = ConnectionManager(self._db_path)
         return {"ok": True, "path": str(self._db_path)}
 
 

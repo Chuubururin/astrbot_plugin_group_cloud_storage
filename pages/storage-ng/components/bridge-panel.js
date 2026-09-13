@@ -10,7 +10,8 @@
  */
 
 import { getState, set, subscribe, refresh } from '../store.js';
-import { API, apiGet, apiPost, BRIDGE_STATE_LABELS } from '../api.js';
+import { API, apiGet, apiPost } from '../api.js';
+import { BRIDGE_STATE_LABELS } from '../views/task-labels.js';
 import { BRIDGE_STATES } from '../constants.js';
 import { getIcon } from '../icons.js';
 import { formatTimeFull, escapeHtml } from '../utils/helpers.js';
@@ -162,23 +163,31 @@ function renderBridgeTasks() {
 }
 
 async function openBridgeConfig() {
+  let config;
   try {
-    const config = await apiGet(API.BRIDGE.CONFIG_GET);
-    const rows = CONFIG_FIELDS.map((f) => ({
-      ...f,
-      value: String(config[f.name] ?? ''),
-    }));
-    const res = await showFormModal('桥接配置', rows, { okText: '保存' });
-    if (!res) return;
-    const body = {};
-    for (const f of CONFIG_FIELDS) {
-      if (res[f.name] !== undefined) {
-        if (f.type === 'select') body[f.name] = res[f.name] === 'true';
-        else body[f.name] = res[f.name];
-      }
+    config = await apiGet(API.BRIDGE.CONFIG_GET);
+  } catch (e) {
+    toast('加载配置失败', 'error');
+    return;
+  }
+  const rows = CONFIG_FIELDS.map((f) => ({
+    ...f,
+    value: String(config[f.name] ?? ''),
+  }));
+  const res = await showFormModal('桥接配置', rows, { okText: '保存' });
+  if (!res) return;
+  const body = {};
+  for (const f of CONFIG_FIELDS) {
+    if (res[f.name] !== undefined) {
+      if (f.type === 'select') body[f.name] = res[f.name] === 'true';
+      else body[f.name] = res[f.name];
     }
+  }
+  try {
     await apiPost(API.BRIDGE.CONFIG_SAVE, body);
     toast('配置已保存', 'success');
     loadBridgeStatus();
-  } catch (e) { toast('加载配置失败', 'error'); }
+  } catch (e) {
+    toast(`保存配置失败: ${(e && e.message) || e}`, 'error');
+  }
 }

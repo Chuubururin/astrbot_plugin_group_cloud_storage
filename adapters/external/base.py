@@ -216,6 +216,34 @@ def assert_fetch_url_allowed(
     return url
 
 
+def assert_fetch_host_allowed(
+    host: str,
+    *,
+    allow_private: bool = False,
+    hint: str = "fetch_allow_private_address",
+) -> str:
+    """SSRF validation for a bare hostname/IP (no URL, no scheme).
+
+    For protocol adapters whose scheme is not http/https (smb://, sftp://):
+    they cannot pass assert_fetch_url_allowed's scheme whitelist, but the
+    host still must clear the same restricted-range checks before
+    connecting. Literal IPs are classified directly; hostnames are
+    DNS-resolved and every resolved address is re-checked (blocking call;
+    async callers should wrap it in asyncio.to_thread). Returns the host
+    unchanged.
+    """
+    if not host:
+        raise ExternalApiError("openlist", "Empty host is not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+        _check_ip_address(ip, allow_private, host, hint)
+    except ValueError:
+        # Not a literal IP: resolve DNS and re-check each resolved address
+        if not allow_private:
+            _check_dns(host, host, hint)
+    return host
+
+
 def resolve_and_pin_ip(
     url: str,
     *,

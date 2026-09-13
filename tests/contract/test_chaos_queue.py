@@ -74,7 +74,7 @@ class _FlakyHandler:
 @pytest.mark.asyncio
 async def test_rate_limited_retries_then_succeeds(store):
     """风控抖动：前 2 次 RATE_LIMITED 指数退避重试，第 3 次成功 → done。"""
-    api = FakeOneBotApi(build_tree(file_total=40, folder_total=2, files_per_folder=10))
+    api = FakeOneBotApi(build_tree(folder_total=2, files_per_folder=10))
     handler = _FlakyHandler(ResourceSyncService(api, store), fail_first=2)
 
     queue = OpQueue(handler, interval=0.0, max_retries=3, backoff_base=0.05)
@@ -122,7 +122,7 @@ async def test_traversal_failure_no_orphan_cleanup(store):
         source_ref="old_file", size=1, uploader_id="10001", created_at=1,
     )
     await store.upsert_resources([old])
-    api = FakeOneBotApi(build_tree(file_total=40, folder_total=2, files_per_folder=10),
+    api = FakeOneBotApi(build_tree(folder_total=2, files_per_folder=10),
                         fail_folders={"folder_1"})
     svc = ResourceSyncService(api, store)
     results = []

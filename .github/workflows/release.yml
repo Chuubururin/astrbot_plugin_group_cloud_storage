@@ -55,7 +55,7 @@ jobs:
       - name: Python 单测
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio paramiko pysmb
           python -m pytest tests/unit/ -x -q
 
       - name: 前端单测与契约检查

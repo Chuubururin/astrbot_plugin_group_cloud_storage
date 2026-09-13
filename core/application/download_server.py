@@ -10,9 +10,8 @@ Semantics (distinct from "egress = push to an external target"):
   QQ CDN direct link (zero proxy load); volumes/videos are reassembled
   locally and streamed back. `GET /download?staged=<token>&token` serves a
   registered staged file (e.g. an essence text exported to a .txt)
-- SFTP: paramiko virtual filesystem (/<group_id>/<filename>); reads pull
-  bytes from the cloud on demand; /staged/<name> serves registered staged
-  files. Optional dependency (paramiko); disabled when not installed.
+- SFTP: paramiko virtual filesystem (/<group_id>/<filename>); reads pull bytes
+  from the cloud on demand; /staged/<name> serves staged files. Optional dep.
 - SMB: impacket smbserver (optional dependency) sharing a cache directory;
   entries materialize on demand via ensure_local()/register_staged()
 """
@@ -32,6 +31,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs, quote, urlparse
 
+from core.application.download_proxy import ProxyRegistry, serve_proxy, serve_staged
 from core.config import PluginConfig
 from core.log import logger
 from ports.meta_store import MetaStorePort
@@ -39,9 +39,9 @@ from ports.meta_store import MetaStorePort
 _STREAM_CHUNK = 1 << 16
 
 
-def _safe_header_name(name: str) -> str:
-    """Strip CR/LF from filenames to prevent HTTP header injection."""
-    return name.replace("\r", "").replace("\n", "")
+def _safe_header_name(value: str) -> str:
+    """Strip CR/LF from a header-bound string (filename/URL): no header injection."""
+    return value.replace("\r", "").replace("\n", "")
 
 
 class DownloadServerService:
@@ -70,9 +70,8 @@ class DownloadServerService:
         self._smb_server = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sftp_auth = ("cloud", self.token)
-        # Cache dirs under a private mkdtemp root (0700, owner-only) instead
-        # of a predictable fixed name in the shared temp dir, which invites
-        # pre-creation/symlink tricks on multi-user hosts.
+        # Private mkdtemp root (0700, owner-only): a predictable fixed name
+        # in the shared temp dir invites pre-creation/symlink tricks.
         self._cache_root = Path(tempfile.mkdtemp(prefix="cloudstorage-"))
         self._cache_dir = self._cache_root / "cloudsftp"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +80,9 @@ class DownloadServerService:
         # Staged-file registry: token -> {path, name} (essence text exports
         # and other host-generated artifacts served over http/sftp)
         self._staged: dict[str, dict] = {}
+        # Remote-URL proxy registry (bad-link #18: Content-Disposition
+        # injection so offline download stores the real filename)
+        self._proxy_registry = ProxyRegistry()
         self.smb_available = False
         try:  # optional dependency: keep http/sftp working without impacket
             import impacket  # noqa: F401
@@ -99,6 +101,10 @@ class DownloadServerService:
             f"{self.http_base()}/download?group={group_id}&id={id}&token={self.token}"
         )
 
+    def register_proxy(self, url: str, name: str) -> str:
+        """Register a remote URL under a fixed name; returns a proxied URL."""
+        return self._proxy_registry.register(url, name, self.http_base(), self.token)
+
     def register_staged(self, path: str | Path, name: str) -> dict:
         """Register a local file as a downloadable artifact; returns its
         http/ftp/smb address info (used by essence text distribution)."""
@@ -115,12 +121,8 @@ class DownloadServerService:
                     Path(entry["path"]).unlink(missing_ok=True)
                 except OSError:
                     pass
-        info: dict = {
-            "token": token,
-            "http_url": (
-                f"{self.http_base()}/download?staged={token}&token={self.token}"
-            ),
-        }
+        http_url = f"{self.http_base()}/download?staged={token}&token={self.token}"
+        info: dict = {"token": token, "http_url": http_url}
         if self.sftp_port > 0:
             info["sftp"] = {
                 **self.sftp_info(),
@@ -261,8 +263,7 @@ class DownloadServerService:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            # BUG-14: timeout on readuntil prevents slowloris-style connection
-            # holding (client sends headers very slowly or never completes).
+            # BUG-14: readuntil timeout stops slowloris-style header holding.
             request = (await asyncio.wait_for(
                 reader.readuntil(b"\r\n\r\n"), timeout=30.0
             )).decode("latin-1")
@@ -288,6 +289,14 @@ class DownloadServerService:
             group = q.get("group", [""])[0]
             rid = q.get("id", [""])[0]
             staged = q.get("staged", [""])[0]
+            proxy = q.get("proxy", [""])[0]
+            if proxy:
+                entry = self._proxy_registry.pop(proxy)
+                if not entry:
+                    await self._reply(writer, 404, b"proxy not found")
+                    return
+                await serve_proxy(writer, entry, self._reply)
+                return
             if staged:
                 # Staged artifact (e.g. essence text export); the token was
                 # already verified above for every request.
@@ -295,31 +304,21 @@ class DownloadServerService:
                 if not entry or not Path(entry["path"]).exists():
                     await self._reply(writer, 404, b"staged file not found")
                     return
-                src_path = Path(entry["path"])
-                name = _safe_header_name(entry["name"])
-                total = src_path.stat().st_size
-
-                head = (
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain; charset=utf-8\r\n"
-                    f"Content-Length: {total}\r\n"
-                    f"Content-Disposition: attachment; filename*=UTF-8''{quote(name)}\r\n"
-                    "Connection: close\r\n\r\n"
-                ).encode("latin-1")
-                writer.write(head)
-                with src_path.open("rb") as fh:
-                    while True:
-                        chunk = fh.read(_STREAM_CHUNK)
-                        if not chunk:
-                            break
-                        writer.write(chunk)
-                        await writer.drain()
+                await serve_staged(writer, entry, self._reply)
                 return
             if not group or not rid.isdigit():
                 await self._reply(writer, 400, b"bad request")
                 return
-            src, name = await self._download_info(group, int(rid))
+            try:
+                src, name = await self._download_info(group, int(rid))
+            except ValueError as e:
+                # Client-side condition (unknown group/id, volumes not ready);
+                # the generic handler below would mask it as 500.
+                logger.debug(f"[dlserver] download info rejected: {e}")
+                await self._reply(writer, 404, b"resource not found")
+                return
             name = _safe_header_name(name)
+            src = _safe_header_name(str(src))  # OneBot URL -> raw Location header
             src_path = Path(src)
             if not src_path.exists():
                 # Single file: 302 redirect to the QQ CDN direct link
@@ -412,8 +411,8 @@ class DownloadServerService:
         from paramiko.sftp_server import SFTPServer
 
         svc = self
-        # Fresh ephemeral host key per boot: read-only download service, so
-        # clients re-accepting the key after a restart is acceptable.
+        # Fresh ephemeral host key per boot: read-only service, key re-accept
+        # after restart is acceptable.
         host_key = paramiko.RSAKey.generate(2048)
 
         class _ServerInterface(paramiko.ServerInterface):
@@ -438,9 +437,8 @@ class DownloadServerService:
                 return False
 
         class _SFTPInterface(paramiko.SFTPServerInterface):
-            """Read-only virtual filesystem: /<group_id>/<filename> plus
-            /staged/<token>_<name>; cloud content materializes to the cache
-            directory on first open."""
+            """Read-only virtual FS: /<group_id>/<filename> plus /staged/<token>_<name>;
+            cloud content materializes to the cache directory on first open."""
 
             def _resolve(self, path: str) -> dict | None:
                 parts = [p for p in path.split("/") if p]
@@ -587,9 +585,8 @@ class DownloadServerService:
                             finally:
                                 tmp.unlink(missing_ok=True)
                         fh = cache.open("rb")
-                    # paramiko contract: return an SFTPHandle with a
-                    # `readfile` attribute; its default read()/close()
-                    # delegate to the python file object.
+                    # paramiko contract: SFTPHandle whose `readfile` delegates
+                    # read()/close() to the python file object.
                     handle = paramiko.SFTPHandle()
                     handle.readfile = fh
                     return handle

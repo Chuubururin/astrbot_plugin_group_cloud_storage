@@ -275,18 +275,22 @@ class CrudMixin:
             op.payload.get("folder") or None,
         )
         fid, busid = fresh or (op.payload["file_id"], op.payload["busid"] or 0)
-        data = await self._fetch_bytes(
+        # Stream the original to disk: rename applies to non-volume rows, but
+        # a member-uploaded file can still be far beyond the volume threshold
+        # and _fetch_bytes would hold it (multi-GB possible) in RAM.
+        staged = self.tmp_dir / f"replace_{op.payload['id']}_{int(_t.time())}.tmp"
+        n = await self._download_to_file(
             await self.api.get_group_file_url(
                 op.target,
                 fid,
                 busid,
                 op.payload["name"],
-            )
+            ),
+            staged,
         )
-        if not data:
+        if n <= 0:
+            staged.unlink(missing_ok=True)
             raise ValueError("download returned empty content")
-        staged = self.tmp_dir / f"replace_{op.payload['id']}_{int(_t.time())}.tmp"
-        staged.write_bytes(data)
         try:
             await self.api.upload_group_file(
                 op.target,

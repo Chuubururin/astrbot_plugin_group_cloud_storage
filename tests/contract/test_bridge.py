@@ -16,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from adapters.external.base import OpenListApiError  # noqa: E402
 from adapters.external.openlist import NetFile, OfflineTask  # noqa: E402
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from core.domain.enums import BridgeTaskState, ResourceType  # noqa: E402
@@ -256,7 +257,8 @@ async def test_out_guard_dlserver_disabled(env):
         FakeDownloadServer(enabled=False),
     )
     op = SimpleNamespace(
-        kind="bridge_out", target="g1", payload={"resource_id": ns.rid}
+        kind="bridge_out", target="g1", task_id="op-1",
+        payload={"resource_id": ns.rid},
     )
     await guarded.handle_bridge_out(op)
     assert ns.client.submitted == []
@@ -427,3 +429,143 @@ async def test_read_repair_missing_task_and_remote_stays_pending(env):
     row = await ns.store.get_archive_map("g1", ns.rid, "out")
     assert row["state"] == BridgeTaskState.PENDING.value
     assert row["task_id"] == ol_tid
+
+
+# ---------- retry/cancel 重新武装轮询循环（2026-09-12 真机坏链） ----------
+
+
+@pytest.mark.asyncio
+async def test_retry_rearms_stopped_poll_loop(env):
+    """轮询在无未完成任务时自动停止；retry 成功后必须重新拉起轮询，
+    否则重试的任务在 OpenList 重新执行而 archive_map 行永远停在
+    failed/unknown（UI 重试后状态不再更新）。"""
+    ns = env
+    ns.bridge._interval = 0.05
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    ol_tid = next(iter(ns.client.undone))
+    # 任务在 OpenList 侧失败 → 行收敛为 failed（read_repair 同步收敛）
+    ns.client.undone.clear()
+    ns.client.done_tasks[ol_tid] = OfflineTask(
+        id=ol_tid, name="video.mp4", state="failed", status="error", progress=0.0,
+        error="boom",
+    )
+    await ns.bridge.read_repair_pending()
+    row = await ns.store.get_archive_map("g1", ns.rid, "out")
+    assert row["state"] == BridgeTaskState.FAILED.value
+    # 模拟轮询循环已自动停止（无未完成任务时的行为）
+    await ns.bridge.stop_polling()
+    assert ns.bridge._poll_task is None or ns.bridge._poll_task.done()
+    # 重试：重新武装轮询
+    assert await ns.bridge.retry(ol_tid)
+    assert ns.bridge._poll_task is not None and not ns.bridge._poll_task.done()
+    # 重试后任务成功 → 重新武装的轮询把行推进到 done
+    ns.client.done_tasks[ol_tid] = OfflineTask(
+        id=ol_tid, name="video.mp4", state="succeeded", status="done", progress=100.0,
+        error="",
+    )
+    row = await _wait_row(ns.store, "g1", ns.rid, "out", BridgeTaskState.DONE.value)
+    assert row["state"] == BridgeTaskState.DONE.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_retry_failure_semantics(env, monkeypatch):
+    """真实客户端：未知任务 → code!=200 → False；传输错误 → 抛
+    OpenListApiError，recovery 捕获后同样落地 False。两种失败路径都
+    不得把 archive_map 行翻转成 pending（只有成功才翻转并重装轮询）。"""
+    ns = env
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    ol_tid = next(iter(ns.client.undone))
+    state_before = (await ns.store.get_archive_map("g1", ns.rid, "out"))["state"]
+
+    # 未知任务：OpenList 返回非 200 → False
+    assert await ns.bridge.cancel("oltask_missing") is False
+    assert await ns.bridge.retry("oltask_missing") is False
+    # 传输错误：异常被 recovery 吞掉，语义同为 False
+    async def _down(*a, **kw):
+        raise OpenListApiError("connection reset", code=0)
+    monkeypatch.setattr(ns.client, "task_cancel", _down)
+    assert await ns.bridge.cancel(ol_tid) is False
+    monkeypatch.setattr(ns.client, "task_retry", _down)
+    assert await ns.bridge.retry(ol_tid) is False
+    # 失败路径一律不翻转状态
+    row = await ns.store.get_archive_map("g1", ns.rid, "out")
+    assert row["state"] == state_before
+
+
+# ---------- copy 后 size 校验（2026-09-12 真机坏链：OpenList 同挂载 copy 静默截断） ----------
+
+
+@pytest.mark.asyncio
+async def test_verify_copy_detects_truncation(env):
+    """同挂载 copy 静默截断（20MiB → 16MiB，OpenList 仍报成功）必须被
+    size 对比捕获；size 一致 → ok，目标暂不可见（跨存储异步任务）→ pending，
+    源不存在 → skipped。"""
+    ns = env
+    ns.client.files["/src"] = [
+        NetFile(name="big.bin", size=20971520, is_dir=False,
+                modified=_now(), sign=""),
+        NetFile(name="small.bin", size=6034, is_dir=False,
+                modified=_now(), sign=""),
+        NetFile(name="async.bin", size=4096, is_dir=False,
+                modified=_now(), sign=""),
+    ]
+    ns.client.files["/dst"] = [
+        # big.bin 被截断；small.bin 完整；async.bin 未落（跨存储任务在跑）
+        NetFile(name="big.bin", size=16777216, is_dir=False,
+                modified=_now(), sign=""),
+        NetFile(name="small.bin", size=6034, is_dir=False,
+                modified=_now(), sign=""),
+    ]
+    res = await ns.bridge.verify_copy(
+        "/src", "/dst", ["big.bin", "small.bin", "gone.bin", "async.bin"]
+    )
+    by_name = {r["name"]: r for r in res}
+    assert by_name["big.bin"]["status"] == "mismatch"
+    assert by_name["big.bin"]["src_size"] == 20971520
+    assert by_name["big.bin"]["dst_size"] == 16777216
+    assert by_name["small.bin"]["status"] == "ok"
+    assert by_name["gone.bin"]["status"] == "skipped"
+    assert by_name["async.bin"]["status"] == "pending"
+
+
+# ---------- 坏链 #28：manual 模式（默认 poll=0）有界收敛 sweep ----------
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_sweep_converges_without_read_repair(env, monkeypatch):
+    """manual 模式下读修复只有 /csbridge status 与 POST bridge/tasks 两个
+    入口，面板无调用方——网盘文件永远留在 OpenList 按 URL 尾段生成的
+    UUID 名上，台账行永远 pending。修复：提交动作武装有界 sweep
+    （anti-entropy 惯例：读修复之外还要有主动对账），行到终态后自杀。"""
+    import core.application.bridge.polling as polling_mod
+
+    monkeypatch.setattr(polling_mod, "SWEEP_TICK_SEC", 0.02)
+    monkeypatch.setattr(polling_mod, "SWEEP_MAX_LIFETIME_SEC", 5.0)
+    ns = env
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+    sweep = ns.bridge._sweep_task
+    assert sweep is not None and not sweep.done()  # 提交即武装
+    ol_tid = next(iter(ns.client.undone))
+    uuid_name = "aa11bb22cc33dd44ee55ff6677889900"
+    ns.client.undone.clear()
+    ns.client.done_tasks[ol_tid] = OfflineTask(
+        id=ol_tid,
+        name="video.mp4",
+        state="succeeded",
+        status="done",
+        progress=100.0,
+        error="",
+    )
+    ns.client.files["/g1"] = [
+        NetFile(name=uuid_name, size=1024, is_dir=False, modified=""),
+    ]
+    # 不调用任何读修复入口：等 sweep 自行收敛
+    row = await _wait_row(ns.store, "g1", ns.rid, "out", "done", timeout=10.0)
+    assert ns.client.renames == [(f"/g1/{uuid_name}", "video.mp4")]
+    assert row["remote_path"] == "/g1/video.mp4"
+    # 无待收敛行后自杀（零稳态后台）
+    await asyncio.sleep(0.06)
+    assert sweep.done()

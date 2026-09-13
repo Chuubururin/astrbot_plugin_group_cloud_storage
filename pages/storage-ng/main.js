@@ -32,9 +32,11 @@ const TASK_LOG_TYPES = new Set([
 
 /** Queue-state transitions that must repaint the tasks ledger immediately:
  * without this the row keeps the pre-click state (e.g. "排队中" after a
- * pause) until an unrelated reload happens. */
+ * pause) until an unrelated reload happens. Retry included: the row must
+ * show 重试中 for its pause/interrupt buttons to be discoverable. */
 const LEDGER_SYNC_TYPES = new Set([
   EVENT_TYPES.PAUSED, EVENT_TYPES.RESUMED, EVENT_TYPES.CANCELLED,
+  EVENT_TYPES.RETRY,
 ]);
 
 /** After a reconnection: one refresh per data topic. */
@@ -85,7 +87,9 @@ function handleSSEEvent(ev) {
     case EVENT_TYPES.DONE:
       if (kind === EVENT_KINDS.BRIDGE_OUT || kind === EVENT_KINDS.BRIDGE_IN) {
         toast(`${kind === EVENT_KINDS.BRIDGE_OUT ? '转存网盘' : '转存群'}完成`, 'success');
-        refresh('bridge');
+        // Bridge ops emit no data_changed: reload the affected topics
+        // (netdisk/files) and the bridge ledger from the shared map.
+        debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
       }
       break;
 

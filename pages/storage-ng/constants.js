@@ -84,15 +84,20 @@ export const EVENT_KINDS = {
 /**
  * data_changed kind -> store refresh topics (only data_changed
  * may reload a topic; the map keeps one refresh per topic).
+ *
+ * bridge_out/bridge_in never emit data_changed on the backend; their
+ * DONE/FAILED/CANCELLED task events reuse this map for the affected
+ * topics (netdisk for out, files for in) plus the bridge ledger.
  */
 export const DATA_CHANGED_TOPICS = {
   scan: ['groups'],
   file_scan: ['files'],
   diff_file_scan: ['files', 'groups'],
-  sync: ['groups'],
+  sync: ['files', 'groups'],
   upload: ['files'],
   delete: ['files'],
   move_file: ['files'],
+  replace_name: ['files'],
   fetch: ['files'],
   essence_save: ['files', 'essence'],
   essence_delete: ['files', 'essence'],
@@ -100,6 +105,10 @@ export const DATA_CHANGED_TOPICS = {
   video_album: ['files', 'albums'],
   image_album: ['files', 'albums'],
   convert_volumes: ['files'],
-  batch_delete: ['files'],
-  batch_tags: ['files'],
+  create_folder: ['files'],
+  rename: ['groups', 'files'],
+  netdisk_index: ['netdisk'],
+  batch_groups: ['groups'],
+  bridge_out: ['netdisk', 'bridge'],
+  bridge_in: ['files', 'bridge'],
 };

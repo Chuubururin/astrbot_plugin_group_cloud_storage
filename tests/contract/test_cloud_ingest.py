@@ -215,6 +215,25 @@ async def test_fetch_image_to_album_autocreate(env):
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_to_album_stale_declared_name(env):
+    """同名 declared 暂存残留时仍以上报名为准（2026-09-12 真机坏链：
+    旧"精华_N.png"残留让改名静默跳过，QQ 相册显示 fetch_xxx.tmp）。"""
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "我的相册"}]}
+    api.essences = {"g1": []}
+    # 预置同名残留（上一次运行遗留）
+    (ingest.tmp_dir / "精华_9.png").write_bytes(b"stale")
+    tid = await ingest.submit_fetch(
+        "g1", "https://example.com/pic.png", name="精华_9.png",
+        to_album=True, album_name="我的相册",
+    )
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    assert len(api.album_uploads) == 1
+    assert api.album_uploads[0]["file"].endswith("精华_9.png")
+
+
+@pytest.mark.asyncio
 async def test_fetch_image_to_album_create_unsupported(env):
     """协议端无创建相册接口（NapCat）时报出可操作的中文指引。"""
     tmp_path, store, api, queue, ingest = env
@@ -365,9 +384,12 @@ async def test_video_recon_concat(env, monkeypatch):
     assert detail and detail["resource_id"] == "g1:file:vidgroup:x"
 
     seg_bytes = [b"AAAA", b"BBBB"]
-    async def _fetch(self, url):
-        return seg_bytes.pop(0)
-    monkeypatch.setattr(FileOpsService, "_fetch_bytes", _fetch)
+    async def _fetch(self, url, dest):
+        # 重组走流式落盘下载（_download_to_file）：分段直写磁盘再哈希
+        data = seg_bytes.pop(0)
+        dest.write_bytes(data)
+        return len(data)
+    monkeypatch.setattr(FileOpsService, "_download_to_file", _fetch)
 
     captured = {}
 

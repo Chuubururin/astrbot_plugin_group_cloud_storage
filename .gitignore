@@ -16,6 +16,10 @@ data/
 .video_agent/
 .zcode/
 node_modules/
+skills-lock.json
+
+# 本地构建产物（发布由 CI 打包，产物不入库）
+dist/
 
 # IDE / OS
 .vscode/

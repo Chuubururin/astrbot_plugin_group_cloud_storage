@@ -106,7 +106,19 @@ class ConverterService:
     async def _convert_video_reencode(self, src: Path, target: Path) -> Path:
         if not shutil.which("ffmpeg"):
             raise ValueError("ffmpeg not available for video conversion")
-        mux = _VIDEO_MUX.get(target.suffix.lower(), ["-f", "mp4"])
+        ext = target.suffix.lower()
+        if ext == ".webm":
+            # webm 容器拒绝 h264/aac，libx264 回退必败：VP9+Opus 是
+            # 唯一常规可写组合；cpu-used 放宽否则 VP9 编码慢到不可用。
+            args = (
+                ["ffmpeg", "-y", "-i", src.as_posix(),
+                 "-c:v", "libvpx-vp9", "-crf", "34", "-b:v", "0",
+                 "-deadline", "good", "-cpu-used", "4",
+                 "-c:a", "libopus", "-b:a", "96k",
+                 "-f", "webm", target.as_posix()]
+            )
+            return await self._run(args, target)
+        mux = _VIDEO_MUX.get(ext, ["-f", "mp4"])
         args = (
             ["ffmpeg", "-y", "-i", src.as_posix(),
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -210,12 +222,22 @@ class ConverterService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        # Hard timeout: a hung ffmpeg (corrupt/unusual input) must not hold
+        # the queue worker slot forever (same budget as composition.splitter).
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=14400)
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise ValueError("ffmpeg timed out after 14400s") from exc
         if proc.returncode != 0:
             raise ValueError(
                 f"ffmpeg failed ({proc.returncode}): {(stderr or b'').decode(errors='replace')[-300:]}"
             )
         if not target.exists() or target.stat().st_size == 0:
             raise ValueError("ffmpeg produced empty output")
-        logger.info(f"[converter] {Path(args[2]).name} -> {target.name} ({target.stat().st_size} bytes)")
+        # args layout is [ffmpeg, -y, -i, src, ...]: resolve the real source
+        # name for the log (args[2] is the literal "-i").
+        src_name = args[args.index("-i") + 1] if "-i" in args else args[0]
+        logger.info(f"[converter] {Path(src_name).name} -> {target.name} ({target.stat().st_size} bytes)")
         return target

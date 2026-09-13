@@ -155,6 +155,7 @@ class TestApiConfigGet:
                     assert item["value"] == ""
                     assert item.get("masked") is not True
                     return
+        pytest.fail("openlist_password not found in config groups")
 
     @pytest.mark.asyncio
     async def test_config_get_reload_required_markers(self, monkeypatch):
@@ -217,18 +218,14 @@ class TestApiConfigSave:
 
     @pytest.mark.asyncio
     async def test_save_masked_empty_string_skipped(self, monkeypatch):
-        """masked 字段值为空字符串时应跳过（前端修复后的行为）。"""
+        """masked 字段值为空字符串时按真实值保存（不是 '***' 就不跳过）。"""
         svc = _make_services()
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
             {"values": {"openlist_password": ""}}
         ))
         result = await _wp.api_config_save(svc)
-        # 空字符串在 masked_keys 中，但不是 "***"，所以会被当作有效值
-        # 这个测试验证后端的行为：空字符串不是 "***"，所以不会被跳过
-        # 前端应确保不发送空字符串（已在 config.js 中修复）
-        # 如果后端收到空字符串，应该让它通过（前端负责过滤）
-        # 这里我们只验证不崩溃
-        assert "status" in result or "saved" in result
+        # 空字符串在 masked_keys 中但不是 "***"：被当作真实值归一化后保存
+        assert result.get("saved") == ["openlist_password"]
 
     @pytest.mark.asyncio
     async def test_save_bool_type_normalization(self, monkeypatch):
@@ -249,8 +246,8 @@ class TestApiConfigSave:
             {"values": {key: "true"}}
         ))
         result = await _wp.api_config_save(svc)
-        # Should not crash; bool normalization should work
-        assert "saved" in result or result.get("status") == "error"
+        # bool 归一化恒成功：键必须出现在 saved 中（"true" → True）
+        assert result.get("saved") == [key]
 
     @pytest.mark.asyncio
     async def test_save_request_interval_normalization(self, monkeypatch):
@@ -260,8 +257,7 @@ class TestApiConfigSave:
             {"values": {"request_interval": "0.6"}}
         ))
         result = await _wp.api_config_save(svc)
-        if "saved" in result:
-            assert "request_interval" in result["saved"]
+        assert result.get("saved") == ["request_interval"]
 
     @pytest.mark.asyncio
     async def test_save_invalid_int_skipped(self, monkeypatch):
@@ -291,7 +287,7 @@ class TestApiConfigSave:
             {"values": {key: "3.14"}}
         ))
         result = await _wp.api_config_save(svc)
-        assert "saved" in result or result.get("status") == "error"
+        assert result.get("saved") == [key]
 
     @pytest.mark.asyncio
     async def test_save_list_type_normalization(self, monkeypatch):
@@ -310,8 +306,8 @@ class TestApiConfigSave:
             {"values": {key: "not_a_list"}}
         ))
         result = await _wp.api_config_save(svc)
-        # Should not crash
-        assert "saved" in result or result.get("status") == "error"
+        # 非 list 输入归一化为空 list 后照常保存
+        assert result.get("saved") == [key]
 
     @pytest.mark.asyncio
     async def test_save_dict_type_normalization(self, monkeypatch):
@@ -330,4 +326,5 @@ class TestApiConfigSave:
             {"values": {key: "not_a_dict"}}
         ))
         result = await _wp.api_config_save(svc)
-        assert "saved" in result or result.get("status") == "error"
+        # 非 dict 输入归一化为空 dict 后照常保存
+        assert result.get("saved") == [key]

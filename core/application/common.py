@@ -6,7 +6,21 @@ bridge._now) remain thin forwards to preserve the existing import surface.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+def sha256_file(path: str | Path) -> str:
+    """Streaming SHA-256 of a file (fixed 1MiB chunks). Callers hashing
+    multi-hundred-MB artifacts (video segments, volume zips, reassembled
+    downloads) must use this instead of read_bytes(), which would spike RSS
+    by the whole file size and block the event loop on the read."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def utc_now_iso() -> str:
@@ -51,4 +65,4 @@ async def compute_capacity(api, store, group_id: str) -> tuple[int, int, int, in
     return used, fs.total_space, count, fs.limit_count
 
 
-__all__ = ["utc_now_iso", "path_basename", "split_ext", "compute_capacity"]
+__all__ = ["utc_now_iso", "path_basename", "split_ext", "compute_capacity", "sha256_file"]

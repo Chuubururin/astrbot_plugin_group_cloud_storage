@@ -68,7 +68,7 @@ async def store(tmp_path):
 @pytest.mark.asyncio
 async def test_sync_op_through_queue_and_dispatcher(store):
     """sync op 全链路：队列 → 分发器 → 同步服务 → 索引/快照落库。"""
-    api = FakeOneBotApi(build_tree(file_total=300, folder_total=5, files_per_folder=20))
+    api = FakeOneBotApi(build_tree(folder_total=5, files_per_folder=20))
     queue, _, _, _ = _make_env(store, api)
     try:
         await queue.submit("sync", target="g1")
@@ -161,7 +161,7 @@ async def test_file_scan_streams_data_changed(store):
     """file_scan 扫描中按节流发布 data_changed（边扫边刷新文件列表/容量）。"""
     from core.domain.sync import GroupInfo
 
-    api = FakeOneBotApi(build_tree(file_total=40, folder_total=2, files_per_folder=10))
+    api = FakeOneBotApi(build_tree(folder_total=2, files_per_folder=10))
     queue, dispatcher, _, _ = _make_env(store, api)
     events: list[dict] = []
 
@@ -193,7 +193,7 @@ async def test_file_scan_streams_data_changed(store):
 @pytest.mark.asyncio
 async def test_file_scan_range_drops_not_openable_groups(store):
     """range 模式开闸兜底：队列执行时剔除归属账号离线的群，不放行云端拉取。"""
-    api = FakeOneBotApi(build_tree(file_total=4, folder_total=1, files_per_folder=2))
+    api = FakeOneBotApi(build_tree(folder_total=1, files_per_folder=2))
     queue, dispatcher, _, scan = _make_env(store, api)
     try:
         await queue.submit("scan", target="*")
@@ -209,8 +209,11 @@ async def test_file_scan_range_drops_not_openable_groups(store):
         scan.set_online_ids_callback(lambda: set())
         op2 = Op(task_id="fs2", kind="file_scan", target="*",
                  payload={"mode": "range", "groups": ["g1"]})
+        # fake 记录的是 OneBot 动作名（get_group_root_files 等）；
+        # 以 fs1 之后的调用快照为基线，重放不得新增任何云端调用。
+        calls_before_replay = list(api.calls)
         await dispatcher.do_file_scan(op2)
-        assert not any("list_group_root" in c for c in api.calls)
+        assert api.calls == calls_before_replay
     finally:
         await queue.shutdown()
 

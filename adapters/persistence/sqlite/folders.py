@@ -174,3 +174,23 @@ class FoldersMixin(StorePart):
             conn.commit()
 
         await self._conn.exec(_do)
+
+    async def rename_folder(self, group_id: str, folder_id: str, folder_name: str) -> None:
+        def _do(conn: sqlite3.Connection):
+            conn.execute(
+                "UPDATE folders SET folder_name=? WHERE group_id=? AND folder_id=?",
+                (folder_name, group_id, folder_id),
+            )
+            conn.commit()
+
+        await self._conn.exec(_do)
+
+    async def delete_folder(self, group_id: str, folder_id: str) -> None:
+        def _do(conn: sqlite3.Connection):
+            conn.execute(
+                "DELETE FROM folders WHERE group_id=? AND folder_id=?",
+                (group_id, folder_id),
+            )
+            conn.commit()
+
+        await self._conn.exec(_do)

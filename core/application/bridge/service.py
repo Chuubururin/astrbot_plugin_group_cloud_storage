@@ -52,6 +52,7 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
         # Polling state
         self._poll_task = None
         self._ledger_task = None
+        self._sweep_task = None
         self._stopping = False
         self._in_task_ids: set[str] = set()
         # Cached URL-upload capability; None = not yet probed
@@ -109,6 +110,50 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
     ) -> None:
         await self._client.recursive_move(src_dir, dst_dir, names)
 
+    async def verify_copy(
+        self, src_dir: str, dst_dir: str, names: list[str]
+    ) -> list[dict]:
+        """Post-copy size verification (advisory; never raises).
+
+        OpenList copies are fire-and-forget from our side: a same-storage
+        copy finishes immediately, a cross-storage copy runs as a background
+        task. Size comparison is the cheap first-pass integrity check (the
+        rclone convention): it cannot detect bit rot, but it does catch
+        silent truncation — 2026-09-12 live: OpenList v4.2.5 same-mount copy
+        truncated a 20 MiB file to exactly 16 MiB while reporting success.
+        Statuses: ok / mismatch (with sizes) / pending (dst not visible yet,
+        copy task may still be running) / skipped (src gone or stat error).
+        """
+        results: list[dict] = []
+        for name in names:
+            try:
+                src = await self._client.stat(f"{src_dir.rstrip('/')}/{name}")
+                dst = await self._client.stat(f"{dst_dir.rstrip('/')}/{name}")
+            except Exception:
+                results.append({"name": name, "status": "skipped"})
+                continue
+            if src is None:
+                results.append({"name": name, "status": "skipped"})
+                continue
+            if dst is None:
+                results.append({"name": name, "status": "pending"})
+                continue
+            if src.is_dir or dst.is_dir:
+                results.append({"name": name, "status": "ok"})
+                continue
+            if src.size == dst.size:
+                results.append({"name": name, "status": "ok"})
+            else:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "mismatch",
+                        "src_size": src.size,
+                        "dst_size": dst.size,
+                    }
+                )
+        return results
+
     # -- Internal helpers --
 
     def _fail(self, op, reason: str) -> None:
@@ -131,7 +176,9 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
         if hasattr(op_or_row, "kind"):
             kind = op_or_row.kind
             target = op_or_row.target
-            task_id = op_or_row.id if hasattr(op_or_row, "id") else ""
+            # Op carries the correlation id in task_id (never .id) -- the
+            # frontend matches SSE events against queued task ids.
+            task_id = op_or_row.task_id
         else:
             kind = f"bridge_{op_or_row.get('direction', 'out')}"
             target = op_or_row.get("group_id", "")
@@ -259,11 +306,15 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
             for f in files:
                 if f.is_dir:
                     continue
-                # Match by size (exact or within 1% tolerance for rounding)
-                if expected_size > 0 and f.size > 0:
-                    size_diff = abs(f.size - expected_size) / expected_size
-                    if size_diff > 0.01:  # More than 1% difference
-                        continue
+                # Match by size (exact or within 1% tolerance for rounding).
+                # Unknown size on either side -> skip: without this guard the
+                # loop renames an arbitrary file in the directory (e.g. after
+                # the resource row was deleted and expected_size is 0).
+                if expected_size <= 0 or f.size <= 0:
+                    continue
+                size_diff = abs(f.size - expected_size) / expected_size
+                if size_diff > 0.01:  # More than 1% difference
+                    continue
 
                 # Found a match - rename it
                 try:

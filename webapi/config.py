@@ -124,8 +124,11 @@ async def api_config_get(s: Services) -> dict:
             "hint": meta.get("hint", ""),
             "invisible": bool(meta.get("invisible", False)),
         }
-        # Mask sensitive values (only when a value is present)
-        if key in ("openlist_password", "openlist_token", "download_token"):
+        # Mask sensitive values (only when a value is present). Same set as
+        # the save-side masked_keys minus the save-only extras: the database
+        # admin token is the second trust layer for destructive db endpoints,
+        # so a page session must not be able to read it (never echo secrets).
+        if key in ("openlist_password", "openlist_token", "download_token", "database_admin_token"):
             if value:
                 item["value"] = "***"
                 item["masked"] = True
@@ -206,6 +209,13 @@ async def api_config_save(s: Services) -> dict:
                 s.config[key] = val
             except Exception:
                 pass
+    # volume_threshold feeds the module-level CHUNK_THRESHOLD_BYTES read at
+    # call time; re-apply it so the config center change takes effect without
+    # a plugin reload (configure is idempotent and floors at 10MB).
+    if "volume_threshold" in normalized:
+        from core.application.files import consts as files_consts
+
+        files_consts.configure(s.config)
     reload_required = sorted(
         k for k in saved if k in {
             "request_interval", "managed_groups", "global_admin_qqs",

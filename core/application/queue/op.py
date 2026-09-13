@@ -43,19 +43,27 @@ BULK_KINDS = {
 }
 
 # The priority set is configurable (config.op_high_priority_kinds); built-in
-# defaults below
+# defaults below. Reconciliation kinds (sync/file_scan) are deliberately NOT
+# here: a full-group scan wave submits hundreds of tasks ahead of everything
+# already in the FIFO hi queue and starved interactive ops (live 2026-09-12:
+# deletes queued 30+ min behind a file_scan wave; replace_name queued behind
+# a 292-task scan wave for ~1h — missed in the first pass, added same day).
+# They run on the normal worker pool, leaving hi workers free for
+# user-initiated ops.
 DEFAULT_HIGH_PRIORITY = {
     "rename",
     "move_file",
+    "replace_name",
     "upload",
     "delete",
-    "sync",
-    "file_scan",
     "essence_save",
     "essence_delete",
     "fetch",
     "video_upload",
     "video_album",
+    "image_album",
+    "bridge_out",
+    "bridge_in",
     "convert_volumes",
     "batch_groups",
     "create_folder",

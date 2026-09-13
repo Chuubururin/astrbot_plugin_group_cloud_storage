@@ -16,6 +16,7 @@ from core.domain.enums import ResourceType
 from core.domain.resource import Resource
 from core.domain.sync import VolumeInfo
 from core.log import logger
+from core.application.common import sha256_file as _sha256_file
 from core.application.composition.splitter import split_video
 
 from .essence import CLOUD_CALL_TIMEOUT  # single cloud-call timeout definition (lives in essence)
@@ -67,31 +68,41 @@ class VideoMixin:
         # transfer pipeline); manual redirect loop so a 302 cannot bypass
         # the per-hop checks.
         timeout = self.fetch_timeout
-        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
-            for hop in range(6):  # 1 direct request + up to 5 redirects
-                pinned_url, original_host = await asyncio.to_thread(
-                    self._resolve_fetch_url, url
-                )
-                headers = {}
-                if original_host:
-                    headers["Host"] = original_host
-                async with client.stream("GET", pinned_url, headers=headers) as resp:
-                    if resp.is_redirect and resp.has_redirect_location:
-                        if hop == 5:
-                            raise ValueError("_download_video: redirects exceeded (5)")
-                        from urllib.parse import urljoin
+        # Atomic publish: two concurrent previews for the same video write
+        # unique temp files, then one rename wins — interleaved writes into
+        # the shared cache name would leave a corrupt mp4 that the
+        # "already cached" check would reuse forever.
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+                for hop in range(6):  # 1 direct request + up to 5 redirects
+                    pinned_url, original_host = await asyncio.to_thread(
+                        self._resolve_fetch_url, url
+                    )
+                    headers = {}
+                    if original_host:
+                        headers["Host"] = original_host
+                    async with client.stream("GET", pinned_url, headers=headers) as resp:
+                        if resp.is_redirect and resp.has_redirect_location:
+                            if hop == 5:
+                                raise ValueError("_download_video: redirects exceeded (5)")
+                            from urllib.parse import urljoin
 
-                        url = urljoin(url, resp.headers["location"])
-                        continue
-                    resp.raise_for_status()
-                    total = 0
-                    with dest.open("wb") as f:
-                        async for chunk in resp.aiter_bytes():
-                            total += len(chunk)
-                            if total > VIDEO_PREVIEW_MAX_BYTES:
-                                raise ValueError("视频超过预览大小上限（300MB）")
-                            f.write(chunk)
-                    break
+                            url = urljoin(url, resp.headers["location"])
+                            continue
+                        resp.raise_for_status()
+                        total = 0
+                        with tmp.open("wb") as f:
+                            async for chunk in resp.aiter_bytes():
+                                total += len(chunk)
+                                if total > VIDEO_PREVIEW_MAX_BYTES:
+                                    raise ValueError("视频超过预览大小上限（300MB）")
+                                f.write(chunk)
+                        break
+            tmp.replace(dest)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
         return dest
 
     @staticmethod
@@ -244,7 +255,15 @@ class VideoMixin:
             duration_s = await self._probe_duration(src.as_posix()) or (
                 duration_ms / 1000.0 if duration_ms else 10.0
             )
-            await self._extract_gif(src, gif_path, duration_s)
+            # Atomic publish (same race as the mp4 cache): extract to a
+            # unique temp name, then move into place on success — a partial
+            # gif must never become the permanent cache entry.
+            tmp_gif = cache_dir / f".{cache_key}.{uuid.uuid4().hex[:8]}.gif"
+            try:
+                await self._extract_gif(src, tmp_gif, duration_s)
+                tmp_gif.replace(gif_path)
+            finally:
+                tmp_gif.unlink(missing_ok=True)
 
         data = gif_path.read_bytes()
         return {
@@ -299,8 +318,13 @@ class VideoMixin:
         stem = Path(name).stem
         dur = await self._probe_duration(path)
         max_sec = self.video_segment_seconds
-        # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split)
-        if dur is None or dur < max_sec:
+        # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split).
+        # Unprobeable duration goes to the split path (same semantics as
+        # _do_video_album): split_video cuts by -segment_time without a
+        # probed duration, while a silent direct upload would break the
+        # over-limit contract whenever the probe merely failed on a
+        # genuinely long video.
+        if dur is not None and dur < max_sec:
             await self.api.upload_group_file(op.target, path, name, folder_id=folder)
             lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
             result = await self.sync.run_full_sync(op.target, lock)
@@ -318,17 +342,7 @@ class VideoMixin:
             op.payload["parent_resource_id"] = parent_id
         parent_key = f"{op.target}:file:{parent_id}"
 
-        def _hash_source() -> str:
-            h = hashlib.sha256()
-            with open(src, "rb") as fh:
-                while True:
-                    chunk = fh.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-            return h.hexdigest()
-
-        total_sha_hex = await asyncio.to_thread(_hash_source)
+        total_sha_hex = await asyncio.to_thread(_sha256_file, src)
         await self.store.upsert_resources(
             [
                 Resource(
@@ -356,8 +370,7 @@ class VideoMixin:
             total = len(segments)
             for seq, seg in enumerate(segments, 1):
                 part_name = f"{stem}.part{seq:02d}.mp4"
-                data = seg.read_bytes()
-                sha = hashlib.sha256(data).hexdigest()
+                sha = await asyncio.to_thread(_sha256_file, seg)
                 await self.queue.pause_check(op)
                 await self.api.upload_group_file(
                     op.target, seg.as_posix(), part_name, folder_id=folder
@@ -368,7 +381,7 @@ class VideoMixin:
                             parent_resource_id=parent_key,
                             seq=seq,
                             part_name=part_name,
-                            size=len(data),
+                            size=seg.stat().st_size,
                             sha256=sha,
                             status="uploaded",
                         )

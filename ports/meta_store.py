@@ -67,6 +67,12 @@ class MetaStorePort(Protocol):
     async def clear_folders(self, group_id: str) -> None:
         """Clear a group's folders (called before a full refresh)."""
 
+    async def rename_folder(self, group_id: str, folder_id: str, folder_name: str) -> None:
+        """Rename one folder entity (read-your-writes after a QQ-side rename)."""
+
+    async def delete_folder(self, group_id: str, folder_id: str) -> None:
+        """Drop one folder entity (read-your-writes after a QQ-side delete)."""
+
     async def sum_resource_sizes(self, group_id: str) -> int:
         """Used capacity (exact index-based total): sum of active file sizes in the group."""
 

@@ -326,8 +326,11 @@ class TestApiTasksUndo:
         svc = _make_services()
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         result = await api_tasks_undo(svc)
-        # Should not crash; undo with no params returns a result dict
-        assert "status" in result or "task_id" in result
+        # 无参数：task_id/group_id/resource_id 以 None 透传给 task_control.undo
+        assert svc.task_control.calls == [
+            ("undo", {"task_id": None, "group_id": None, "resource_id": None})
+        ]
+        assert isinstance(result, dict)
 
     @pytest.mark.asyncio
     async def test_undo_by_group_id_and_resource_id(self, monkeypatch):
@@ -546,11 +549,13 @@ class TestApiSyncWithering:
         async def _bad_json():
             return [1, 2, 3]
         monkeypatch.setattr(webapi.webapi, "json_body", _bad_json)
-        # Non-dict payload: (payload or {}).get() would fail, but json_body
-        # exception handler catches it and defaults to {}
+        # Non-dict payload falls back to {} → 全量对账分支：
+        # submit("diff_file_scan", target="*") 且返回 mode=all
         result = await api_sync_withering(svc)
-        # Should fallback to "all" mode due to payload parsing error
-        assert result.get("mode") == "all" or "task_id" in result
+        assert result == {"task_id": "task-001", "mode": "all"}
+        assert svc.queue.submitted == [
+            ("diff_file_scan", {"target": "*", "payload": {"mode": "diff"}})
+        ]
 
 
 # ---------------------------------------------------------------------------

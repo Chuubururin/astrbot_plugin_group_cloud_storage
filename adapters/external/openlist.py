@@ -21,6 +21,7 @@ from core.log import logger
 from .base import (
     ExternalApiError,
     OpenListApiError,
+    classify_error,
     validate_base_url,
 )
 
@@ -224,13 +225,26 @@ class OpenListClient:
             if path not in ("/ping", "/api/auth/login", "/api/auth/logout"):
                 raise
 
-        resp = await client.request(
-            method,
-            path,
-            json=json,
-            params=params,
-            headers=headers,
-        )
+        try:
+            resp = await client.request(
+                method,
+                path,
+                json=json,
+                params=params,
+                headers=headers,
+            )
+        except httpx.TimeoutException as e:
+            # httpx exception str is empty; name the kind so callers
+            # surface a readable message instead of "failed: ".
+            raise ExternalApiError(
+                "openlist",
+                f"timeout after client timeout ({type(e).__name__})",
+            ) from e
+        except httpx.HTTPError as e:
+            kind = classify_error(e).value
+            raise ExternalApiError(
+                "openlist", f"{kind}: {type(e).__name__}: {e}"
+            ) from e
         return resp
 
     async def _request(

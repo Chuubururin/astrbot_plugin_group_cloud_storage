@@ -260,6 +260,15 @@ class ExecutionMixin:
                 if bulk:
                     self._bulk.release()
                 released = True
+                # A retrying op is still pending: keep it in the live indexes
+                # through the backoff and the requeue wait, or pause_task
+                # reports "unknown" for the whole retry lifecycle and a
+                # cancel landing inside the sleep is erased by the finally
+                # below (the task then runs to completion after the user
+                # cancelled it). Same invariants as a freshly submitted op;
+                # the worker discards _pending on the next dequeue.
+                self._pending.add(op.task_id)
+                keep_index = True
                 await asyncio.sleep(backoff)
                 if high:
                     await self._q_hi.put(op)  # retry keeps its priority (high-priority queue)

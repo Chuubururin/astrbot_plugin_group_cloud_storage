@@ -20,8 +20,9 @@ restrictions apply only at the album/essence entrances):
   restriction: text conversion at the entrance)
 - essence -> local = full text returned
 - essence -> group files = full text staged -> ops.submit_upload
-- essence -> netdisk = full text staged -> ops.upload -> bridge_out
-  (two hops)
+- essence -> netdisk = full text staged -> OpenList offline download
+  (pulled from the local download server; without one: staged into
+  group files only, the netdisk transfer stays a manual bridge action)
 - essence -> album = text rendered to a PNG image into the album (type
   restriction: image rendering at the entrance)
 - netdisk -> local = OpenList direct link
@@ -37,6 +38,7 @@ reaches a terminal state.
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 
 from core.application.common import path_basename
@@ -106,6 +108,10 @@ class DistributorService:
         self.queue = queue
         self.tmp_dir = tmp_dir
         self._member_names: dict[str, str] = {}
+        # Strong refs for fire-and-forget tasks: asyncio keeps only weak
+        # references to running tasks, so an unstored create_task() result
+        # can be garbage-collected mid-flight (CPython-documented footgun).
+        self._bg_tasks: set = set()
 
     # ---------- Validation and target rules ----------
 
@@ -187,9 +193,11 @@ class DistributorService:
             import asyncio as _aio
 
             try:
-                _aio.get_running_loop().create_task(
+                task = _aio.get_running_loop().create_task(
                     self.dlserver.ensure_local(group_id, rid, name)
                 )
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
             except RuntimeError:
                 pass
         else:
@@ -208,13 +216,33 @@ class DistributorService:
             if not self.bridge:
                 raise ValueError("bridge not enabled")
             url = await self._album_media_url(group_id, album_id, name)
-            # Media lands on the same netdisk destination as bridge_out
-            # (openlist_dst_dir + template): a hard-coded "/" breaks OpenList
-            # mounts that only expose a subdirectory.
+            # 坏链#17：目录 = openlist_dst_dir + {group_id}/{filename} 模板
+            # 渲染（与 bridge_out 的 _render_dst 同源）。此前只传裸 _dst_dir，
+            # 媒体全部堆在挂载根目录，违背按群归档的落盘约定。
             client = self._bridge_client(bridge=self.bridge)
-            tasks = await client.submit_offline_download(
-                [url], getattr(self.bridge, "_dst_dir", "") or "/"
+            remote_dir, _remote_path = self.bridge._render_dst(
+                getattr(self.bridge, "_dst_dir", "") or "/",
+                group_id,
+                name or "album_media",
             )
+            # 坏链#18：QQ CDN 直链的 URL 尾段是规格名（/0 /400 /800…），
+            # OpenList 离线下载按「URL 尾段，无 Content-Disposition 才用」
+            # 命名（AlistGo internal/offline_download/http/client.go 同款
+            # 语义），落盘名会变成 "800"。经 dlserver 代理重发，由
+            # Content-Disposition 注入真实文件名。
+            if self.dlserver and getattr(self.dlserver, "enabled", False):
+                proxied = self.dlserver.register_proxy(url, name or "album_media")
+                if proxied:
+                    url = proxied
+            else:
+                # 无代理时至少让落盘可辨识：URL 尾段太短/纯数字时追加名字
+                from urllib.parse import urlsplit
+
+                tail = urlsplit(url).path.rsplit("/", 1)[-1]
+                if not tail or tail.isdigit():
+                    url = f"{url}{'' if url.endswith('/') else '/'}{name or 'album_media'}"
+            await client.mkdir(remote_dir)
+            tasks = await client.submit_offline_download([url], remote_dir)
             tid = tasks[0].id if tasks else ""
             return {"target": "netdisk", "task_id": tid, "via": "media-offline"}
         if target == "group":
@@ -247,16 +275,45 @@ class DistributorService:
         picked = media[0]
         want = str(name or "").strip().lower()
         if want:
+            # QQ album entries often drop the file extension in image.name
+            # (live 2026-09-11: "logo.png" stored as "logo"); compare both
+            # forms so the requested file is actually found instead of
+            # silently falling back to the first entry (a different photo).
+            want_stem = want.rsplit(".", 1)[0] if "." in want else want
+
+            def _forms(value: str) -> tuple:
+                v = value.strip().lower()
+                stem = v.rsplit(".", 1)[0] if "." in v else v
+                return (v, stem)
+
             for m in media:
                 if not isinstance(m, dict):
                     continue
-                video_name = (m.get("video") or {}).get("name") or ""
+                video = m.get("video") if isinstance(m.get("video"), dict) else {}
+                image = m.get("image") if isinstance(m.get("image"), dict) else {}
+                video_name = video.get("name") or ""
+                # QQ NT entries carry the display name inside image.name;
+                # legacy shapes keep it at the top level.
                 cand = str(
-                    m.get("name") or m.get("desc") or m.get("filename") or video_name
+                    m.get("name")
+                    or image.get("name")
+                    or m.get("desc")
+                    or m.get("filename")
+                    or video_name
                 ).strip().lower()
                 # BUG-16: exact match or filename-prefix match only (avoid
                 # false positives from substring containment, e.g. "a" in "data")
-                if cand and (cand == want or cand.startswith(want) or want.startswith(cand)):
+                if not cand:
+                    continue
+                hit = cand == want or cand == want_stem
+                if not hit:
+                    for c in _forms(cand):
+                        if c and (c.startswith(want_stem) or want_stem.startswith(c)):
+                            hit = True
+                            break
+                    if not hit and "." in want:
+                        hit = cand.startswith(want) or want.startswith(cand)
+                if hit:
                     picked = m
                     break
         url = self._extract_media_url(picked)
@@ -272,14 +329,75 @@ class DistributorService:
         return str(url)
 
     @staticmethod
-    def _extract_media_url(m: dict) -> str:
+    def _pick_largest_spec(specs: list) -> dict:
+        """Pick the best spec (front-end byAreaDesc semantics, hardened).
+
+        QQ NT album photoUrls/videoUrl lists order small thumbnails first;
+        taking the first entry silently degrades distributed media to the
+        lowest-resolution variant. Field-proven ranking (live 2026-09-11:
+        the same photo is served as two lloc variants — a hi-res one whose
+        /800 tail returns 95KB and a lo-res twin whose every tail returns
+        2659B; declared width/height was stale on the lo-res variant):
+        1. w5*h5 from the URL query — QQ's real pixel size of that variant
+        2. declared width*height
+        3. URL tail spec — "/0" is QQ's original-image spec (highest),
+           then descending numeric tails ("800" > "400" > "200")
+        """
+        from urllib.parse import parse_qs
+
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+
+        def rank(p):
+            u = (p or {}).get("url") or {}
+            if not isinstance(u, dict):
+                return (0, 0, 0)
+            url = u.get("url") or ""
+            real_px = tail_spec = 0
+            if isinstance(url, str) and url:
+                path, _, query = url.partition("?")
+                qs = parse_qs(query.split("#", 1)[0])
+                w5 = _int((qs.get("w5") or ["0"])[0])
+                h5 = _int((qs.get("h5") or ["0"])[0])
+                real_px = w5 * h5
+                tail = path.rstrip("/").rsplit("/", 1)[-1]
+                try:
+                    tail_num = int(tail)
+                except ValueError:
+                    tail_num = -1
+                tail_spec = float("inf") if tail_num == 0 else max(tail_num, 0)
+            return (
+                real_px,
+                tail_spec,
+                _int(u.get("width")) * _int(u.get("height")),
+            )
+
+        return max(specs or [], key=rank) if specs else {}
+
+    @classmethod
+    def _first_spec_url(cls, specs: list) -> str:
+        """URL of the largest spec; accept both {url:{url}} and flat url."""
+        p = cls._pick_largest_spec(specs)
+        u = (p or {}).get("url")
+        if isinstance(u, dict) and u.get("url"):
+            return str(u["url"])
+        if isinstance(u, str) and u:
+            return u
+        return ""
+
+    @classmethod
+    def _extract_media_url(cls, m: dict) -> str:
         """Support both shapes: flat {url} and the nested QQ album image.
 
         The QQ NT album service returns camelCase media entries
         (image.photoUrls[].url.url plus image.defaultUrl.url); legacy
         NapCat-style adapters return snake_case (image.photo_url). Video
         entries carry videoUrl[]/video_url[] specs and a flat playback url.
-        Mirrors the gallery frontend normalization (album-media.js).
+        Spec lists resolve to the largest pixel area, mirroring the gallery
+        frontend normalization (album-media.js byAreaDesc).
         """
         if not isinstance(m, dict):
             return ""
@@ -288,12 +406,9 @@ class DistributorService:
             return flat
         image = m.get("image") or {}
         for key in ("photoUrls", "photo_url"):
-            for p in image.get(key) or []:
-                u = (p or {}).get("url")
-                if isinstance(u, dict) and u.get("url"):
-                    return str(u["url"])
-                if isinstance(u, str) and u:
-                    return u
+            url = cls._first_spec_url(image.get(key) or [])
+            if url:
+                return url
         default_url = image.get("defaultUrl")
         if isinstance(default_url, dict) and default_url.get("url"):
             return str(default_url["url"])
@@ -301,18 +416,14 @@ class DistributorService:
         if isinstance(video.get("url"), str) and video["url"]:
             return video["url"]
         for key in ("videoUrl", "video_url"):
-            for spec in video.get(key) or []:
-                u = (spec or {}).get("url")
-                if isinstance(u, dict) and u.get("url"):
-                    return str(u["url"])
-                if isinstance(u, str) and u:
-                    return u
+            url = cls._first_spec_url(video.get(key) or [])
+            if url:
+                return url
         cover = video.get("cover") or {}
         for key in ("photoUrls", "photo_url"):
-            for p in cover.get(key) or []:
-                u = (p or {}).get("url")
-                if isinstance(u, dict) and u.get("url"):
-                    return str(u["url"])
+            url = cls._first_spec_url(cover.get(key) or [])
+            if url:
+                return url
         return ""
 
     # ---------- Essence text distribution (kind=essence) ----------
@@ -342,25 +453,59 @@ class DistributorService:
         if target == "copy":
             return {"target": "copy", "text": text}
         if target == "netdisk":
-            # Text -> netdisk: relayed through group files, because the
-            # OpenList server cannot reach this host's file:// links
-            if not self.ops or not self.tmp_dir or not self.bridge:
-                raise ValueError("ops / bridge / tmp dir required")
+            if not self.bridge:
+                raise ValueError("bridge not enabled")
+            # Preferred path: direct OpenList offline download from the local
+            # download server (same mechanism as album media -> netdisk,
+            # incl. the {group_id}/{filename} dst template): stage the text,
+            # serve it over HTTP, let OpenList pull it. The previous
+            # "group relay" submitted only its first hop (upload into the
+            # group); the second hop (bridge_out) was never submitted, so
+            # the text silently stayed in the group files (live 2026-09-12).
+            name = await self._essence_name(group_id, rid)
+            # Serve/upload under the essence display name (the staged tmp
+            # name embeds a uuid/timestamp which would leak into the
+            # netdisk/group file name).
+            base = name or f"essence_{rid}"
+            served = base if base.endswith(".txt") else f"{base}.txt"
+            client = self._bridge_client(bridge=self.bridge)
+            remote_dir, _remote_path = self.bridge._render_dst(
+                getattr(self.bridge, "_dst_dir", "") or "/",
+                group_id,
+                name or f"essence_{rid}",
+            )
+            if self.dlserver and getattr(self.dlserver, "enabled", False) and self.tmp_dir:
+                staged = self._stage_text(text, group_id, rid)
+                addr = self.dlserver.register_staged(staged, served)
+                url = addr.get("http_url") or ""
+                if not url:
+                    raise ValueError("download server returned no http url")
+                await client.mkdir(remote_dir)
+                tasks = await client.submit_offline_download([url], remote_dir)
+                tid = tasks[0].id if tasks else ""
+                return {"target": "netdisk", "task_id": tid, "via": "text-offline"}
+            # Fallback (no download server): one hop into the group files;
+            # archiving to the netdisk is then a manual bridge action.
+            if not self.ops or not self.tmp_dir:
+                raise ValueError("ops / tmp dir required")
             staged = self._stage_text(text, group_id, rid)
-            # First hop: upload into group files
-            tid = await self.ops.submit_upload(group_id, staged.as_posix(), staged.name)
-            # Second hop: bridge_out (group files -> netdisk)
+            tid = await self.ops.submit_upload(group_id, staged.as_posix(), served)
             return {
                 "target": "netdisk",
                 "task_id": tid,
                 "via": "group-relay",
-                "note": "文本经「下载到群文件 → 手动转存网盘」两步",
+                "note": "未配置本地下载服务：文本已上传到群文件，转存网盘请在网盘页手动执行",
             }
         if target == "group":
             if not self.ops or not self.tmp_dir:
                 raise ValueError("ops / tmp dir required")
             staged = self._stage_text(text, group_id, rid)
-            tid = await self.ops.submit_upload(group_id, staged.as_posix(), staged.name)
+            # Upload under the essence display name (the staged tmp name is
+            # unique on disk but would leak its uuid/timestamp into the
+            # group file listing — same rationale as the netdisk leg).
+            name = await self._essence_name(group_id, rid)
+            served = name if name.endswith(".txt") else f"{name}.txt"
+            tid = await self.ops.submit_upload(group_id, staged.as_posix(), served)
             return {"target": "group", "task_id": tid}
         if target == "album":
             # Essence text -> album (type restriction at the entrance: text
@@ -371,11 +516,17 @@ class DistributorService:
                 raise ValueError("ingest / tmp dir required")
             img_path = await self._render_text_to_image(text, group_id, rid)
             album_name = await self._resolve_essence_album(group_id)
-            if self.dlserver and self.dlserver.enabled:
-                staged = self.dlserver.register_staged(img_path, f"精华_{rid}.png")
-                url = staged.get("http_url", "")
-            else:
-                url = f"http://127.0.0.1:0/staged/精华_{rid}.png"
+            if not (self.dlserver and self.dlserver.enabled):
+                # Fail fast with an actionable message instead of queueing a
+                # doomed fetch: submit_fetch only accepts http/https, and
+                # without the download server there is no http source for
+                # the rendered PNG (the old 127.0.0.1:0 placeholder died
+                # later inside the queue with a cryptic error).
+                raise ValueError(
+                    "本地下载服务未开启：文本转图片需经 HTTP 拉取后入相册，请先启用下载服务"
+                )
+            staged = self.dlserver.register_staged(img_path, f"精华_{rid}.png")
+            url = staged.get("http_url", "")
             tid = await self.ingest.submit_fetch(
                 group_id,
                 url,
@@ -400,9 +551,18 @@ class DistributorService:
         return Path(name).name
 
     def _stage_text(self, text: str, group_id: str, rid: int) -> Path:
-        """Stage the text as a local file and return its path."""
+        """Stage the text as a local file and return its path.
+
+        The disk name carries a uuid suffix: the timestamp alone collides
+        when the same essence is distributed twice within one second, and
+        the colliding overwrite + the upload's post-cleanup unlink kills
+        the first registration's staged URL (live 2026-09-12).
+        """
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
-        staged = self.tmp_dir / f"ess_{group_id}_{rid}_{int(time.time())}.txt"
+        staged = (
+            self.tmp_dir
+            / f"ess_{group_id}_{rid}_{int(time.time())}_{uuid.uuid4().hex[:8]}.txt"
+        )
         staged.write_text(text, encoding="utf-8")
         return staged
 
@@ -437,7 +597,10 @@ class DistributorService:
         """Render essence text to a PNG image (for album import). Pure
         Python + Pillow implementation."""
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
-        img_path = self.tmp_dir / f"ess_{group_id}_{rid}_{int(time.time())}.png"
+        img_path = (
+            self.tmp_dir
+            / f"ess_{group_id}_{rid}_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+        )
         try:
             from PIL import Image, ImageDraw, ImageFont
         except ImportError as e:
@@ -504,8 +667,10 @@ class DistributorService:
             link = await self._bridge_client(bridge=self.bridge).get_raw_url(path)
             to_essence = target == "essence"
             # Optional conversion argument is only forwarded when requested,
-            # keeping older Ingest adapters (tests/plugins) compatible; album
-            # media is always lossy re-encoded (mandatory built-in).
+            # keeping older Ingest adapters (tests/plugins) compatible. No
+            # lossy re-encode here: submit_fetch defaults lossy=False, so
+            # re-encoding stays an explicit uploader opt-in at the panel
+            # upload path (distribute moves media as-is).
             extra = {}
             if convert_to:
                 extra["convert_to"] = convert_to

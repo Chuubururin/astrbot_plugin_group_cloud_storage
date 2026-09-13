@@ -126,6 +126,11 @@ jobs:
         if: steps.decide.outputs.run == 'true' && steps.pr.outputs.number != ''
         run: |
           set -euo pipefail
+          method="${{ steps.decide.outputs.merge_method }}"
+          case "$method" in
+            merge|squash|rebase) ;;
+            *) echo "::error::未知合并方式 $method"; exit 1 ;;
+          esac
           gh pr merge "${{ steps.pr.outputs.number }}" \
-            --merge --delete-branch=false
-          echo "dev → main 合并完成"
+            "--$method" --delete-branch=false
+          echo "dev → main 合并完成（$method）"

@@ -16,6 +16,7 @@ listener 泄漏（每开一次页面 +1，重启才清零）+ 浏览器每主机
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -84,3 +85,52 @@ async def test_events_generator_returns_on_http_disconnect():
     finally:
         ev_mod.request = orig_request
         ev_mod.stream_response = orig_stream
+
+
+@pytest.mark.asyncio
+async def test_events_survive_heartbeat_window(monkeypatch):
+    """坏链#25 回归：心跳窗口超时不得关闭订阅生成器（wait_for 取消
+    __anext__ 会注入 CancelledError 并触发 subscribe 的 finally ——
+    旧实现由此在第一个心跳窗口后永久失聪），窗口之后的事件仍须送达。"""
+    import webapi.events as ev_mod
+
+    monkeypatch.setattr(ev_mod, "SSE_HEARTBEAT_SEC", 0.1)
+
+    q = _queue()
+    s = MagicMock()
+    s.queue = q
+
+    async def _slow_receive():
+        # 长挂起的 receive：整条用例内不触发断连
+        await asyncio.sleep(30)
+        return {"type": "http.disconnect"}
+
+    req = MagicMock()
+    req.receive = _slow_receive
+
+    captured = {}
+
+    def _fake_stream_response(gen):
+        captured["gen"] = gen
+        return gen
+
+    monkeypatch.setattr(ev_mod, "request", req)
+    monkeypatch.setattr(ev_mod, "stream_response", _fake_stream_response)
+
+    await ev_mod.api_queue_events(s)
+    gen = captured["gen"]
+    try:
+        # 窗口内无事件 → 心跳，而非流终止
+        first = await asyncio.wait_for(gen.__anext__(), timeout=2)
+        assert '"heartbeat"' in first
+        # 心跳之后订阅必须仍然存活：publish 的事件照常送达
+        pub = asyncio.ensure_future(gen.__anext__())
+        await asyncio.sleep(0.05)
+        assert len(q._listeners) == 1
+        q.publish({"type": "done", "task_id": "x"})
+        line = await asyncio.wait_for(pub, timeout=2)
+        assert line.startswith("data: ")
+        assert json.loads(line[len("data: "):])["type"] == "done"
+    finally:
+        await gen.aclose()
+    assert len(q._listeners) == 0

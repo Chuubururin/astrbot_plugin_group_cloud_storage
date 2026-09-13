@@ -20,13 +20,13 @@ async def _admin(s, payload=None):
     return admin
 
 async def api_database_health(s):
-    return json_response(await (await _admin(s, {})).health())
+    return json_response(await (await _admin(s, await json_body() or {})).health())
 
 async def api_database_integrity(s):
-    return json_response(await (await _admin(s, {})).integrity())
+    return json_response(await (await _admin(s, await json_body() or {})).integrity())
 
 async def api_database_backups(s):
-    return json_response({"backups": await (await _admin(s, {})).backups()})
+    return json_response({"backups": await (await _admin(s, await json_body() or {})).backups()})
 
 async def api_database_restore(s):
     payload = await json_body() or {}

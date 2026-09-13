@@ -150,6 +150,7 @@ export const NETDISK_SOURCE = {
     'netdisk-link', 'netdisk-download', 'netdisk-rename',
     'netdisk-tags', 'netdisk-detail', 'netdisk-delete', 'clear',
     'netdisk-distribute',
+    'netdisk-move', 'netdisk-copy', 'netdisk-rename-batch',
   ],
   async list(state, params) {
     const data = await apiPost(API.BRIDGE.NETDISK, {

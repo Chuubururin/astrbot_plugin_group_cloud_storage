@@ -115,13 +115,12 @@ export async function showAlbumUploadModal(fileInput) {
       { value: 'low', label: '强力（体积优先）' },
     ] },
   ]);
-  if (res?.source) {
-    albumUploadOptions = {
-      convertTo: res.convert_to || '',
-      lossy: res.lossy || '',
-      albumName: res.album || 'AstrBotCloud',
-    };
-  }
+  if (!res?.source) return; // 模态取消（res=null）：与 showUploadSourceModal 同款守卫
+  albumUploadOptions = {
+    convertTo: res.convert_to || '',
+    lossy: res.lossy || '',
+    albumName: res.album || 'AstrBotCloud',
+  };
 
   if (res.source === 'netdisk') {
     const file = await pickNetdiskFile();

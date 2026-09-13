@@ -168,7 +168,7 @@ test('N-01: applyLocalFilterSort folder class matches no file rows', () => {
 
 // ---- api.js dictionaries ----
 test('N-01: TYPE_LABELS covers the 13 classification machine values', async () => {
-  const { TYPE_LABELS, STORE_STATUS_LABELS } = await import('../../api.js');
+  const { TYPE_LABELS, STORE_STATUS_LABELS } = await import('../../views/task-labels.js');
   for (const t of ['document', 'pdf', 'spreadsheet', 'slide', 'online_doc',
     'image', 'video', 'audio', 'archive', 'installer', 'flash', 'folder', 'other']) {
     assert.ok(TYPE_LABELS[t], `label for ${t}`);

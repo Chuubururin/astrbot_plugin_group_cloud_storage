@@ -208,7 +208,7 @@ class ResourceSyncService:
                 for start in range(0, len(frontier), self._traverse_concurrency):
                     batch = frontier[start : start + self._traverse_concurrency]
                     results = await asyncio.gather(*(read(item) for item in batch))
-                    for (folder_id, p_id), result in results:
+                    for (folder_id, _p_id), result in results:
                         if folder_id is not None:
                             for f in result.files:
                                 f.folder_id = folder_id
@@ -218,7 +218,13 @@ class ResourceSyncService:
                             if fd.folder_id in seen:
                                 continue
                             seen.add(fd.folder_id)
-                            parent = p_id if folder_id is not None else ""
+                            # A subfolder discovered inside `folder_id` hangs
+                            # off `folder_id` itself (root: folder_id is None
+                            # -> ""). The entry's parent_id (`_p_id`) is the
+                            # discovered folder's own grandparent and must not
+                            # leak into the child row (depth>=2 folders were
+                            # recorded one level too high).
+                            parent = folder_id or ""
                             folders_seen.append(
                                 {"folder_id": fd.folder_id, "folder_name": fd.name, "parent_id": parent}
                             )

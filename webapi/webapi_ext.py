@@ -121,7 +121,8 @@ async def api_netdisk_distribute(s: Services) -> dict:
     """Distribute a netdisk file for download (target=local|group|album|essence).
 
     Accepts convert_to (whitelist-checked), supplied only in the request
-    payload. Album media is always lossy re-encoded (mandatory built-in).
+    payload. Media is moved as-is: no lossy re-encode on distribute paths
+    (re-encoding stays an explicit uploader opt-in at the panel upload).
     """
     payload = await json_body()
     path = str(payload.get("path") or "")

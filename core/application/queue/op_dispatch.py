@@ -20,6 +20,14 @@ from .health import HealthCircuitBreaker
 from .capacity import CapacityMixin
 from .op import OpCancelError, OpPausedError
 
+# Branches publishing their own data_changed (file ops/ingest/scans);
+# every other dispatched kind gets a central announce after _dispatch.
+_SELF_ANNOUNCED_KINDS = frozenset((
+    "upload", "delete", "move_file", "replace_name", "convert_volumes", "essence_save",
+    "essence_delete", "fetch", "video_upload", "video_album", "image_album",
+    "file_scan", "diff_file_scan",
+))
+
 
 class OpDispatcher(CapacityMixin):
     def __init__(
@@ -283,7 +291,11 @@ class OpDispatcher(CapacityMixin):
         # the target group (no-op when the target is not a concrete group or
         # the account is unknown/unbound — best_bot fallback applies then).
         with account_scope(await self._account_of(getattr(op, "target", ""))):
-            await self._dispatch(op)
+            try:
+                await self._dispatch(op)
+            finally:
+                if op.kind not in _SELF_ANNOUNCED_KINDS:
+                    self._announce(op)
 
     async def _dispatch(self, op) -> None:
         if op.kind == "scan":
@@ -420,6 +432,13 @@ class OpDispatcher(CapacityMixin):
             raise OneBotApiError(
                 OneBotErrorKind.LOCAL_ERROR, op.kind, f"unknown op kind: {op.kind}"
             )
+
+    def _announce(self, op) -> None:
+        """Terminal data_changed push for centrally-announced kinds; also
+        fires on failure — partial writes still moved cloud state."""
+        self.queue.publish(
+            {"type": "data_changed", "kind": op.kind, "target": op.target, "ts": time.time()}
+        )
 
     async def run_file_op_and_announce(self, op) -> None:
         """After a file operation: incremental capacity write-back + KV

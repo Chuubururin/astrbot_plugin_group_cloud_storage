@@ -437,4 +437,6 @@ class TestSchemaVersion:
         import importlib
         from adapters.persistence.sqlite import migrations as _m
         importlib.reload(_m)
-        assert _m.SCHEMA_VERSION >= 17
+        # 钉死当前版本：升级 schema 时必须同步更新此断言，
+        # 防止版本号被误降级或迁移链断裂也静默通过。
+        assert _m.SCHEMA_VERSION == 28

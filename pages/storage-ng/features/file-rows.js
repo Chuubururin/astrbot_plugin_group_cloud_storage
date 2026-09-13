@@ -10,11 +10,13 @@
  */
 
 import { getState, set, refresh } from '../store.js';
-import { TYPE_LABELS, API } from '../api.js';
+import { TYPE_LABELS } from '../views/task-labels.js';
+import { API, apiPost } from '../api.js';
 import { getIcon } from '../icons.js';
 import { formatSize, formatTime, escapeHtml, copyToClipboard } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
 import { netdiskRename, netdiskRemovePaths } from './netdisk-ops.js';
+import { showGroupFolderCtx } from './group-folder-menu.js';
 import { openPreview } from './preview.js';
 import { show as showContextMenu, showRaw } from '../components/context-menu.js';
 import { runCommand } from './commands.js';
@@ -108,6 +110,11 @@ export function buildRow(source, item) {
         selection: source.selection,
         onAction: (cmdId, ctx) => runCommand(cmdId, { ...ctx, rowAware: true }),
       });
+    });
+  } else if (source.id === 'group') {
+    tr.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showGroupFolderCtx(e.clientX, e.clientY, item);
     });
   } else if (isUp) {
     tr.addEventListener('contextmenu', (e) => e.preventDefault());

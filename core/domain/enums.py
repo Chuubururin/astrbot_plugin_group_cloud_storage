@@ -90,7 +90,23 @@ class BridgeTaskState(str, Enum):
         Accepts strings and integers (OpenList API compatibility).
         """
         if isinstance(state, int):
-            _INT_MAP = {0: cls.PENDING, 1: cls.RUNNING, 2: cls.DONE, 3: cls.FAILED}
+            # OpenList pkg/task/task.go iota order: 0 Pending, 1 Running,
+            # 2 Succeeded, 3 Canceling, 4 Canceled, 5 Errored, 6 Failing,
+            # 7 Failed. Live-verified 2026-09-11: tasks_done() returns
+            # state=4 for a cancelled transfer and state=7 for an exhausted
+            # failed one; the old 0-3 map turned both into UNKNOWN, which
+            # the task-list API then filtered out (invisible ghost rows).
+            # Canceling/Failing are transient, so they map to RUNNING.
+            _INT_MAP = {
+                0: cls.PENDING,
+                1: cls.RUNNING,
+                2: cls.DONE,
+                3: cls.RUNNING,
+                4: cls.FAILED,
+                5: cls.FAILED,
+                6: cls.RUNNING,
+                7: cls.FAILED,
+            }
             return _INT_MAP.get(state, cls.UNKNOWN)
 
         _STR_MAP = {

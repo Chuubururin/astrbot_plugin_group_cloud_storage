@@ -235,12 +235,26 @@ async def api_netdisk_copy(s: Services) -> dict:
 
     try:
         await s.bridge.copy(src_dir, dst_dir, names)
-        return json_response(
-            {"ok": True, "src_dir": src_dir, "dst_dir": dst_dir, "copied": names}
-        )
     except Exception as e:
         logger.warning(f"[webapi] copy failed: {e}", exc_info=True)
         return error_response(f"copy failed: {e}", status_code=500)
+    # Post-copy size verification (advisory; catches silent truncation on
+    # same-storage copies — OpenList v4.2.5 live finding). A failing check
+    # must not fail the copy response itself.
+    try:
+        verification = await s.bridge.verify_copy(src_dir, dst_dir, names)
+    except Exception as e:
+        logger.warning(f"[webapi] copy verification failed: {e}", exc_info=True)
+        verification = []
+    return json_response(
+        {
+            "ok": True,
+            "src_dir": src_dir,
+            "dst_dir": dst_dir,
+            "copied": names,
+            "verification": verification,
+        }
+    )
 
 
 async def api_netdisk_remove_empty_dirs(s: Services) -> dict:

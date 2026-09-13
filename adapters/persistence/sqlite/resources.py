@@ -189,15 +189,23 @@ class ResourcesMixin(StorePart):
                         chunk,
                     )
                     n += cur.rowcount
-                    # Successor identity carry-over: a newly listed file_id for
-                    # a known (group, name) adopts the deleted composition
-                    # row's meta (volume/composition identity survives the
-                    # session-scoped file_id churn).
-                    self._inherit_composition_identity(conn, items)
                     conn.commit()
                 except Exception:
                     conn.rollback()
                     raise
+            # Successor identity carry-over: a newly listed file_id for
+            # a known (group, name) adopts the deleted composition
+            # row's meta (volume/composition identity survives the
+            # session-scoped file_id churn). Runs once AFTER every chunk:
+            # mid-loop it would UPDATE successor rows that are not
+            # inserted yet (later chunks) while the predecessor is
+            # already deleted -- losing the composition meta.
+            try:
+                self._inherit_composition_identity(conn, items)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             return n
 
         result = await self._conn.exec(_do)

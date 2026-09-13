@@ -88,7 +88,20 @@ class LifecycleManager:
                 await self.kernel.services.task_control.reconcile()
                 await self.queue.start()
                 self._inited = True
-                await self.dlserver.start()
+                # dlserver is an optional service (default off): a start
+                # failure (e.g. port occupied) must not wedge the runtime —
+                # with _inited already True a raised init() would make every
+                # later call take the idempotent short-circuit while bot
+                # resolution / periodic scan / bridge recovery never started.
+                # Same fail-open stance as the empty-token branch inside
+                # dlserver.start() (warn loudly, keep the plugin alive).
+                try:
+                    await self.dlserver.start()
+                except Exception as e:
+                    logger.error(
+                        f"[group_cloud_storage] download server start failed "
+                        f"(plugin continues without it): {e}"
+                    )
                 await self.resolve_platform_bot()
                 await self.maybe_submit_scan()
                 self._known_accounts = {

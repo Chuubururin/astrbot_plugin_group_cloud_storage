@@ -99,27 +99,49 @@ class RecoveryMixin:
         except ExternalApiError as e:
             logger.warning(f"[bridge] pending_in convergence failed: {e.message}")
 
-        # If interval > 0 and tasks remain, start polling
-        if self._interval > 0:
-            remaining = await self._store.list_archive_map(
-                states=(BridgeTaskState.PENDING.value, BridgeTaskState.RUNNING.value),
-                direction="out",
-            )
-            if remaining:
-                self._ensure_poll_task()
+        # If tasks remain, re-arm the background converger: the poll loop
+        # when the interval allows, otherwise the bounded manual-mode sweep
+        # (_ensure_poll_task dispatches on interval). Without this the sweep
+        # only arms on the next bridge_out submission, so a task still in
+        # flight at restart would stay running/unknown until then.
+        remaining = await self._store.list_archive_map(
+            states=(BridgeTaskState.PENDING.value, BridgeTaskState.RUNNING.value),
+            direction="out",
+        )
+        if remaining:
+            self._ensure_poll_task()
 
     async def cancel(self, task_id: str) -> bool:
         """Cancel an OpenList task."""
         try:
-            return await self._client.task_cancel(task_id)
+            ok = await self._client.task_cancel(task_id)
         except ExternalApiError as e:
             logger.warning(f"[bridge] cancel failed: {e.message}")
             return False
+        if ok:
+            # The poll loop auto-stops when no unfinished tasks remain.
+            # Re-arm it AND re-enter the row into the poll set (pending):
+            # a row left as failed/unknown is not actionable, so the loop
+            # would self-stop without ever converging it (2026-09-12 live).
+            await self._store.update_archive_state_by_task(
+                task_id, BridgeTaskState.PENDING.value
+            )
+            self._ensure_poll_task()
+        return ok
 
     async def retry(self, task_id: str) -> bool:
         """Retry a failed OpenList task."""
         try:
-            return await self._client.task_retry(task_id)
+            ok = await self._client.task_retry(task_id)
         except ExternalApiError as e:
             logger.warning(f"[bridge] retry failed: {e.message}")
             return False
+        if ok:
+            # Same as cancel: flip the row back to pending so the re-armed
+            # poll loop tracks the re-run and reaches done/failed; the UI
+            # also reflects the retry immediately (read-your-writes).
+            await self._store.update_archive_state_by_task(
+                task_id, BridgeTaskState.PENDING.value
+            )
+            self._ensure_poll_task()
+        return ok

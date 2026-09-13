@@ -16,57 +16,9 @@ import { getIcon } from '../icons.js';
 import { formatTimeFull, escapeHtml } from '../utils/helpers.js';
 import { confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
-
-/** Undoable operation kinds (aligned with task_control._REVERSIBLE_KINDS). */
-const REVERSIBLE_KINDS = new Set(['move_file', 'replace_name', 'tags']);
-
-const STATE_FILTERS = [
-  { value: '', label: '全部状态' },
-  { value: 'pending', label: '排队中' },
-  { value: 'running', label: '运行中' },
-  { value: 'paused', label: '已暂停' },
-  { value: 'done', label: '已完成' },
-  { value: 'failed', label: '失败' },
-  { value: 'cancelled', label: '已取消' },
-];
-
-const STATE_LABEL = {
-  pending: '排队中',
-  running: '运行中',
-  paused: '已暂停',
-  retry: '重试中',
-  done: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-};
-
-const STATE_CLASS = {
-  pending: 'st-pending',
-  running: 'st-running',
-  paused: 'st-paused',
-  retry: 'st-running',
-  done: 'st-done',
-  failed: 'st-failed',
-  cancelled: 'st-failed',
-};
-
-/** Human-readable kind labels. */
-const KIND_LABEL = {
-  move_file: '移动文件',
-  replace_name: '改名',
-  delete: '删除',
-  file_scan: '文件扫描',
-  diff_file_scan: '差分扫描',
-  convert_volumes: '转分卷',
-  video_upload: '视频上传',
-  video_album: '视频相册',
-  image_album: '图片相册',
-  fetch: '抓取',
-  essence_save: '精华保存',
-  essence_delete: '精华删除',
-  netdisk_index: '网盘索引',
-  tags: '标签',
-};
+import {
+  REVERSIBLE_KINDS, STATE_FILTERS, STATE_LABEL, STATE_CLASS, KIND_LABEL,
+} from './task-labels.js';
 
 /**
  * Initialize the tasks view.
@@ -195,8 +147,8 @@ function renderTasks(tasks) {
       <td>${formatTimeFull(t.created_at)}</td>
       <td class="task-actions">
         ${t.state === 'paused' ? `<button class="btn-act" data-act="resume" data-id="${t.task_id}">继续</button>` : ''}
-        ${t.state === 'pending' || t.state === 'running' ? `<button class="btn-act" data-act="pause" data-id="${t.task_id}">暂停</button>` : ''}
-        ${t.state === 'pending' || t.state === 'running' || t.state === 'paused'
+        ${t.state === 'pending' || t.state === 'running' || t.state === 'retry' ? `<button class="btn-act" data-act="pause" data-id="${t.task_id}">暂停</button>` : ''}
+        ${t.state === 'pending' || t.state === 'running' || t.state === 'paused' || t.state === 'retry'
           ? `<button class="btn-act danger" data-act="interrupt" data-id="${t.task_id}">中断</button>` : ''}
         ${isReversible
           ? `<button class="btn-act primary" data-act="undo" data-id="${t.task_id}" title="撤销已完成的操作（仅 移动/改名/标签 支持）">撤销</button>`

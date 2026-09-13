@@ -62,6 +62,8 @@ export const API = {
     RECOMMEND_GROUP: 'files/recommend-group', // default upload target
     DISTRIBUTE: 'files/distribute',           // Target distribution
     FOLDER_CREATE: 'files/folder-create',     // create group folder (flat single-level)
+    FOLDER_RENAME: 'files/folder-rename',     // rename a group folder (folder_id + name)
+    FOLDER_DELETE: 'files/folder-delete',     // delete a group folder and its contents
   },
 
   // ---- Albums  ----
@@ -129,6 +131,14 @@ export const API = {
   SYNC_WITHERING: 'sync/withering',
   SYNC_STATUS: 'sync/status',
 
+  // ---- Database administration (POST-only; admin token in body,
+  // fail-closed when database_admin_token is not configured) ----
+  DB_HEALTH: 'database/health',
+  DB_INTEGRITY: 'database/integrity',
+  DB_BACKUPS: 'database/backups',
+  DB_BACKUP: 'database/backup',
+  DB_RESTORE: 'database/restore',
+
   // ---- Cross-cutting ----
   EVENTS: 'events',              // SSE stream (sole queue-state channel)
   ACCOUNTS: 'accounts',          // multi-account registry
@@ -136,44 +146,6 @@ export const API = {
   FETCH: 'fetch',                // URL ingest pipeline
   PREVIEW_POLICY: 'preview/policy',
   META_CLASSIFY: 'meta/classify' // 13-class extension table 
-};
-
-// ---- Frontend display dictionaries  ----
-
-/** 13-class file classification . */
-export const TYPE_LABELS = {
-  file: '文件',
-  album: '相册',
-  essence: '精华',
-  document: '文稿',
-  pdf: 'PDF',
-  spreadsheet: '表格',
-  slide: '幻灯片',
-  online_doc: '在线文档',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-  archive: '压缩包',
-  installer: '安装包',
-  flash: '闪传文件',
-  folder: '文件夹',
-  other: '其他',
-};
-
-/** Derived storage-state filter . */
-export const STORE_STATUS_LABELS = {
-  netdisk: '在网盘',
-  album: '在相册',
-  essence: '在精华消息',
-  none: '未下载',
-};
-
-/** Bridge transfer task states. */
-export const BRIDGE_STATE_LABELS = {
-  pending: '等待中',
-  running: '进行中',
-  done: '已完成',
-  failed: '失败',
 };
 
 /**

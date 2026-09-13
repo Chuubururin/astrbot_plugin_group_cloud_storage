@@ -129,6 +129,10 @@ class NetdiskService:
         ext_overrides = self._config.get("type_ext_overrides") or {}
         try:
             while pending:
+                # Cooperative checkpoint: pause/cancel take effect between
+                # directories (a running deep index stays governable from
+                # the task tab, matching the file_scan pattern)
+                await self._queue.pause_check(op)
                 dir_path = pending.pop(0)
                 page = 1
                 while True:

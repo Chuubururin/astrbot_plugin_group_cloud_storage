@@ -43,7 +43,7 @@ QQ 群原生云存储（群文件 / 群相册 / 精华消息）统一管理插�
 | `/csfiles [群号] [页]` | 文件列表 |
 | `/csfile <id> [群号]` | 文件详情 + 下载链接 |
 | `/cssave [群号] <标题> <正文>` | 保存文本为精华消息（自动分段） |
-| `/csfetch [群号] <URL> [文件名]` | 拉取外部文件到群文件（http/https/sftp） |
+| `/csfetch [群号] <URL> [文件名]` | 拉取外部文件到群文件（http/https/sftp/smb） |
 | `/csarchive [群号] <id或名> [--force]` | 转存文件到 OpenList 网盘 |
 | `/csbridge status\|cancel\|retry [任务ID]` | 网盘桥接任务管理 |
 | `/cshelp` | 帮助 |

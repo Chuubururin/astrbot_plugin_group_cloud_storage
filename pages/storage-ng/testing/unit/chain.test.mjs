@@ -136,6 +136,10 @@ test('chain: groups/order frontend body matches backend ordered_ids contract', (
   assert.ok(caseBody.includes("API.GROUPS.ORDER"), 'up/down posts to groups/order');
   assert.ok(caseBody.includes('ordered_ids'), 'frontend must send ordered_ids');
   assert.ok(!caseBody.includes("direction: act"), 'legacy direction body is the broken contract');
+  // 多选上/下移: 选择集是点击顺序而非位置顺序, 必须先按当前位置排序再
+  // 逐个相邻交换; 直接按点击序处理会让相邻选中项互相抵消（真机 bug）。
+  assert.ok(caseBody.includes('.sort('), 'up/down must sort selected ids by current position');
+  assert.ok(!caseBody.includes('ids.reverse()'), 'click-order reverse() processing is the broken behavior');
 
   const backend = fs.readFileSync(path.join(here, '../../../../webapi/groups.py'), 'utf8');
   const orderIdx = backend.indexOf('async def api_groups_order(s');

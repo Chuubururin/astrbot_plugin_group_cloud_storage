@@ -18,7 +18,10 @@ from urllib.parse import urljoin, urlsplit, unquote
 
 import httpx
 
-from adapters.external.base import assert_fetch_url_allowed, resolve_and_pin_ip
+from adapters.external.base import (
+    assert_fetch_host_allowed,
+    resolve_and_pin_ip,
+)
 from core.application.queue import OpQueue
 from core.config import PluginConfig
 from core.log import logger
@@ -127,9 +130,11 @@ class SmbAdapter(ProtocolAdapter):
         if not share:
             raise ValueError("smb url needs share: smb://host/share/path")
 
-        # SSRF protection: validate host before connecting
+        # SSRF protection: validate host before connecting. SMB has no
+        # http(s) URL, so use the host-only check (assert_fetch_url_allowed
+        # rejects non-http schemes outright).
         if not self._allow_private:
-            assert_fetch_url_allowed(f"smb://{target['host']}", allow_private=False)
+            assert_fetch_host_allowed(target["host"], allow_private=False)
 
         conn = SMBConnection(
             target["user"] or "guest",
@@ -147,6 +152,19 @@ class SmbAdapter(ProtocolAdapter):
             conn, share = self._conn(target)
             try:
                 _, _, path = target["path"].lstrip("/").partition("/")
+                # Size cap on every protocol (http enforces it while
+                # streaming): stat the remote file first so an oversized
+                # transfer is rejected before it can fill local disk. A
+                # server that refuses the attribute query falls through to
+                # the download_to post-check.
+                try:
+                    attrs = conn.getAttributes(share, path)
+                except Exception:
+                    attrs = None
+                if attrs is not None and attrs.file_size > self.max_bytes:
+                    raise ValueError(
+                        f"fetch exceeds max bytes ({self.max_bytes})"
+                    )
                 with dest.open("wb") as fh:
                     conn.retrieveFile(share, path, fh, timeout=int(self.timeout))
             finally:
@@ -180,9 +198,10 @@ class SftpAdapter(ProtocolAdapter):
         user = target["user"] or "anonymous"
         password = target["password"] if target["user"] else ""
 
-        # SSRF protection: validate host before connecting
+        # SSRF protection: validate host before connecting (host-only
+        # check; sftp:// cannot pass the http/https scheme whitelist).
         if not self._allow_private:
-            assert_fetch_url_allowed(f"sftp://{host}", allow_private=False)
+            assert_fetch_host_allowed(host, allow_private=False)
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
@@ -191,6 +210,11 @@ class SftpAdapter(ProtocolAdapter):
             # persisted per host so a later mismatch is rejected instead of
             # silently re-trusted (plain AutoAddPolicy never rejects).
             self._host_key_store.parent.mkdir(parents=True, exist_ok=True)
+            if not self._host_key_store.exists():
+                # paramiko HostKeys.load() raises FileNotFoundError on a
+                # missing file; seed an empty store so the first connection
+                # can record its key (TOFU) instead of failing outright.
+                self._host_key_store.touch()
             client.load_host_keys(str(self._host_key_store))
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         else:
@@ -210,6 +234,14 @@ class SftpAdapter(ProtocolAdapter):
             ssh, sftp = self._conn(target)
             try:
                 path = target["path"]
+                # Size cap on every protocol (see SmbAdapter): reject an
+                # oversized remote file before downloading it.
+                try:
+                    st = sftp.stat(path)
+                except Exception:
+                    st = None
+                if st is not None and st.st_size > self.max_bytes:
+                    raise ValueError(f"fetch exceeds max bytes ({self.max_bytes})")
                 sftp.get(path, str(dest))
             finally:
                 sftp.close()
@@ -281,4 +313,12 @@ class TransferService:
             adapter = self._adapter(t, _INGRESS_SCHEMES)
             if isinstance(adapter, HttpAdapter):
                 await asyncio.to_thread(adapter._resolve_url, t["url"])
-        return await self._adapter(t, _INGRESS_SCHEMES).get(t, dest)
+        adapter = self._adapter(t, _INGRESS_SCHEMES)
+        n = await adapter.get(t, dest)
+        # Protocol-neutral backstop: sftp/smb stream without a live byte
+        # counter, so a server that dodged the size pre-check still cannot
+        # smuggle an over-limit file into the ingest pipeline.
+        if n > adapter.max_bytes:
+            dest.unlink(missing_ok=True)
+            raise ValueError(f"fetch exceeds max bytes ({adapter.max_bytes})")
+        return n

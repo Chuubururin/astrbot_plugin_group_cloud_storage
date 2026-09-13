@@ -85,6 +85,64 @@ async def test_permanent_failure_marked():
 
 
 @pytest.mark.asyncio
+async def test_pause_visible_during_retry_backoff():
+    """回归：重试回退/重排队期间任务保持可控——pause 命中且恢复后跑完。
+
+    修复前 op 在重试窗口从 _pending/_ops_by_id 全部脱落，
+    pause_task 全程返回 "unknown"，任务页的 retry 行无法暂停。
+    """
+    failed = asyncio.Event()
+    calls = {"n": 0}
+
+    async def run(op: Op) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            failed.set()
+            raise RuntimeError("boom")
+
+    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=1.0)
+    await q.start()
+    tid = await q.submit("test")
+    await failed.wait()
+    await asyncio.sleep(0.1)  # worker 进入 backoff sleep（_pending 已回补）
+    assert q.pause_task(tid) == "queued"  # 修复前 "unknown"
+    assert q.resume_task(tid) == "resumed"
+    await _drain(q, 1)
+    assert calls["n"] == 2  # 失败一次 + 恢复后成功一次
+    st = await q.status()
+    assert st["recent"][0]["state"] == "ok"
+    await q.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_retry_backoff_sticks():
+    """回归：backoff sleep 内的取消不再被 finally 擦除——任务不会重跑。
+
+    修复前 finally 的 _cancelled.discard 会吞掉 sleep 期间落下的取消标记，
+    任务在用户取消后继续重试并完成。
+    """
+    failed = asyncio.Event()
+    calls = {"n": 0}
+
+    async def run(op: Op) -> None:
+        calls["n"] += 1
+        failed.set()
+        raise RuntimeError("boom")
+
+    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=1.0)
+    await q.start()
+    tid = await q.submit("test")
+    await failed.wait()
+    await asyncio.sleep(0.1)  # worker 进入 backoff sleep
+    assert q.cancel_task(tid) is True  # 修复前 False（op 不在任何索引里）
+    await _drain(q, 1)
+    assert calls["n"] == 1  # 取消后不重跑（修复前会继续重试 2 次）
+    st = await q.status()
+    assert st["recent"][0]["state"] == "cancelled"
+    await q.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_sse_events_flow():
     rec = _Recorder()
     q = OpQueue(rec.run, interval=0.0)
