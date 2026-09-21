@@ -62,14 +62,34 @@ class ExecutionMixin:
             self._workers.append(t)
             t.add_done_callback(self._respawn_worker)
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, timeout: float = 1.0) -> None:
         self._shutting_down = True
+        # Phase 1: issue cancel to all workers
         for w in self._workers:
             w.cancel()
+        # Phase 2: give workers a brief grace period to finish current handlers
+        if self._workers:
+            await asyncio.sleep(timeout)
+        # Phase 3: re-cancel workers that survived the grace period.
+        # A worker that was mid-handler when the first cancel() arrived
+        # absorbs the flag in the handler's except.CancelledError, then
+        # re-enters queue.get() — the first cancel is lost.  Re-issuing
+        # cancel hits a worker that now *has* a _fut_waiter, so it
+        # actually raises CancelledError.
+        for w in self._workers:
+            if not w.done():
+                w.cancel()
+        # Phase 4: bounded drain — each worker gets at most 5 s
         for w in self._workers:
             try:
-                await w
-            except asyncio.CancelledError:
+                await asyncio.wait_for(w, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                if not w.done():
+                    logger.warning(
+                        f"[queue] worker {w.get_name()} survived two "
+                        f"cancel rounds; abandoning"
+                    )
+            except Exception:
                 pass
         self._workers = []
 
@@ -84,6 +104,9 @@ class ExecutionMixin:
     async def _worker_loop_hi(self) -> None:
         while True:
             op = await self._q_hi.get()
+            if self._shutting_down:
+                self._q_hi.task_done()
+                return
             if op.task_id in self._paused:  # pause hold: wait for resume (ledger records paused)
                 if op.cancel or op.task_id in self._cancelled:
                     # Interrupted between pause_task() and this dequeue: the
@@ -107,6 +130,9 @@ class ExecutionMixin:
     async def _worker_loop(self) -> None:
         while True:
             op = await self._q.get()
+            if self._shutting_down:
+                self._q.task_done()
+                return
             if op.task_id in self._paused:  # pause hold: wait for resume (ledger records paused)
                 if op.cancel or op.task_id in self._cancelled:
                     # Interrupted between pause_task() and this dequeue: the
