@@ -154,6 +154,54 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
                 )
         return results
 
+    # -- Startup preflight --
+
+    async def preflight_dst(self) -> bool:
+        """Check that ``openlist_dst_dir`` lives under an OpenList mount.
+
+        Walks the destination root's ancestor chain and reports the first
+        prefix that no mount owns.  The plugin cannot fix the configuration,
+        but it can move the failure from "first user transfer" (where the
+        queue classifies it as a retriable IO error, backs off three times
+        and then fails permanently - a config error never heals) to "plugin
+        load", with a log that says what to change.
+
+        Read-only: only ``fs/get`` probes, nothing is created.  Returns True
+        when the chain is addressable, False otherwise.  Never raises.
+        """
+        dst = (self._dst_dir or "").strip().rstrip("/")
+        if not dst:
+            return True
+        parts = [seg for seg in dst.split("/") if seg]
+        # Shallowest first: the first prefix no mount owns *is* the
+        # misconfiguration, and stopping there keeps the healthy case at a
+        # single probe (a mounted root answers for its whole subtree).
+        for depth in range(1, len(parts) + 1):
+            prefix = "/" + "/".join(parts[:depth])
+            try:
+                ok, reason = await self._client.probe_mount(prefix)
+            except Exception as e:
+                logger.warning(f"[bridge] preflight probe {prefix!r} failed: {e}")
+                return True
+            if not ok:
+                logger.error(
+                    f"[bridge] preflight FAILED: openlist_dst_dir {dst!r} is not "
+                    f"under any OpenList mount - {prefix!r} reports {reason!r}. "
+                    f"Every bridge_out transfer will fail until this is fixed "
+                    f"(OpenList's mkdir cannot create a mount point). Fix: create "
+                    f"a storage in OpenList whose mount_path is a parent of "
+                    f"{dst!r}, or point openlist_dst_dir at an existing mount "
+                    f"(e.g. /smb/bridge-test)."
+                )
+                return False
+            # A mount owns this prefix, so the whole subtree is addressable
+            # (mkdir creates the remaining directories inside it).
+            logger.info(
+                f"[bridge] preflight ok: openlist_dst_dir {dst!r} resolves under "
+                f"mount prefix {prefix!r}"
+            )
+            return True
+
     # -- Internal helpers --
 
     def _fail(self, op, reason: str) -> None:

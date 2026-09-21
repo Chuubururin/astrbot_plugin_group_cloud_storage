@@ -84,7 +84,9 @@ class PollingMixin:
         # numeric name (Issue #8 / bad-link #18).
         name = res["name"] or str(rid)
         raw_url = self._dlserver.download_url(gid, rid)
-        url = self._dlserver.register_proxy(raw_url, name)
+        url = self._dlserver.register_proxy(
+            raw_url, name, allow_private=getattr(self._dlserver, "allow_private", False)
+        )
 
         # Step 7: Control plane submit + ledger
         try:

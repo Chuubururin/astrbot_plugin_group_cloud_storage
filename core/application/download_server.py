@@ -11,7 +11,8 @@ Semantics (distinct from "egress = push to an external target"):
   locally and streamed back. `GET /download?staged=<token>&token` serves a
   registered staged file (e.g. an essence text exported to a .txt)
 - SFTP: paramiko virtual filesystem (/<group_id>/<filename>); reads pull bytes
-  from the cloud on demand; /staged/<name> serves staged files. Optional dep.
+  from the cloud on demand and reuse the cache on later opens;
+  /staged/<name> serves staged files. Optional dep.
 - SMB: impacket smbserver (optional dependency) sharing a cache directory;
   entries materialize on demand via ensure_local()/register_staged()
 """
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import os
+import inspect
 import shutil
 import socket
 import tempfile
@@ -32,16 +33,50 @@ from typing import Awaitable, Callable
 from urllib.parse import parse_qs, quote, urlparse
 
 from core.application.download_proxy import ProxyRegistry, serve_proxy, serve_staged
+from core.application.download_server_io import (
+    cleanup_recon,
+    collect_resources,
+    join_sftp_connections,
+    serve_local_file,
+    start_sftp_server,
+    start_smb_server,
+    stop_smb_server,
+)
 from core.config import PluginConfig
 from core.log import logger
 from ports.meta_store import MetaStorePort
 
-_STREAM_CHUNK = 1 << 16
+
+# L7: an SFTP client stats and then opens the same path, and stat() used to
+# page the whole group (page_size=500, max_pages=200 -> up to 200 SQL
+# queries per call). Hits are cached briefly; the targeted keyword query
+# below usually answers on the first round-trip.
+_ROW_CACHE_TTL = 5.0
+_LOOKUP_PAGE = 50
 
 
 def _safe_header_name(value: str) -> str:
     """Strip CR/LF from a header-bound string (filename/URL): no header injection."""
     return value.replace("\r", "").replace("\n", "")
+
+
+def _close_socket(sock) -> None:
+    """Wake a peer thread blocked in ``accept()`` and release the port.
+
+    ``close()`` alone does not do it: the listener stays alive, the port
+    stays bound, and a reloaded instance fails to bind - the M12 symptom
+    the SFTP branch hit first. Shared by the SFTP and SMB teardown paths.
+    """
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except Exception:
+        pass
 
 
 class DownloadServerService:
@@ -61,11 +96,13 @@ class DownloadServerService:
         self.sftp_port = int(cfg.get("download_sftp_port", 0) or 0)
         self.smb_port = int(cfg.get("download_smb_port", 0) or 0)
         self.token = str(cfg.get("download_token", "") or "")
+        self.allow_private = bool(cfg.get("fetch_allow_private_address", False))
         self._download_info = download_info
         self._http_server: asyncio.AbstractServer | None = None
         self._sftp_thread: threading.Thread | None = None
         self._sftp_server = None
         self._sftp_sock: socket.socket | None = None
+        self._smb_sock: socket.socket | None = None
         self._smb_thread: threading.Thread | None = None
         self._smb_server = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -80,6 +117,7 @@ class DownloadServerService:
         # Staged-file registry: token -> {path, name} (essence text exports
         # and other host-generated artifacts served over http/sftp)
         self._staged: dict[str, dict] = {}
+        self._row_cache: dict[tuple[str, str], tuple[float, dict]] = {}
         # Remote-URL proxy registry (bad-link #18: Content-Disposition
         # injection so offline download stores the real filename)
         self._proxy_registry = ProxyRegistry()
@@ -101,9 +139,11 @@ class DownloadServerService:
             f"{self.http_base()}/download?group={group_id}&id={id}&token={self.token}"
         )
 
-    def register_proxy(self, url: str, name: str) -> str:
+    def register_proxy(self, url: str, name: str, *, allow_private: bool = False) -> str:
         """Register a remote URL under a fixed name; returns a proxied URL."""
-        return self._proxy_registry.register(url, name, self.http_base(), self.token)
+        return self._proxy_registry.register(
+            url, name, self.http_base(), self.token, allow_private=allow_private
+        )
 
     def register_staged(self, path: str | Path, name: str) -> dict:
         """Register a local file as a downloadable artifact; returns its
@@ -177,6 +217,10 @@ class DownloadServerService:
                     if not chunk:
                         break
                     fout.write(chunk)
+            # The reassembled source is disposable once it sits in the share
+            # directory: download_info() produces a fresh file per call, so
+            # nothing else can reference it (M8).
+            cleanup_recon(sp)
 
         try:
             await asyncio.to_thread(_copy)
@@ -193,13 +237,36 @@ class DownloadServerService:
             "password": self._sftp_auth[1],
         }
 
+    def smb_credentials(self) -> tuple[str, str]:
+        """Fixed user + download_token as the share password: the SMB channel
+        authenticates with the same pair as SFTP (M14)."""
+        return self._sftp_auth
+
     # ---------- Cross-thread calls (SFTP thread -> plugin main loop) ----------
 
     def _run_in_loop(self, coro, timeout: float = 180.0):
         """Cross-thread call: run a coroutine on the plugin's main event loop
-        (SFTP thread -> asyncio)."""
+        (SFTP thread -> asyncio).
+
+        ``coro`` is either a coroutine object or a zero-argument callable
+        returning one; ``asyncio.run_coroutine_threadsafe`` only accepts the
+        former. A callable used to be passed straight through (or, worse, a
+        misspelled call site passed nothing awaitable at all), and because the
+        returned future never completes when no task was ever scheduled, the
+        failure surfaced 180s later as a bare TimeoutError rather than a
+        TypeError at the offending line -- _find_row's caller then swallowed it
+        and reported SFTP_NO_SUCH_FILE for every file. Normalise here so both
+        shapes are safe and a genuine mistake fails fast.
+        """
         if self._loop is None:
             raise RuntimeError("dlserver loop not ready")
+        if callable(coro) and not inspect.iscoroutine(coro):
+            coro = coro()
+        if not inspect.iscoroutine(coro):
+            raise TypeError(
+                f"_run_in_loop expects a coroutine or a callable returning one, "
+                f"got {type(coro).__name__}"
+            )
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout=timeout)
 
@@ -239,18 +306,30 @@ class DownloadServerService:
             except Exception:
                 pass
             self._sftp_server = None
-        if self._sftp_sock is not None:
-            try:
-                self._sftp_sock.close()
-            except Exception:
-                pass
-            self._sftp_sock = None
-        if self._smb_server is not None:
-            try:
-                self._smb_server.stop()
-            except Exception:
-                pass
-            self._smb_server = None
+        _close_socket(self._sftp_sock)
+        self._sftp_sock = None
+        # Accept loop stopped: join live sessions so no handler outlives the
+        # service (M20).
+        join_sftp_connections(self)
+        if self._sftp_thread is not None and self._sftp_thread.is_alive():
+            self._sftp_thread.join(timeout=2.0)
+        # SMB rides raw socketserver, not asyncio: there is no wait_closed()
+        # counterpart. stop() is not a teardown - it calls server_close()
+        # (a no-op on BaseServer) and never sets the __shutdown_request flag
+        # that serve_forever() polls, while the SMB thread is not a daemon.
+        # The old stop() + join(2.0) therefore always burned the full timeout
+        # and left the instance alive with the port still bound (L7, the M12
+        # twin that the SFTP branch had already fixed for itself).
+        stop_smb_server(self)
+        _close_socket(self._smb_sock)
+        self._smb_sock = None
+        # Let the SMB thread leave start() before the cache root is removed
+        # below: deleting the share directory from under a live server is
+        # exactly what the local-variable instance used to allow (M12).
+        # server_close() has already woken the thread, so this join now
+        # returns promptly instead of timing out.
+        if self._smb_thread is not None and self._smb_thread.is_alive():
+            self._smb_thread.join(timeout=2.0)
         # Remove the private cache root created in __init__ (mkdtemp is ours
         # to clean up, per the tempfile contract).
         if getattr(self, "_cache_root", None) is not None:
@@ -273,6 +352,11 @@ class DownloadServerService:
                 await self._reply(writer, 400, b"bad request")
                 return
             method, raw_path = parts[0], parts[1]
+            headers = {}
+            for hline in request.split("\r\n")[1:]:
+                hkey, _, hval = hline.partition(":")
+                if hkey:
+                    headers[hkey.strip().lower()] = hval.strip()
             parsed = urlparse(raw_path)
             q = parse_qs(parsed.query)
             if parsed.path == "/health":
@@ -319,35 +403,34 @@ class DownloadServerService:
                 return
             name = _safe_header_name(name)
             src = _safe_header_name(str(src))  # OneBot URL -> raw Location header
+            # src arrives already encoded for the reply head: any inline comment
+            # placed between this statement and Path(src) is consumed as the
+            # expression (L1) - use a block comment only when needed.
             src_path = Path(src)
             if not src_path.exists():
-                # Single file: 302 redirect to the QQ CDN direct link
-                # (zero proxy load)
+                # Single file: the target is a live CDN link, not a local
+                # path. A bare 302 to that link carries no Content-
+                # Disposition, and a QQ CDN URL ends in a spec segment
+                # (/0 /400 /800), so OpenList fell back to the URL tail and
+                # stored the file under a numeric name (Issue #8). Wrap it in
+                # the proxy registry instead and 302 to *our* proxy URL:
+                # OpenList follows the redirect and hits serve_proxy(), which
+                # answers with a proper Content-Disposition. The body now
+                # relays through this process -- the accepted trade for a
+                # correct filename.
+                proxied = self.register_proxy(src, name, allow_private=self.allow_private)
                 body = (
-                    f"HTTP/1.1 302 Found\r\nLocation: {src}\r\n"
+                    f"HTTP/1.1 302 Found\r\nLocation: {proxied}\r\n"
                     f"Content-Length: 0\r\nConnection: close\r\n\r\n"
                 ).encode("latin-1")
                 writer.write(body)
                 await writer.drain()
                 writer.close()
                 return
-            # Volumes/videos: stream the locally reassembled file
-            total = src_path.stat().st_size
-            head = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/octet-stream\r\n"
-                f"Content-Length: {total}\r\n"
-                f"Content-Disposition: attachment; filename*=UTF-8''{quote(name)}\r\n"
-                "Connection: close\r\n\r\n"
-            ).encode("latin-1")
-            writer.write(head)
-            with src_path.open("rb") as fh:
-                while True:
-                    chunk = fh.read(_STREAM_CHUNK)
-                    if not chunk:
-                        break
-                    writer.write(chunk)
-                    await writer.drain()
+            # Volumes/videos: stream the locally reassembled file with byte
+            # range support (Accept-Ranges / 206 / 416); the recon_* source
+            # is reclaimed once the body is on the wire.
+            await serve_local_file(writer, src_path, name, headers.get("range"))
         except Exception as e:
             logger.warning(f"[dlserver] http error: {e}")
             try:
@@ -383,280 +466,49 @@ class DownloadServerService:
     # ---------- SFTP (paramiko virtual filesystem: /<group_id>/<filename>) ----------
 
     def _find_row(self, group: str, name: str) -> dict:
-        from core.domain.sync import ResourceQuery
+        """Resolve one file row without paging the whole group (L7).
+
+        ``collect_resources`` walks every page (a group can hold more rows
+        than a single page returns), so every SFTP stat/open could cost
+        hundreds of SQL queries. The store's keyword filter is a superset of
+        the exact name match, so ask for that first and fall back to the full
+        scan only when it misses. Hits are cached for a few seconds because a
+        client stats and then opens the same path.
+        """
+        key = (group, name)
+        now = time.monotonic()
+        hit = self._row_cache.get(key)
+        if hit is not None and now - hit[0] < _ROW_CACHE_TTL:
+            return dict(hit[1])
 
         async def _lookup():
-            page = await self.store.query_resources(
-                ResourceQuery(group_id=group, page_size=500)
+            from core.domain.sync import ResourceQuery
+
+            result = await self.store.query_resources(
+                ResourceQuery(
+                    group_id=group, keyword=name, page_size=_LOOKUP_PAGE
+                )
             )
-            for it in page.items:
+            for it in list(getattr(result, "items", None) or []):
+                if it.name == name:
+                    return {"id": it.id, "size": it.size}
+            for it in await collect_resources(self.store, group):
                 if it.name == name:
                     return {"id": it.id, "size": it.size}
             raise FileNotFoundError(name)
 
-        return self._run_in_loop(_lookup)
+        # The argument is a coroutine OBJECT built here and handed to the
+        # loop thread (see _run_in_loop below).
+        row = self._run_in_loop(_lookup())
+        if len(self._row_cache) > 1024:  # bounded: a long-lived service
+            self._row_cache.clear()
+        self._row_cache[key] = (now, dict(row))
+        return row
 
     def _start_sftp(self) -> None:
-        try:
-            import paramiko
-        except ImportError:
-            logger.warning(
-                "[dlserver] paramiko not installed; sftp disabled "
-                "(pip install paramiko)"
-            )
-            return
-
-        from paramiko import SFTP_NO_SUCH_FILE, SFTP_FAILURE
-        from paramiko import SFTP_PERMISSION_DENIED, SFTP_OP_UNSUPPORTED
-        from paramiko.sftp_server import SFTPServer
-
-        svc = self
-        # Fresh ephemeral host key per boot: read-only service, key re-accept
-        # after restart is acceptable.
-        host_key = paramiko.RSAKey.generate(2048)
-
-        class _ServerInterface(paramiko.ServerInterface):
-            def get_allowed_auths(self, username):
-                return "password"
-
-            def check_auth_password(self, username, password):
-                # compare_digest on UTF-8 bytes: constant time, no TypeError
-                # on non-ASCII input (str compare_digest rejects it).
-                a0, a1 = (s.encode("utf-8") for s in svc._sftp_auth)
-                u = str(username or "").encode("utf-8")
-                p = str(password or "").encode("utf-8")
-                ok = hmac.compare_digest(u, a0) and hmac.compare_digest(p, a1)
-                return paramiko.AUTH_SUCCESSFUL if ok else paramiko.AUTH_FAILED
-
-            def check_channel_shell_request(self, channel):
-                return False
-
-            def check_channel_pty_request(
-                self, channel, term, width, height, pixelwidth, pixelheight, modes
-            ):
-                return False
-
-        class _SFTPInterface(paramiko.SFTPServerInterface):
-            """Read-only virtual FS: /<group_id>/<filename> plus /staged/<token>_<name>;
-            cloud content materializes to the cache directory on first open."""
-
-            def _resolve(self, path: str) -> dict | None:
-                parts = [p for p in path.split("/") if p]
-                if len(parts) == 2 and parts[0] == "staged":
-                    token = parts[1].split("_", 1)[0]
-                    entry = svc._staged.get(token)
-                    if not entry or not Path(entry["path"]).exists():
-                        return None
-                    return {
-                        "staged": token,
-                        "path": entry["path"],
-                        "name": entry["name"],
-                        "size": Path(entry["path"]).stat().st_size,
-                    }
-                if len(parts) != 2:
-                    return None
-                group, name = parts
-                try:
-                    row = svc._find_row(group, name)
-                except FileNotFoundError:
-                    return None
-                return {
-                    "group": group,
-                    "name": name,
-                    "id": row["id"],
-                    "size": int(row.get("size") or 0),
-                }
-
-            def list_folder(self, path: str):
-                parts = [p for p in path.split("/") if p]
-                if not parts:
-                    async def _groups():
-                        groups = await svc.store.list_groups()
-                        entries = []
-                        for g in groups:
-                            info = paramiko.SFTPAttributes()
-                            info.filename = str(g.group_id)
-                            info.st_mode = 0o40555  # dr-xr-xr-x
-                            entries.append(info)
-                        if svc._staged:
-                            info = paramiko.SFTPAttributes()
-                            info.filename = "staged"
-                            info.st_mode = 0o40555
-                            entries.append(info)
-                        return entries
-
-                    try:
-                        return svc._run_in_loop(_groups())
-                    except Exception:
-                        return []
-                if parts[0] == "staged" and len(parts) == 1:
-                    entries = []
-                    for token, entry in list(svc._staged.items()):
-                        info = paramiko.SFTPAttributes()
-                        info.filename = f"{token}_{entry['name']}"
-                        try:
-                            info.st_size = Path(entry["path"]).stat().st_size
-                        except OSError:
-                            continue
-                        entries.append(info)
-                    return entries
-                if len(parts) == 1:
-                    async def _files():
-                        from core.domain.sync import ResourceQuery
-
-                        page = await svc.store.query_resources(
-                            ResourceQuery(group_id=parts[0], page_size=500)
-                        )
-                        entries = []
-                        for it in page.items:
-                            info = paramiko.SFTPAttributes()
-                            info.filename = it.name
-                            info.st_size = it.size
-                            entries.append(info)
-                        return entries
-
-                    try:
-                        return svc._run_in_loop(_files())
-                    except Exception:
-                        return []
-                return []
-
-            def stat(self, path: str):
-                info = self._resolve(path)
-                if info is None:
-                    return SFTP_NO_SUCH_FILE
-                attrs = paramiko.SFTPAttributes()
-                attrs.st_size = info.get("size") or 0
-                attrs.st_mode = 0o100644  # -rw-r--r--
-                return attrs
-
-            def lstat(self, path: str):
-                return self.stat(path)
-
-            def open(self, path: str, flags: int, attr):
-                info = self._resolve(path)
-                if info is None:
-                    return SFTP_NO_SUCH_FILE
-                try:
-                    if info.get("staged"):
-                        fh = Path(info["path"]).open("rb")
-                    else:
-                        src, _ = svc._run_in_loop(
-                            svc._download_info(info["group"], info["id"])
-                        )
-                        sp = Path(src)
-                        cache = svc._cache_dir / (
-                            f"{info['group']}_{info['id']}_{info['name']}"
-                        )
-                        if not sp.exists():
-                            # Cloud direct link (from the cloud API) streamed
-                            # to a cache file; validate + refuse redirects
-                            # like every other outbound fetch (SSRF).
-                            import httpx as _hx
-
-                            def _fetch():
-                                from adapters.external.base import assert_fetch_url_allowed
-                                assert_fetch_url_allowed(src, allow_private=False)
-                                tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
-                                try:
-                                    with _hx.stream(
-                                        "GET", src, follow_redirects=False,
-                                        timeout=180.0,
-                                    ) as resp:
-                                        if resp.is_redirect:
-                                            raise ValueError("download server: redirect blocked")
-                                        resp.raise_for_status()
-                                        with tmp.open("wb") as out:
-                                            for chunk in resp.iter_bytes(chunk_size=_STREAM_CHUNK):
-                                                out.write(chunk)
-                                    os.replace(tmp, cache)
-                                finally:
-                                    tmp.unlink(missing_ok=True)
-
-                            svc._run_in_loop(asyncio.to_thread(_fetch))
-                        else:
-                            tmp = cache.with_name(
-                                cache.name + f".{uuid.uuid4().hex[:8]}.part"
-                            )
-                            try:
-                                with sp.open("rb") as fin, tmp.open("wb") as out:
-                                    shutil.copyfileobj(fin, out, _STREAM_CHUNK)
-                                os.replace(tmp, cache)
-                            finally:
-                                tmp.unlink(missing_ok=True)
-                        fh = cache.open("rb")
-                    # paramiko contract: SFTPHandle whose `readfile` delegates
-                    # read()/close() to the python file object.
-                    handle = paramiko.SFTPHandle()
-                    handle.readfile = fh
-                    return handle
-                except Exception as e:
-                    logger.debug(f"[dlserver] sftp open failed: {e}")
-                    return SFTP_FAILURE
-
-            def remove(self, path: str):
-                return SFTP_PERMISSION_DENIED
-
-            def rename(self, oldpath: str, newpath: str):
-                return SFTP_PERMISSION_DENIED
-
-            def mkdir(self, path: str, attr):
-                return SFTP_PERMISSION_DENIED
-
-            def rmdir(self, path: str):
-                return SFTP_PERMISSION_DENIED
-
-            def chattr(self, path: str, attr):
-                return SFTP_PERMISSION_DENIED
-
-            def symlink(self, target_path: str, path: str):
-                return SFTP_PERMISSION_DENIED
-
-            def readlink(self, path: str):
-                return SFTP_OP_UNSUPPORTED
-
-        def _serve():
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind((svc.host, svc.sftp_port))
-                sock.listen(100)
-                svc._sftp_sock = sock
-                logger.info(f"[dlserver] sftp listening on :{svc.sftp_port}")
-                while True:
-                    try:
-                        client_sock, _addr = sock.accept()
-                    except OSError:
-                        break  # socket closed by shutdown()
-                    transport = paramiko.Transport(client_sock)
-                    transport.local_version = "SSH-2.0-AstrBot-SFTP"
-                    try:
-                        transport.add_server_key(host_key)
-                        # Subsystem negotiation: the transport starts the
-                        # SFTP subsystem (SFTPServer runs the session loop)
-                        # when the client opens an "sftp" channel.
-                        transport.set_subsystem_handler(
-                            "sftp", SFTPServer, sftp_si=_SFTPInterface
-                        )
-                        transport.start_server(server=_ServerInterface())
-                        # Block until the session ends; each connection gets
-                        # its own thread so one slow client cannot starve
-                        # the accept loop.
-                        while transport.is_active():
-                            time.sleep(0.2)
-                    except Exception as e:
-                        logger.debug(f"[dlserver] sftp session error: {e}")
-                    finally:
-                        try:
-                            transport.close()
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(f"[dlserver] sftp serve loop failed: {e}")
-
-        self._sftp_thread = threading.Thread(target=_serve, daemon=True)
-        self._sftp_thread.start()
-        logger.info(f"[dlserver] sftp on :{self.sftp_port}")
+        """Start the paramiko virtual FS (implementation lives in
+        download_server_io: this module sits on the 700-line gate)."""
+        start_sftp_server(self)
 
     # ---------- SMB (impacket smbserver, optional dependency) ----------
 
@@ -668,29 +520,4 @@ class DownloadServerService:
         materialized on demand (ensure_local / register_staged write into
         the shared directory before the user opens the UNC path).
         """
-        if not self.smb_available:
-            logger.warning(
-                "[dlserver] impacket not installed; smb disabled "
-                "(pip install impacket)"
-            )
-            return
-        svc = self
-
-        def _serve():
-            try:
-                from impacket.smbserver import SimpleSMBServer
-
-                server = SimpleSMBServer(
-                    listenAddress=svc.host, listenPort=svc.smb_port
-                )
-                server.addShare(
-                    svc.smb_share(), svc._smb_dir.as_posix(), "cloud download share"
-                )
-                server.setLogHim()
-                server.start()  # blocking
-            except Exception as e:
-                logger.warning(f"[dlserver] smb serve loop failed: {e}")
-
-        self._smb_thread = threading.Thread(target=_serve, daemon=True)
-        self._smb_thread.start()
-        logger.info(f"[dlserver] smb share \\\\{self.host}\\{self.smb_share()} on :{self.smb_port}")
+        start_smb_server(self)

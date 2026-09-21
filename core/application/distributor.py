@@ -231,7 +231,10 @@ class DistributorService:
             # 语义），落盘名会变成 "800"。经 dlserver 代理重发，由
             # Content-Disposition 注入真实文件名。
             if self.dlserver and getattr(self.dlserver, "enabled", False):
-                proxied = self.dlserver.register_proxy(url, name or "album_media")
+                proxied = self.dlserver.register_proxy(
+                    url, name or "album_media",
+                    allow_private=getattr(self.dlserver, "allow_private", False),
+                )
                 if proxied:
                     url = proxied
             else:
@@ -625,14 +628,18 @@ class DistributorService:
                 else:
                     w += font_size * 55 // 100
             return w
-        max_line_px = max((_line_pixel_width(line) for line in lines), default=200)
+        drawn = lines[:200]  # cap at 200 lines
+        max_line_px = max((_line_pixel_width(line) for line in drawn), default=200)
         img_width = max(400, min(max_line_px + padding * 2, 1200))
-        img_height = max(100, len(lines) * line_height + padding * 2)
+        # Height follows the lines actually drawn: sizing it from len(lines)
+        # allocated ~430MB for a 5000-line essence (1200x120040) and every
+        # row past the cap was blank anyway (M17).
+        img_height = max(100, len(drawn) * line_height + padding * 2)
         img = Image.new("RGB", (img_width, img_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(img)
         font = _load_render_font(ImageFont, font_size)
         y = padding
-        for line in lines[:200]:  # cap at 200 lines
+        for line in drawn:
             draw.text((padding, y), line[:200], fill=(0, 0, 0), font=font)
             y += line_height
         img.save(img_path.as_posix(), "PNG")

@@ -24,7 +24,7 @@ from core.application.files.converter import ConverterService
 from core.application.catalog import (
     ResourceQueryService, StatsService, SearchKV, StoragePlanner,
 )
-from core.application.transfer import TransferService
+from core.application.transfer import TransferService, download_endpoint_origins
 from core.application.distributor import DistributorService
 from core.application.sync import ResourceSyncService, GroupScanService
 from core.application.queue import OpQueue, TaskControlService
@@ -118,6 +118,10 @@ def build_components(
         tmp_dir=data_dir / "tmp",
         config=cfg,
         download_info=ops.download_info,
+        # Cloud-to-cloud distribution fetches our own download-server direct
+        # link; that endpoint is allow-listed here so the SSRF gate does not
+        # reject it (it stays closed for every other private address).
+        trusted_origins=download_endpoint_origins(cfg),
     )
     converter = ConverterService(tmp_dir=data_dir / "tmp")
     ingest = CloudIngestService(
@@ -129,6 +133,7 @@ def build_components(
         config=cfg,
         transfer=transfer,
         converter=converter,
+        sync_locks=sync_locks,
     )
     dlserver = DownloadServerService(
         store,
@@ -144,34 +149,62 @@ def build_components(
         fileops=ops,
     )
 
-    # OpenList bridge: only build if enabled
+    # OpenList bridge: only build if enabled.
+    #
+    # Fail-open on purpose: OpenListClient.__init__ runs validate_base_url
+    # (SSRF scheme/host/DNS checks) and BridgeService/NetdiskService wire it
+    # up.  A rejection there used to propagate out of _init_runtime -> Main.__init__,
+    # so AstrBot could not construct the plugin and ALL 8 command handlers plus
+    # the aiocqhttp event hook vanished - collateral damage from a netdisk-only
+    # misconfiguration.  A broken netdisk must cost the netdisk, nothing else.
+    #
+    # Leaving all three as None is a state the runtime already handles: the
+    # dispatcher answers bridge/netdisk ops with "bridge service not
+    # configured" / "netdisk service not configured" (LOCAL_ERROR, the honest
+    # answer), the command handlers answer "Bridge service not configured
+    # (openlist_enabled=false).", and LifecycleManager.terminate() guards the
+    # close with `if self.openlist_client is not None`.  Same stance as
+    # lifecycle.init()'s isolated dlserver.start() - log loudly, keep going.
     bridge = None
     netdisk = None
     openlist_client = None
     if cfg.openlist_enabled and cfg.openlist_base_url:
-        openlist_client = OpenListClient(
-            base_url=cfg.openlist_base_url,
-            username=cfg.openlist_username,
-            password=cfg.openlist_password,
-            token=cfg.openlist_token,
-            timeout=cfg.openlist_timeout_sec,
-            allow_private_address=cfg.openlist_allow_private_address,
-        )
-        bridge = BridgeService(
-            client=openlist_client,
-            store=store,
-            config=cfg,
-            queue=queue,
-            api=api,
-            ingest=ingest,
-            dlserver=dlserver,
-        )
-        netdisk = NetdiskService(
-            client=openlist_client,
-            store=store,
-            config=cfg,
-            queue=queue,
-        )
+        try:
+            openlist_client = OpenListClient(
+                base_url=cfg.openlist_base_url,
+                username=cfg.openlist_username,
+                password=cfg.openlist_password,
+                token=cfg.openlist_token,
+                timeout=cfg.openlist_timeout_sec,
+                allow_private_address=cfg.openlist_allow_private_address,
+            )
+            bridge = BridgeService(
+                client=openlist_client,
+                store=store,
+                config=cfg,
+                queue=queue,
+                api=api,
+                ingest=ingest,
+                dlserver=dlserver,
+            )
+            netdisk = NetdiskService(
+                client=openlist_client,
+                store=store,
+                config=cfg,
+                queue=queue,
+            )
+        except Exception as e:
+            # Config-level rejection OR construction bug - either way the rest
+            # of the plugin has no reason to die.  Log at error level with the
+            # offending value so the fix is obvious from the log alone.
+            logger.error(
+                f"[group_cloud_storage] OpenList bridge/netdisk init failed; "
+                f"plugin continues without the netdisk/bridge subset: {e} "
+                f"(openlist_base_url={cfg.openlist_base_url!r}, "
+                f"openlist_allow_private_address="
+                f"{cfg.openlist_allow_private_address!r})"
+            )
+            openlist_client = bridge = netdisk = None
 
     services = Services(
         permission=perm,

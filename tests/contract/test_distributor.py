@@ -41,7 +41,7 @@ class _FakeDlServer:
         self.calls.append(f"staged:{name}")
         return {"http_url": f"http://dl.local/staged/{name}", "sftp": None}
 
-    def register_proxy(self, url, name):
+    def register_proxy(self, url, name, *, allow_private: bool = False):
         self.proxies.append((url, name))
         return f"http://dl.local/proxy/{len(self.proxies)}"
 

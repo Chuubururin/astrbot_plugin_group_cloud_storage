@@ -11,7 +11,7 @@ Dependencies:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
 from typing import Any
 
 import httpx
@@ -22,57 +22,29 @@ from .base import (
     ExternalApiError,
     OpenListApiError,
     classify_error,
-    validate_base_url,
+    validate_base_url_structure,
+    validate_hostname_dns,
 )
 
 
-# DTOs 
+# Wire DTOs, constants and the task-state normalizer live in openlist_dto;
+# re-exported here so every existing ``from ...openlist import X`` keeps
+# working (including the private names tests reach for).
+from .openlist_dto import (  # noqa: F401
+    DirectLink,
+    NetFile,
+    OfflineTask,
+    _MAX_LIST_PAGES,
+    _STORAGE_MARKERS,
+    _normalize_task_state,
+)
 
-
-@dataclass(frozen=True)
-class OfflineTask:
-    """Offline download task representation."""
-
-    id: str
-    name: str
-    state: str
-    status: str
-    progress: float
-    error: str
-
-
-@dataclass(frozen=True)
-class NetFile:
-    """File/directory entry from remote listing."""
-
-    name: str
-    size: int
-    is_dir: bool
-    modified: str
-    sign: str = ""
-
-
-@dataclass(frozen=True)
-class DirectLink:
-    """Direct URL for file access ."""
-
-    url: str
-
-
-# Task state mapping is centralized in
-# core.domain.enums.BridgeTaskState.from_external()
-_TASK_STATE_MAP = None  # Unused; mapping lives in BridgeTaskState.from_external()
-
-
-def _normalize_task_state(state) -> str:
-    """Normalize task state from OpenList to internal representation.
-
-    Handles both string and integer state values from OpenList API.
-    Delegates to BridgeTaskState.from_external() for single source of truth.
-    """
-    from core.domain.enums import BridgeTaskState
-
-    return BridgeTaskState.from_external(state).value
+__all__ = [
+    "DirectLink",
+    "NetFile",
+    "OfflineTask",
+    "OpenListClient",
+]
 
 
 class OpenListClient:
@@ -98,10 +70,18 @@ class OpenListClient:
         timeout: float = 30.0,
         allow_private_address: bool = False,
     ):
-        # Validate base URL 
-        self._base_url = validate_base_url(
+        # Validate the URL *shape* now (scheme / hostname / literal-IP range)
+        # - pure parsing, no I/O, so a bad value still fails loudly here.
+        #
+        # The DNS half is deliberately deferred to _ensure_validated(): the
+        # constructor runs from bootstrap.build_components, i.e. on AstrBot's
+        # synchronous plugin-construction path, and a blocking getaddrinfo
+        # there stalls plugin load for the resolver's whole timeout with no
+        # event loop to yield to (W-3b).
+        self._base_url = validate_base_url_structure(
             base_url, allow_private=allow_private_address
         )
+        self._validated = False
         self._username = username
         self._password = password
         self._token = token
@@ -115,8 +95,28 @@ class OpenListClient:
         self._capability: str = "UNKNOWN"  # UNKNOWN | OK | BROKEN
         self._ping_failures: int = 0
 
+    async def _ensure_validated(self) -> None:
+        """Run the deferred DNS half of base-URL validation, once.
+
+        Off the event loop via ``asyncio.to_thread`` because
+        ``validate_hostname_dns`` resolves with a blocking ``getaddrinfo``
+        (same convention as ``assert_fetch_url_allowed``).  Raises
+        ``ExternalApiError`` on a restricted address or DNS failure, i.e. the
+        exact error the constructor used to raise - now surfaced at first
+        use instead of at plugin load (W-3b).
+        """
+        if self._validated:
+            return
+        await asyncio.to_thread(
+            validate_hostname_dns,
+            self._base_url,
+            allow_private=self._allow_private,
+        )
+        self._validated = True
+
     async def _ensure_client(self) -> httpx.AsyncClient:
-        """Lazy-create httpx.AsyncClient."""
+        """Lazy-create httpx.AsyncClient (after deferred validation)."""
+        await self._ensure_validated()
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
@@ -196,7 +196,7 @@ class OpenListClient:
                 code=data.get("code"),
             )
 
-        token = data.get("data", {}).get("token")
+        token = (data.get("data") or {}).get("token")
         if not token:
             raise OpenListApiError("Login response missing token")
 
@@ -331,7 +331,7 @@ class OpenListClient:
             },
         )
 
-        tasks_data = data.get("data", {}).get("tasks", [])
+        tasks_data = (data.get("data") or {}).get("tasks") or []
         return [
             OfflineTask(
                 id=t.get("id", ""),
@@ -347,7 +347,7 @@ class OpenListClient:
     async def tasks_undone(self) -> list[OfflineTask]:
         """Get list of undone offline download tasks."""
         data = await self._request("GET", "/api/task/offline_download/undone")
-        tasks_data = data.get("data", [])
+        tasks_data = data.get("data") or []
         return [
             OfflineTask(
                 id=t.get("id", ""),
@@ -363,7 +363,7 @@ class OpenListClient:
     async def tasks_done(self) -> list[OfflineTask]:
         """Get list of completed offline download tasks."""
         data = await self._request("GET", "/api/task/offline_download/done")
-        tasks_data = data.get("data", [])
+        tasks_data = data.get("data") or []
         return [
             OfflineTask(
                 id=t.get("id", ""),
@@ -402,7 +402,7 @@ class OpenListClient:
         # Try fs/link first (OpenList ecosystem, not in official docs)
         try:
             data = await self._request("POST", "/api/fs/link", json={"path": path})
-            url = data.get("data", {}).get("url", "")
+            url = (data.get("data") or {}).get("url") or ""
             if url:
                 return DirectLink(url=url)
         except (OpenListApiError, ExternalApiError) as e:
@@ -410,7 +410,7 @@ class OpenListClient:
 
         # Fallback to fs/get
         data = await self._request("POST", "/api/fs/get", json={"path": path})
-        raw_url = data.get("data", {}).get("raw_url", "")
+        raw_url = (data.get("data") or {}).get("raw_url") or ""
         if not raw_url:
             raise OpenListApiError(f"No raw_url in fs/get response for {path}")
         return DirectLink(url=raw_url)
@@ -434,12 +434,47 @@ class OpenListClient:
                 sign=info.get("sign", ""),
             )
         except OpenListApiError as e:
+            msg = (e.message or "").lower()
+            # An unmounted path reports "failed get storage: storage not
+            # found" - which *contains* "not found", so the file-missing
+            # branch below would swallow a mount-configuration error as
+            # "no such file" (W-2).  It must surface: callers use None to
+            # mean "safe to create/re-submit", and a bad mount would then
+            # look like a healthy transfer target (or, in recovery, get the
+            # task marked FAILED and the user notified).
+            if any(marker in msg for marker in _STORAGE_MARKERS):
+                raise
             # "not found" style errors -> return None
             # Exact wording varies across OpenList versions; match common variants.
-            msg = (e.message or "").lower()
             if "not found" in msg or "not exist" in msg or "404" in msg:
                 return None
             raise
+
+    async def probe_mount(self, path: str) -> tuple[bool, str | None]:
+        """Does ``path`` resolve to an OpenList storage mount?
+
+        OpenList matches paths against its storages by longest prefix; a path
+        outside every mount fails with "failed get storage: storage not
+        found", and ``mkdir`` cannot create a mount point - so a destination
+        root outside a mount breaks every transfer permanently (W-1).
+
+        Not built on :meth:`stat` on purpose: ``stat`` classifies by substring
+        and the unmounted text also contains "not found", so it returns None
+        for both "no mount" and "no file" (defect W-2).  The mount error is
+        matched explicitly here.  Returns ``(True, None)`` when a mount owns
+        the path (its existence is irrelevant), ``(False, reason)`` otherwise.
+        Advisory probe, used on the startup path; network errors propagate.
+        """
+        try:
+            await self._request("POST", "/api/fs/get", json={"path": path})
+        except OpenListApiError as e:
+            msg = (e.message or "").lower()
+            if any(marker in msg for marker in _STORAGE_MARKERS):
+                return False, (e.message or "storage not found")
+            if "not found" in msg or "not exist" in msg or "404" in msg:
+                return True, None  # mounted, that one object is just absent
+            raise
+        return True, None  # fs/get answered, so a mount owns this path
 
     async def list_dir(self, path: str) -> list[NetFile]:
         """List directory contents with automatic pagination .
@@ -453,7 +488,18 @@ class OpenListClient:
         while has_more:
             files, has_more = await self.list_dir_page(path, page)
             all_files.extend(files)
+            if not files:
+                # An empty page means has_more cannot be trusted: a server
+                # answering has_more=true forever would spin here and grow
+                # all_files without bound.
+                break
             page += 1
+            if page > _MAX_LIST_PAGES:
+                logger.warning(
+                    f"[openlist] list_dir({path}) stopped after "
+                    f"{_MAX_LIST_PAGES} pages with has_more still set"
+                )
+                break
         return all_files
 
     async def list_dir_page(
@@ -475,7 +521,7 @@ class OpenListClient:
             },
         )
 
-        content = data.get("data", {})
+        content = data.get("data") or {}
         items = content.get("content") or []  # null content for empty dirs
         files = [
             NetFile(

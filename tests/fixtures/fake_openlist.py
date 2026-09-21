@@ -102,7 +102,7 @@ class FakeDownloadServer:
     def download_url(self, group_id: str, id: int) -> str:
         return f"http://127.0.0.1:{self.http_port}/dl/{group_id}/{id}"
 
-    def register_proxy(self, url: str, name: str) -> str:
+    def register_proxy(self, url: str, name: str, *, allow_private: bool = False) -> str:
         import uuid
 
         t = uuid.uuid4().hex[:10]
