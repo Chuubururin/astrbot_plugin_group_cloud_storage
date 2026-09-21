@@ -62,6 +62,8 @@ export const API = {
     RECOMMEND_GROUP: 'files/recommend-group', // default upload target
     DISTRIBUTE: 'files/distribute',           // Target distribution
     FOLDER_CREATE: 'files/folder-create',     // create group folder (flat single-level)
+    FOLDER_RENAME: 'files/folder-rename',     // rename a group folder (folder_id + name)
+    FOLDER_DELETE: 'files/folder-delete',     // delete a group folder and its contents
   },
 
   // ---- Albums  ----
@@ -129,6 +131,14 @@ export const API = {
   SYNC_WITHERING: 'sync/withering',
   SYNC_STATUS: 'sync/status',
 
+  // ---- Database administration (POST-only; admin token in body,
+  // fail-closed when database_admin_token is not configured) ----
+  DB_HEALTH: 'database/health',
+  DB_INTEGRITY: 'database/integrity',
+  DB_BACKUPS: 'database/backups',
+  DB_BACKUP: 'database/backup',
+  DB_RESTORE: 'database/restore',
+
   // ---- Cross-cutting ----
   EVENTS: 'events',              // SSE stream (sole queue-state channel)
   ACCOUNTS: 'accounts',          // multi-account registry
@@ -138,43 +148,24 @@ export const API = {
   META_CLASSIFY: 'meta/classify' // 13-class extension table 
 };
 
-// ---- Frontend display dictionaries  ----
-
-/** 13-class file classification . */
-export const TYPE_LABELS = {
-  file: '文件',
-  album: '相册',
-  essence: '精华',
-  document: '文稿',
-  pdf: 'PDF',
-  spreadsheet: '表格',
-  slide: '幻灯片',
-  online_doc: '在线文档',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-  archive: '压缩包',
-  installer: '安装包',
-  flash: '闪传文件',
-  folder: '文件夹',
-  other: '其他',
-};
-
-/** Derived storage-state filter . */
-export const STORE_STATUS_LABELS = {
-  netdisk: '在网盘',
-  album: '在相册',
-  essence: '在精华消息',
-  none: '未下载',
-};
-
-/** Bridge transfer task states. */
-export const BRIDGE_STATE_LABELS = {
-  pending: '等待中',
-  running: '进行中',
-  done: '已完成',
-  failed: '失败',
-};
+/**
+ * Race one bridge call against the shared API timeout, clearing the timer on
+ * every exit path. A plain Promise.race leaves the losing timer armed for the
+ * full 30s on every single request: harmless inside the page, but it also keeps
+ * a Node process alive long after the assertions finished (the unit suite spent
+ * ~30s per file on nothing but pending timers).
+ * @param {Promise<any>} p - the bridge call
+ * @param {string} verb - 'apiGet' | 'apiPost' (timeout message prefix)
+ * @param {string} path - API path (timeout message)
+ * @returns {Promise<any>}
+ */
+function withTimeout(p, verb, path) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${verb} timeout: ${path}`)), API_TIMEOUT);
+  });
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer));
+}
 
 /**
  * GET request with timeout protection.
@@ -183,13 +174,7 @@ export const BRIDGE_STATE_LABELS = {
  * @returns {Promise<any>} decoded JSON body
  */
 export async function apiGet(path, params) {
-  const p = sdk().apiGet(path, params);
-  return Promise.race([
-    p,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`apiGet timeout: ${path}`)), API_TIMEOUT)
-    ),
-  ]);
+  return withTimeout(sdk().apiGet(path, params), 'apiGet', path);
 }
 
 /**
@@ -199,13 +184,7 @@ export async function apiGet(path, params) {
  * @returns {Promise<any>}
  */
 export async function apiPost(path, body) {
-  const p = sdk().apiPost(path, body || {});
-  return Promise.race([
-    p,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`apiPost timeout: ${path}`)), API_TIMEOUT)
-    ),
-  ]);
+  return withTimeout(sdk().apiPost(path, body || {}), 'apiPost', path);
 }
 
 /**
@@ -247,7 +226,7 @@ export function subscribeSSE(handler, onError) {
   if (!bridge || typeof bridge.subscribeSSE !== 'function') return () => {};
 
   let cancelled = false;
-  const result = bridge.subscribeSSE('events', {
+  const result = bridge.subscribeSSE(API.EVENTS, {
     onMessage(msg) {
       if (cancelled) return;
       const ev = msg && msg.parsed !== undefined ? msg.parsed : (msg ? msg.raw : msg);

@@ -135,19 +135,18 @@ class ExecutionMixin:
         released = False
         if op.task_id in self._cancelled:
             self._cancelled.discard(op.task_id)
-            self._push(
-                {
-                    "type": "cancelled",
-                    "task_id": op.task_id,
-                    "kind": op.kind,
-                    "target": op.target,
-                    "ts": time.time(),
-                }
-            )
-            self._record(op, "cancelled")
-            await self._ledger_state(op, "cancelled")
+            await self._finalize_cancelled(op)
             return
         if op.cancel:
+            # H2: cancelled while running (or during a pause hold) and the
+            # marker was consumed by a retry/pause re-entry. This branch used
+            # to `return` silently -- no terminal state, no _ops_by_id pop --
+            # so the ledger stayed at "retry" forever: the tasks tab showed a
+            # task that never ends, has_pending() blocked every auto-submit
+            # and cancel_task could not converge the row (the id was in none
+            # of _pending/_running/_paused any more). Converge it here, through
+            # the same single-fire exit as the _cancelled branch above.
+            await self._finalize_cancelled(op)
             return
         self._running[op.task_id] = op
         bulk = op.kind in BULK_KINDS
@@ -182,17 +181,36 @@ class ExecutionMixin:
             )
             await self._ledger_state(op, "running")
             await self._run_handler(op)
-            self._push(
-                {
-                    "type": "done",
-                    "task_id": op.task_id,
-                    "kind": op.kind,
-                    "target": op.target,
-                    "ts": time.time(),
-                }
-            )
-            self._record(op, "ok")
-            await self._ledger_state(op, "done")
+            if op.cancel:
+                # Cancelled while running and the handler finished without
+                # observing it: either it has no checkpoint in this path, or
+                # the cancel landed right before completion. The user's stop
+                # request was explicit, so converge the ledger to cancelled
+                # instead of reporting "done"/"ok" next to an "interrupted"
+                # response (H2: a checkpoint-less kind used to report done).
+                self._push(
+                    {
+                        "type": "cancelled",
+                        "task_id": op.task_id,
+                        "kind": op.kind,
+                        "target": op.target,
+                        "ts": time.time(),
+                    }
+                )
+                self._record(op, "cancelled")
+                await self._ledger_state(op, "cancelled")
+            else:
+                self._push(
+                    {
+                        "type": "done",
+                        "task_id": op.task_id,
+                        "kind": op.kind,
+                        "target": op.target,
+                        "ts": time.time(),
+                    }
+                )
+                self._record(op, "ok")
+                await self._ledger_state(op, "done")
         except OpCancelError:
             self._push(
                 {
@@ -218,6 +236,13 @@ class ExecutionMixin:
             self._record(op, "paused")
             await self._ledger_state(op, "paused")
             self._paused[op.task_id] = op  # preserves retry count/error; re-entered on resume
+            # M2: resume re-enters the handler from its first line, so arm the
+            # replay guard here. op.retries must stay untouched: it only counts
+            # retries and also gates `op.retries < self._max_retries`, so
+            # bumping it here would eat one retry of the budget. Without the
+            # flag, handlers deduping on `op.retries > 0` (album replay check,
+            # volume segment skip) redo their side effects after pause -> resume.
+            op.replayed = True
             keep_index = True
             return
         except asyncio.CancelledError:
@@ -238,6 +263,7 @@ class ExecutionMixin:
             )
             if retriable and op.retries < self._max_retries:
                 op.retries += 1
+                op.replayed = True  # M2: re-entry, same replay criterion as pause -> resume
                 op.error = str(e)
                 backoff = self._backoff_base**op.retries
                 logger.warning(
@@ -260,6 +286,15 @@ class ExecutionMixin:
                 if bulk:
                     self._bulk.release()
                 released = True
+                # A retrying op is still pending: keep it in the live indexes
+                # through the backoff and the requeue wait, or pause_task
+                # reports "unknown" for the whole retry lifecycle and a
+                # cancel landing inside the sleep is erased by the finally
+                # below (the task then runs to completion after the user
+                # cancelled it). Same invariants as a freshly submitted op;
+                # the worker discards _pending on the next dequeue.
+                self._pending.add(op.task_id)
+                keep_index = True
                 await asyncio.sleep(backoff)
                 if high:
                     await self._q_hi.put(op)  # retry keeps its priority (high-priority queue)
@@ -287,6 +322,31 @@ class ExecutionMixin:
             self._cancelled.discard(op.task_id)
             if not keep_index:
                 self._ops_by_id.pop(op.task_id, None)
+
+    async def _finalize_cancelled(self, op: Op) -> None:
+        """Converge ``op`` to the cancelled terminal state, exactly once.
+
+        Single-fire guard: cancel_task already wrote the terminal and popped
+        the index for a task it caught while queued / pause-held (deep-queue
+        write-through). Writing it again here would double the SSE event and
+        the recent record. Only finalize when the cancel landed after this op
+        left _ops_by_id's control (i.e. between dequeue and here): membership
+        in _ops_by_id means no terminal state has been written for it yet.
+        """
+        if op.task_id not in self._ops_by_id:
+            return
+        self._ops_by_id.pop(op.task_id, None)
+        self._push(
+            {
+                "type": "cancelled",
+                "task_id": op.task_id,
+                "kind": op.kind,
+                "target": op.target,
+                "ts": time.time(),
+            }
+        )
+        self._record(op, "cancelled")
+        await self._ledger_state(op, "cancelled")
 
     def _record(self, op: Op, state: str, error: str | None = None) -> None:
         self._recent.appendleft(

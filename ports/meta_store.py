@@ -67,6 +67,12 @@ class MetaStorePort(Protocol):
     async def clear_folders(self, group_id: str) -> None:
         """Clear a group's folders (called before a full refresh)."""
 
+    async def rename_folder(self, group_id: str, folder_id: str, folder_name: str) -> None:
+        """Rename one folder entity (read-your-writes after a QQ-side rename)."""
+
+    async def delete_folder(self, group_id: str, folder_id: str) -> None:
+        """Drop one folder entity (read-your-writes after a QQ-side delete)."""
+
     async def sum_resource_sizes(self, group_id: str) -> int:
         """Used capacity (exact index-based total): sum of active file sizes in the group."""
 
@@ -85,9 +91,11 @@ class MetaStorePort(Protocol):
     async def list_volumes(self, parent_resource_id: str) -> list[VolumeInfo]:
         """Return a parent resource's volumes in sequence order."""
 
-    async def has_volume_part(self, group_id: str, part_name_pattern: str) -> bool:
+    async def has_volume_part(self, group_id: str, part_name_glob: str) -> bool:
         """True when the group has any volume part whose name matches the
-        regex (identity guard for re-conversion after meta loss)."""
+        LIKE glob (identity guard for re-conversion after meta loss). The
+        parameter name mirrors the SqliteMetaStore implementation so keyword
+        calls keep working."""
 
     async def update_volume_fields(
         self, parent_resource_id: str, seq: int, **fields
@@ -139,6 +147,12 @@ class MetaStorePort(Protocol):
     async def restore_account_groups(self, account_id: str) -> int:
         """Restore a back-online account's groups to managed=1; returns the
         number of rows actually flipped (0 = account was never hidden)."""
+
+    async def list_accounts(self) -> list[dict]:
+        """Known accounts and their managed-group count
+        ([{"account_id": str, "groups": int}], ordered by count desc).
+        Declared here so the offline sweep / accounts page never reach into a
+        concrete store implementation."""
 
     async def list_account_group_ids(self, account_id: str) -> list[str]:
         """Group ids bound to an account (post-offline full rescan input)."""

@@ -18,6 +18,21 @@ function byAreaDesc(a, b) {
 }
 
 /**
+ * First array-valued candidate. A spec field that arrives as a string has
+ * `.slice` but no `.sort`, so the old `(x || []).slice().sort()` threw a
+ * TypeError and killed the whole gallery render; a non-array must also not
+ * shadow a valid fallback field.
+ * @param {...*} candidates
+ * @returns {Array}
+ */
+function firstArray(...candidates) {
+  for (const c of candidates) {
+    if (Array.isArray(c)) return c;
+  }
+  return [];
+}
+
+/**
  * Map raw album media entries to gallery items.
  *
  * Image items carry a multi-spec photoUrls list plus a defaultUrl fallback;
@@ -30,7 +45,7 @@ function byAreaDesc(a, b) {
 export function normalizeMedia(media) {
   return (media || []).map((m) => {
     const img = m.image || {};
-    const photos = (img.photoUrls || img.photo_url || []).slice().sort(byAreaDesc);
+    const photos = firstArray(img.photoUrls, img.photo_url).slice().sort(byAreaDesc);
     let url = photos.length ? (photos[0].url && photos[0].url.url) : '';
     if (!url && img.defaultUrl && img.defaultUrl.url) url = img.defaultUrl.url;
     if (!url && m.url && typeof m.url === 'object' && m.url.url) url = m.url.url;
@@ -40,12 +55,14 @@ export function normalizeMedia(media) {
     // of the direct link; the URL is still kept for copy/download actions.
     const vid = m.video || null;
     if (!url && vid) {
-      const specs = (vid.videoUrl || vid.video_url || []).slice().sort(byAreaDesc);
+      const specs = firstArray(vid.videoUrl, vid.video_url).slice().sort(byAreaDesc);
       url = (specs.length && specs[0].url && specs[0].url.url) || (typeof vid.url === 'string' ? vid.url : '');
     }
     let poster = '';
     if (vid) {
-      const covers = ((vid.cover && (vid.cover.photoUrls || vid.cover.photo_url)) || []).slice().sort(byAreaDesc);
+      const covers = firstArray(
+        vid.cover && vid.cover.photoUrls, vid.cover && vid.cover.photo_url,
+      ).slice().sort(byAreaDesc);
       poster =
         (covers.length && covers[0].url && covers[0].url.url) ||
         (vid.cover && vid.cover.defaultUrl && vid.cover.defaultUrl.url) ||

@@ -18,7 +18,15 @@ from core.log import logger
 from core.opctx import account_scope
 from .health import HealthCircuitBreaker
 from .capacity import CapacityMixin
-from .op import OpCancelError, OpPausedError
+from .op import OpCancelError, OpPausedError, cfg_value
+
+# Branches publishing their own data_changed (file ops/ingest/scans);
+# every other dispatched kind gets a central announce after _dispatch.
+_SELF_ANNOUNCED_KINDS = frozenset((
+    "upload", "delete", "move_file", "replace_name", "convert_volumes", "essence_save",
+    "essence_delete", "fetch", "video_upload", "video_album", "image_album",
+    "file_scan", "diff_file_scan",
+))
 
 
 class OpDispatcher(CapacityMixin):
@@ -235,7 +243,7 @@ class OpDispatcher(CapacityMixin):
             return
 
         try:
-            interval = float(self.config.request_interval)
+            interval = float(cfg_value(self.config, "request_interval", 1.0))
         except (TypeError, ValueError):
             interval = 1.0
         # +-20% CSPRNG jitter so accounts do not hit server-side aggregated
@@ -283,7 +291,11 @@ class OpDispatcher(CapacityMixin):
         # the target group (no-op when the target is not a concrete group or
         # the account is unknown/unbound — best_bot fallback applies then).
         with account_scope(await self._account_of(getattr(op, "target", ""))):
-            await self._dispatch(op)
+            try:
+                await self._dispatch(op)
+            finally:
+                if op.kind not in _SELF_ANNOUNCED_KINDS:
+                    self._announce(op)
 
     async def _dispatch(self, op) -> None:
         if op.kind == "scan":
@@ -420,6 +432,13 @@ class OpDispatcher(CapacityMixin):
             raise OneBotApiError(
                 OneBotErrorKind.LOCAL_ERROR, op.kind, f"unknown op kind: {op.kind}"
             )
+
+    def _announce(self, op) -> None:
+        """Terminal data_changed push for centrally-announced kinds; also
+        fires on failure — partial writes still moved cloud state."""
+        self.queue.publish(
+            {"type": "data_changed", "kind": op.kind, "target": op.target, "ts": time.time()}
+        )
 
     async def run_file_op_and_announce(self, op) -> None:
         """After a file operation: incremental capacity write-back + KV
@@ -569,22 +588,17 @@ class OpDispatcher(CapacityMixin):
                     )
                     last_pub = now
         finally:
-            # On cancel/error: release any remaining chained-scan entries
+            # Cancel/error path: release the remaining chained-scan entries and
+            # invalidate the group indexes + notify the frontend. Both used to
+            # sit after this block, so a cancelled scan skipped them (stale
+            # index; handle()'s _announce is skipped for file_scan).
             for gid in targets:
                 self._chained_file_scan_groups.discard(str(gid))
-        # Scan complete: invalidate affected group indexes (lazy rebuild) +
-        # dynamic refresh event
-        if self.services.searchkv is not None:
-            for gid in targets:
-                self.services.searchkv.mark_dirty(gid)
-        self.queue.publish(
-            {
-                "type": "data_changed",
-                "kind": "file_scan",
-                "target": "*",
-                "ts": time.time(),
-            }
-        )
+                if self.services.searchkv is not None:
+                    self.services.searchkv.mark_dirty(gid)
+            self.queue.publish(
+                {"type": "data_changed", "kind": "file_scan", "target": "*", "ts": time.time()}
+            )
         logger.info(
             f"[file-scan] done: {total} groups (mode={op.payload.get('mode')}, "
             f"failed={failed})"

@@ -12,6 +12,7 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
+from .connection import ConnectionManager
 from .state import StorePart
 
 
@@ -48,19 +49,34 @@ class IntegrityMixin(StorePart):
             finally:
                 dst.close()
                 src.close()
-        await asyncio.to_thread(_copy)
+        # Same pattern as reset_and_rebuild: retire pooled handles first so
+        # no connection keeps stale page cache / WAL state across the
+        # restore, then swap in a fresh manager (a closed manager refuses
+        # new checkouts) -- on failure too, so the store stays usable.
+        await self._conn.close()
+        try:
+            await asyncio.to_thread(_copy)
+        finally:
+            self._state.conn = ConnectionManager(self._db_path)
         return {"ok": True, "path": str(self._db_path)}
 
 
 async def check_integrity(db_path: str | Path) -> dict:
     """Check SQLite database integrity.
 
+    ``PRAGMA integrity_check`` scans the whole database (seconds on a large
+    file), so the blocking work runs in a worker thread: the event loop keeps
+    serving requests while the check is in flight, like backup()/restore().
+
     Returns:
         {"ok": bool, "errors": list[str], "warnings": list[str]}
     """
+    return await asyncio.to_thread(_check_integrity_sync, Path(db_path))
+
+
+def _check_integrity_sync(db_path: Path) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
-    db_path = Path(db_path)
 
     if not db_path.exists():
         return {"ok": False, "errors": ["database file not found"], "warnings": []}

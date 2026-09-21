@@ -10,11 +10,14 @@
  */
 
 import { getState, set, refresh } from '../store.js';
-import { TYPE_LABELS, API } from '../api.js';
+import { DEFAULT_PAGE_SIZE } from '../constants.js';
+import { TYPE_LABELS } from '../views/task-labels.js';
+import { API, apiPost } from '../api.js';
 import { getIcon } from '../icons.js';
 import { formatSize, formatTime, escapeHtml, copyToClipboard } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
 import { netdiskRename, netdiskRemovePaths } from './netdisk-ops.js';
+import { showGroupFolderCtx } from './group-folder-menu.js';
 import { openPreview } from './preview.js';
 import { show as showContextMenu, showRaw } from '../components/context-menu.js';
 import { runCommand } from './commands.js';
@@ -77,7 +80,7 @@ export function buildRow(source, item) {
       ${item.indexed_at ? '<span class="badge">索引</span>' : ''}
       ${item.tags ? `<span class="badge">${escapeHtml(item.tags)}</span>` : ''}
     </td>
-    <td><span class="badge ${item.type || 'folder'}">${typeLabel(item)}</span></td>
+    <td><span class="badge ${escapeHtml(item.type || 'folder')}">${escapeHtml(typeLabel(item))}</span></td>
     <td class="col-size">${item.is_dir ? '-' : formatSize(item.size)}</td>
     <td class="col-uploader">${escapeHtml(item.uploader || '-')}</td>
     <td class="col-time">${formatTime(item.modified || item.created)}</td>
@@ -110,7 +113,14 @@ export function buildRow(source, item) {
       });
     });
   } else if (isUp) {
+    // ".." is navigation, not a folder: never reach a folder context menu
+    // (group rename/delete, netdisk recursive delete of `${curDir}/..`).
     tr.addEventListener('contextmenu', (e) => e.preventDefault());
+  } else if (source.id === 'group') {
+    tr.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showGroupFolderCtx(e.clientX, e.clientY, item);
+    });
   } else if (source.id === 'netdisk') {
     tr.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -157,8 +167,8 @@ function showNetdiskFolderCtx(x, y, source, item) {
         toast(done > 0 ? '删除成功' : '未删除任何项', 'success');
         refresh('netdisk');
       } else if (id === 'copy-path') {
-        await copyToClipboard(fullPath);
-        toast('路径已复制', 'success');
+        const ok = await copyToClipboard(fullPath);
+        toast(ok ? '路径已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
       }
     } catch (e) {
       toast(`操作失败: ${e.message || e}`, 'error');
@@ -279,7 +289,7 @@ export function syncSelectAll(source, scope = document) {
 export function updatePagination(container, source, prefix = 'file') {
   const st = getState();
   const page = st[source.pageKey] || 1;
-  const pageSize = st.filePageSize || 24;
+  const pageSize = st.filePageSize || DEFAULT_PAGE_SIZE;
   const max = Math.ceil((st[source.totalKey] || 0) / pageSize) || 1;
   const info = container.querySelector(`#${prefix}-page-info`);
   if (info) info.textContent = `${page} / ${max} (共 ${st[source.totalKey] || 0} 项)`;

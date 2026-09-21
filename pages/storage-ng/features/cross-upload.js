@@ -56,7 +56,7 @@ export async function pickCloudResource(kind) {
     toast(`${label} 列表不可用`, 'error');
     return null;
   }
-  const items = data.items || [];
+  const items = data.items || data.files || [];
   if (!items.length) { toast(`没有可用的 ${label} 资源`, 'warn'); return null; }
   const res = await showFormModal(`选择 ${label} 资源`, [
     { name: 'idx', label: '资源', type: 'select', value: '0',
@@ -119,7 +119,7 @@ export async function openGroupFileToNetdisk() {
     toast('群文件列表不可用', 'error');
     return;
   }
-  const items = (data.items || []).filter((f) => !f.is_dir);
+  const items = (data.items || data.files || []).filter((f) => !f.is_dir);
   if (!items.length) { toast('没有可用的群文件', 'warn'); return null; }
   const res = await showFormModal('选择群文件', [
     { name: 'idx', label: '文件', type: 'select', value: '0',

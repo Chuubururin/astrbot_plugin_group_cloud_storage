@@ -5,8 +5,9 @@
  * read) + unified data table over the essence source + action bar
  * (view / detail / distribute local-copy-netdisk-group) + module-isolated
  * tag cloud (W-9). Full-text preview on double-click, and a character
- * counter derived from the listed text sizes (character stats; the real
- * totals come from the full-text viewer).
+ * counter summed from the listed row sizes (the backend stores
+ * `size = len(text)`, so the badge is a character count; exact totals
+ * come from the full-text viewer).
  *
  * @module views/essence
  */
@@ -17,7 +18,6 @@ import { initModuleToolbar } from '../components/toolbar.js';
 import { ESSENCE_SOURCE } from '../features/data-sources.js';
 import { renderTagCloud } from '../components/breadcrumb.js';
 import { subscribe } from '../store.js';
-import { formatSize } from '../utils/helpers.js';
 
 /**
  * Initialize the essence view.
@@ -58,10 +58,13 @@ export function initEssenceView(container) {
     const el = document.getElementById('essence-count');
     if (el) el.textContent = `${total || 0} 条精华`;
   });
-  // Approximate character stats from listed sizes (exact totals in viewer).
+  // 字符统计：后端精华行的 size 就是字符数（size = len(text)，不是字节数）。
+  // 不能走 formatSize——它的最小单位是 MB 且下限 0.1 MB，会把 <4000 字符
+  // 硬限制区间内的任何文本都压成「共 0.1 MB 文本」，既不是字符数也分不出
+  // 100 字与 3900 字。
   const charsUnsub = subscribe(ESSENCE_SOURCE.itemsKey, (items) => {
-    const total = (items || []).reduce((s, it) => s + (it.size || 0), 0);
-    charsEl.textContent = total ? `共 ${formatSize(total)} 文本` : '';
+    const total = (items || []).reduce((s, it) => s + (Number(it.size) || 0), 0);
+    charsEl.textContent = total ? `共 ${total} 字符` : '';
   });
 
   return () => {

@@ -66,15 +66,45 @@ class TaskControlMixin:
             "resumed": resumed
             "unknown": task not found or not paused
         """
-        if task_id not in self._paused:
-            return "unknown"
-        entry = self._paused.pop(task_id)
-        if entry is not None:  # a real op held after dequeue: re-enqueue by priority
-            entry.pause = False
-            if entry.kind in self._high_priority:
-                self._q_hi.put_nowait(entry)
+        if task_id in self._paused:
+            entry = self._paused.pop(task_id)
+            if entry is not None:  # a real op held after dequeue: re-enqueue by priority
+                entry.pause = False
+                # Re-register as pending before the requeue: the worker only
+                # discards it on the next dequeue. Without this the op waits in
+                # the async queue outside every live index, so pause_task
+                # reports "unknown" for the whole requeue window and cancel_task
+                # skips its terminal write-through (the row stays "pending"
+                # until the worker finally dequeues). Same invariant as submit()
+                # and the retry requeue in execution._execute.
+                self._pending.add(entry.task_id)
+                if entry.kind in self._high_priority:
+                    self._q_hi.put_nowait(entry)
+                else:
+                    self._q.put_nowait(entry)
+                self._ledger_fire(entry, "pending")
             else:
-                self._q.put_nowait(entry)
+                # Queued placeholder: pause already rewrote the ledger to
+                # "paused" (deep-queue reasoning in pause_task); resume must
+                # write through symmetrically or the row stays "paused" until
+                # the worker dequeues — hours behind a scan wave (live
+                # 2026-09-12: resume→interrupt left the tasks tab "paused").
+                # The _pending guard skips the fire if the worker is dequeuing
+                # right now: that path writes running/done itself, and a late
+                # "pending" would only be transient (superseded on terminal).
+                op = self._ops_by_id.get(task_id)
+                if op is not None and task_id in self._pending:
+                    self._ledger_fire(op, "pending")
+        else:
+            # Running task paused but not yet at a checkpoint: pause_task only
+            # set op.pause (no _paused entry), so clear the flag here or this
+            # resume click is lost and the task parks until the user clicks
+            # resume a second time (live: pause→resume on a running task
+            # reported "unknown" and the task stayed halted).
+            op = self._running.get(task_id)
+            if op is None or not op.pause:
+                return "unknown"
+            op.pause = False
         self._push({"type": "resumed", "task_id": task_id, "ts": time.time()})
         return "resumed"
 
@@ -122,9 +152,36 @@ class TaskControlMixin:
                 self._record(op, "cancelled")
                 self._ledger_fire(op, "cancelled")
                 self._ops_by_id.pop(task_id, None)
-        self._cancelled.add(task_id)
+        # Only track cancels for ops that are still live in the queue (queued /
+        # retry wait -> _pending, or running -> _running): those are observed on
+        # dequeue and discarded in _execute's finally. Unknown/terminal ids and
+        # pause-held ops (no longer in any queue) would never be discarded,
+        # growing _cancelled without bound.
+        if op is not None and (
+            task_id in self._pending or task_id in self._running
+        ):
+            self._cancelled.add(task_id)
         if op is not None:
             op.cancel = True
+            if task_id in self._pending:
+                # Queued (not pause-held): the worker may not dequeue for a
+                # long time (deep queue), so write the terminal state now —
+                # the later dequeue lands in the _execute cancelled branch,
+                # which discards and re-writes the same state (idempotent,
+                # same reasoning as the pause-held branch above).
+                self._pending.discard(task_id)
+                self._push(
+                    {
+                        "type": "cancelled",
+                        "task_id": op.task_id,
+                        "kind": op.kind,
+                        "target": op.target,
+                        "ts": time.time(),
+                    }
+                )
+                self._record(op, "cancelled")
+                self._ledger_fire(op, "cancelled")
+                self._ops_by_id.pop(task_id, None)
         return hit
 
     def interrupt_task(self, task_id: str) -> bool:
@@ -157,6 +214,30 @@ class TaskControlMixin:
             await self._ledger.on_op(task_id, action, before, after)
 
     # ---------- Ledger integration ----------
+
+    async def checkpoint_payload(self, op: Op) -> None:
+        """Persist a handler's mid-run ``op.payload`` mutations.
+
+        The ledger is otherwise written only at state transitions
+        (running/paused/retry/failed/done in execution.py), so the payload
+        snapshot taken by the *running* write is what a restart sees. Any key
+        a handler adds while running is therefore lost on a crash -- a pause
+        survives (the paused write captures it), a kill/restart does not.
+
+        Two live defects came from that gap: essence_save's ``sent_parts``
+        ledger was discarded, so a crash mid-document re-sent every part and
+        orphaned the earlier messages (their ids lived only in memory, so the
+        plugin could no longer delete them); and upload's staged
+        ``parent_resource_id`` was discarded, so a crash between creating the
+        volume parent row and finishing the upload made the retry create a
+        second parent and orphan the first.
+
+        Handlers call this immediately after a non-idempotent side effect
+        whose "already done" marker they keep in the payload. Reuses the
+        ``running`` state so no new state (or schema) is introduced; the
+        write is an upsert, so calling it repeatedly is safe.
+        """
+        await self._ledger_state(op, "running")
 
     async def _ledger_state(
         self, op: Op, state: str, error: str | None = None

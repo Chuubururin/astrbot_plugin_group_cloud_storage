@@ -144,10 +144,12 @@ async def test_replace_name_flow(env, monkeypatch):
     page = await store.query_resources(__import__("core.domain.sync", fromlist=["ResourceQuery"]).ResourceQuery(group_id="g1", page_size=10))
     rid = page.items[0].id
 
-    async def fake_fetch(url):
-        return b"OLDDATA"
+    async def fake_download(url, dest):
+        # 改名重传走流式落盘下载（_download_to_file），与转分卷一致
+        dest.write_bytes(b"OLDDATA")
+        return 7
 
-    monkeypatch.setattr(ops, "_fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ops, "_download_to_file", fake_download)
     tid = await ops.submit_replace_name("g1", rid, "b.txt")
     r = await _drain_op(queue, tid)
     assert r["state"] == "ok"
@@ -211,10 +213,12 @@ async def test_convert_volumes_uploads_and_deletes(env, monkeypatch):
     page = await store.query_resources(__import__("core.domain.sync", fromlist=["ResourceQuery"]).ResourceQuery(group_id="g1", page_size=10))
     rid = page.items[0].id
 
-    async def fake_fetch(url):
-        return payload
+    async def fake_download(url, dest):
+        # 转分卷走流式落盘下载（_download_to_file）：原件可能上 GB，不整块进内存
+        dest.write_bytes(payload)
+        return len(payload)
 
-    monkeypatch.setattr(ops, "_fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ops, "_download_to_file", fake_download)
     tid = await ops.submit_convert_volumes("g1", rid)
     deadline = __import__("time").monotonic() + 30
     state = None

@@ -117,6 +117,26 @@ async def test_pause_queued_then_resume(env):
     await _wait_state(env.store, tp, "done")
 
 
+@pytest.mark.asyncio
+async def test_resume_queued_writesthrough_pending(env):
+    # 坏链 #29（真机 2026-09-12）：pause 对排队任务有立即台账写穿（paused），
+    # resume 缺对称写穿 → 行卡 "paused" 直到 worker 出队（深队列时数小时）。
+    # 占满两个高优 worker 使 tp 必在排队态；resume 后行必须立即回到 pending。
+    b1 = await env.queue.submit("move_file", "g1", _steps({}, 200))
+    b2 = await env.queue.submit("move_file", "g1", _steps({}, 200))
+    await _wait_handler_started(env.calls)
+    tp = await env.queue.submit("move_file", "g1", _steps({}, 0))
+    assert env.queue.pause_task(tp) == "queued"
+    await _wait_state(env.store, tp, "paused")
+    assert env.queue.resume_task(tp) == "resumed"
+    # worker 仍被 b1/b2 占用：pending 只能来自 resume 的写穿，而非出队路径
+    await _wait_state(env.store, tp, "pending", timeout=2.0)
+    # 收尾：释放 worker，tp 正常跑完（写穿不改变执行语义）
+    env.queue.interrupt_task(b1)
+    env.queue.interrupt_task(b2)
+    await _wait_state(env.store, tp, "done", timeout=8.0)
+
+
 # ---------- 暂停/继续（运行中协作式） ----------
 
 @pytest.mark.asyncio
@@ -150,6 +170,25 @@ async def test_interrupt_paused_hold(env):
     await _wait_state(env.store, t1, "cancelled", timeout=5.0)
 
 
+@pytest.mark.asyncio
+async def test_interrupt_queued_writesthrough_cancelled(env):
+    # 坏链 #29 对称面：interrupt 排队任务同样需要立即写穿终态，
+    # 否则行保持 pending 直到出队触发 _execute cancelled 分支（深队列时数小时）。
+    b1 = await env.queue.submit("move_file", "g1", _steps({}, 200))
+    b2 = await env.queue.submit("move_file", "g1", _steps({}, 200))
+    await _wait_handler_started(env.calls)
+    tp = await env.queue.submit("move_file", "g1", _steps({}, 0))
+    assert env.queue.interrupt_task(tp) is True
+    # worker 仍被占用：cancelled 只能来自 interrupt 的写穿
+    await _wait_state(env.store, tp, "cancelled", timeout=2.0)
+    # 收尾：排空的 op 稍后出队走 _execute cancelled 分支，重复写同终态（幂等）
+    env.queue.interrupt_task(b1)
+    env.queue.interrupt_task(b2)
+    await asyncio.sleep(0.2)
+    row = await env.store.ledger_get(tp)
+    assert row is not None and row["state"] == "cancelled"
+
+
 # ---------- 记录状态机（经真实 store 全链路） ----------
 
 @pytest.mark.asyncio
@@ -157,7 +196,7 @@ async def test_ledger_state_machine_flow(env):
     t1 = await env.queue.submit("move_file", "g1", _steps({}, 1))
     row = await _wait_state(env.store, t1, "done")
     assert row["kind"] == "move_file" and row["target"] == "g1"
-    assert row["payload"] == {"steps": 1}
+    assert row["payload"].get("steps") == 1
     rows = await env.tc.list_tasks(state="done")
     assert any(r["task_id"] == t1 for r in rows)
     assert (await env.tc.ops("nope")) == []

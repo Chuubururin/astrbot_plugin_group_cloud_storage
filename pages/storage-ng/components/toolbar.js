@@ -13,13 +13,13 @@
  * @module components/toolbar
  */
 
-import { getState, set, refresh } from '../store.js';
+import { getState, set, subscribe, refresh } from '../store.js';
 import { API } from '../api.js';
 import { getIcon } from '../icons.js';
 import { debounce } from '../utils/helpers.js';
 import { mutate } from '../utils/mutate.js';
 import { attachMenu } from './menu.js';
-import { promptEx, showFormModal } from './modal.js';
+import { promptEx, showFormModal, confirmEx } from './modal.js';
 import { toast } from './toast.js';
 import {
   showUploadSourceModal,
@@ -29,7 +29,7 @@ import { handleFileUpload, resolveUploadGroup } from '../features/upload.js';
 import {
   openGroupFileToNetdisk, openAlbumToNetdisk, openEssenceToNetdisk,
 } from '../features/cross-upload.js';
-import { openNetdiskUrlUpload } from '../features/netdisk-ops.js';
+import { openNetdiskUrlUpload, netdiskIndex, netdiskRemoveEmptyDirs } from '../features/netdisk-ops.js';
 
 export { initModuleToolbar, MODULE_TOOLBAR_SPECS } from './module-toolbar.js';
 
@@ -71,8 +71,14 @@ const STATUS_CHIPS = [
   { value: 'none', label: '未下载' },
 ];
 
-/** Bind a chip row to a store key; the pick callback fires on change. */
-function bindChips(container, scopeId, chips, key, onPick) {
+/** Bind a chip row to a store key; the pick callback fires on change.
+ *
+ * `pageKey` is reset *before* set(key, val) on purpose: set() synchronously
+ * notifies the table's filter subscription, whose load reads the page
+ * number before its first await — resetting the page afterwards would never
+ * re-trigger a load, leaving "old page + new filter" with a pager showing
+ * page 1. */
+function bindChips(container, scopeId, chips, key, pageKey, onPick) {
   const wrap = container.querySelector(scopeId);
   if (!wrap) return;
   wrap.innerHTML = chips.map((c) =>
@@ -81,16 +87,18 @@ function bindChips(container, scopeId, chips, key, onPick) {
   wrap.addEventListener('click', (e) => {
     const btn = e.target.closest('.type-chip');
     if (!btn) return;
+    if (pageKey) set(pageKey, 1);
     set(key, btn.dataset.val);
     wrap.querySelectorAll('.type-chip').forEach((b) => b.classList.toggle('active', b === btn));
-    onPick(btn.dataset.val);
+    if (onPick) onPick(btn.dataset.val);
   });
 }
 
 /** Files toolbar. Upload entry is merged (local/URL/netdisk/album/essence/
  * browser-text upload all go through the upload modal); refresh has two
  * levels (all list / current group list); "new folder" is root-path only,
- * disabled inside folders (backend flat single-level semantics). */
+ * disabled inside folders (backend flat single-level semantics).
+ * @returns {function} unsubscribe for the folder subscription */
 export function initFilesToolbar(container) {
   container.className = 'toolbar';
   const canNewFolder = !getState().folder;
@@ -104,6 +112,7 @@ export function initFilesToolbar(container) {
       <div class="menu-box hidden" id="refresh-menu">
         <button class="menu-item" data-act="scan-all">同步全部群列表</button>
         <button class="menu-item" data-act="scan-current">同步当前群列表</button>
+        <button class="menu-item" data-act="sync-current">对账当前群（云端比对）</button>
       </div>
     </span>
     <div id="type-chips" class="type-chips"></div>
@@ -113,13 +122,10 @@ export function initFilesToolbar(container) {
     <input id="file-input" type="file" multiple style="display:none" />
   `;
 
-  bindChips(container, '#type-chips', TYPE_CHIPS, 'fileType', () => {
-    set('filePage', 1);
-  });
-  bindChips(container, '#status-chips', STATUS_CHIPS, 'fileStatus', () => {
-    set('filePage', 1);
-    refresh('files');
-  });
+  // 文件类型 chip 有 table 订阅（data-table 的 typeKey），页码重置必须
+  // 先于筛选变更；状态 chip 无订阅，显式 refresh 走同一条路径。
+  bindChips(container, '#type-chips', TYPE_CHIPS, 'fileType', 'filePage');
+  bindChips(container, '#status-chips', STATUS_CHIPS, 'fileStatus', 'filePage', () => refresh('files'));
 
   container.querySelector('#search-input')?.addEventListener('input', debounce(() => {
     set('searchQuery', container.querySelector('#search-input').value);
@@ -140,6 +146,13 @@ export function initFilesToolbar(container) {
       handleFileUpload(e.target.files);
       e.target.value = '';
     }
+  });
+
+  // 新建文件夹仅根路径可用：folder 会在进入/退出目录、切群回退时变化，
+  // 禁用态必须跟着重算（否则按钮停留在挂载时的状态）。返回清理函数。
+  const newFolderBtn = container.querySelector('#btn-new-folder');
+  return subscribe('folder', () => {
+    if (newFolderBtn) newFolderBtn.disabled = Boolean(getState().folder);
   });
 }
 
@@ -162,6 +175,12 @@ async function handleRefreshAction(act) {
     if (!currentGroup) { toast('请先选择群', 'warn'); return; }
     await mutate('刷新', API.FILES.SCAN, { mode: 'range', group_ids: [currentGroup] },
       { successText: '当前群列表刷新已启动' });
+  } else if (act === 'sync-current') {
+    // files/sync ("单群刷新"): snapshot reconciliation of one group's
+    // file list against the cloud (withered rows removed on completion).
+    if (!currentGroup) { toast('请先选择群', 'warn'); return; }
+    await mutate('对账', API.FILES.SYNC, { group: currentGroup },
+      { successText: '当前群云端对账已启动' });
   } else {
     // The file-domain "all list" refresh must call files/scan with
     // mode=all (full refetch of all group files); groups/scan only
@@ -181,15 +200,21 @@ export function initNetdiskToolbar(container) {
       <button id="btn-netdisk-upload" class="primary" title="上传（本地 / URL / 群文件 / 相册 / 精华 五来源）">${getIcon('UPLOAD', 13)} 上传</button>
       <button id="btn-netdisk-home" title="根目录">根目录</button>
       <button id="btn-netdisk-mkdir" title="新建目录">新建目录</button>
+      <span class="toolbar-menu">
+        <button id="btn-netdisk-manage" title="目录维护">管理 ${getIcon('CHEVRON_DOWN', 10)}</button>
+        <div class="menu-box hidden" id="netdisk-manage-menu">
+          <button class="menu-item" data-act="deep-index">深度索引当前目录</button>
+          <button class="menu-item" data-act="remove-empty">清理空子目录</button>
+        </div>
+      </span>
     </span>
     <div id="netdisk-type-chips" class="type-chips"></div>
   `;
 
   // Netdisk filters by extension locally (N4a); its chip state is isolated
   // from the files tab so switching tabs never leaks a filter (module rule).
-  bindChips(container, '#netdisk-type-chips', NETDISK_CHIPS, 'netdiskType', () => {
-    set('netdiskPage', 1);
-  });
+  // Page reset must precede the filter change (see bindChips).
+  bindChips(container, '#netdisk-type-chips', NETDISK_CHIPS, 'netdiskType', 'netdiskPage');
 
   container.querySelector('#btn-netdisk-refresh')?.addEventListener('click', () => refresh('netdisk'));
   // Netdisk upload matrix (five sources): local relay / URL link /
@@ -201,6 +226,41 @@ export function initNetdiskToolbar(container) {
     refresh('netdisk');
   });
   container.querySelector('#btn-netdisk-mkdir')?.addEventListener('click', handleNetdiskMkdir);
+
+  // Directory maintenance menu: deep index (backend task) + empty-dir sweep.
+  attachMenu(container.querySelector('#btn-netdisk-manage'), container.querySelector('#netdisk-manage-menu'));
+  container.querySelectorAll('#netdisk-manage-menu [data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => handleNetdiskManage(btn.dataset.act));
+  });
+}
+
+async function handleNetdiskManage(act) {
+  const { netdiskPath } = getState();
+  const dir = netdiskPath || '/';
+  if (act === 'deep-index') {
+    try {
+      const r = await netdiskIndex(dir);
+      toast(`深度索引已提交${r?.task_id ? `（任务 ${String(r.task_id).slice(0, 8)}）` : ''}`, 'success');
+    } catch (e) { toast(`提交失败: ${e.message || e}`, 'error'); }
+    return;
+  }
+  // remove-empty: direct sub-directories of the current listing only.
+  const subDirs = (getState().netdiskFiles || [])
+    .filter((f) => f.is_dir).map((f) => f.name);
+  if (!subDirs.length) { toast('当前目录没有子目录', 'warn'); return; }
+  const ok = await confirmEx('清理空子目录',
+    `将检查 ${dir} 下 ${subDirs.length} 个子目录，空目录会被删除（非空目录不受影响）。`,
+    { okText: '清理' });
+  if (!ok) return;
+  try {
+    await netdiskRemoveEmptyDirs(dir, subDirs);
+    toast('空目录清理完成', 'success');
+  } catch (e) {
+    // OpenList may still complete the sweep after a timeout (SMB scans are
+    // slow); refresh either way so the listing reflects reality.
+    toast(`清理未确认（后台可能已完成）: ${e.message || e}`, 'warn');
+  }
+  refresh('netdisk');
 }
 
 

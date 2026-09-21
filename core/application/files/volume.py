@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +14,7 @@ from core.domain.enums import ResourceType
 from core.domain.resource import Resource
 from core.domain.sync import ResourceQuery, VolumeInfo
 from core.log import logger
+from core.application.common import sha256_file
 
 from . import consts
 
@@ -21,8 +23,14 @@ if TYPE_CHECKING:
 
 
 def _like_escape(text: str) -> str:
-    """Escape SQL LIKE wildcards in a filename stem (ESCAPE not required:
-    escaped chars are doubled into the pattern)."""
+    """Escape LIKE wildcards in a filename stem.
+
+    Kept local on purpose: ``adapters.persistence.sqlite.like`` holds the
+    shared helper, but contract C2 forbids ``core.application`` from reaching
+    ``adapters.persistence``. Backslash is escaped first because the SQL this
+    feeds declares ``ESCAPE '\\'``, so a literal backslash in the stem would
+    otherwise start an escape sequence.
+    """
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -67,7 +75,6 @@ class VolumeMixin:
             slices, total_sha_hex = await asyncio.to_thread(_split_source)
         except Exception:
             # BUG-12: clean up partial .raw_* files if _split_source fails
-            import shutil
             cut_dir_cleanup = self.tmp_dir / f"vol_{parent_id}"
             shutil.rmtree(cut_dir_cleanup, ignore_errors=True)
             raise
@@ -94,7 +101,7 @@ class VolumeMixin:
                     zf.write(_raw, arcname=f"{_stem}.part{_seq:02d}of{_total:02d}")
                 _raw.unlink(missing_ok=True)
                 zsize = _zpath.stat().st_size
-                sha = hashlib.sha256(_zpath.read_bytes()).hexdigest()
+                sha = sha256_file(_zpath)
                 return zsize, sha
 
             zsize, vol_sha = await asyncio.to_thread(_compress_and_hash)
@@ -108,94 +115,103 @@ class VolumeMixin:
                     status="pending",
                 )
             )
-        await self.store.insert_volumes(volumes)  # idempotent; keeps existing part status
-        existing_vols = await self.store.list_volumes(parent_key)
-        # Resume support: parts already marked "uploaded" but without a
-        # backfilled source_ref would never qualify for the skip below
-        # (source_ref only arrives via backfill_volume_refs after a full
-        # sync), so a queue retry used to re-upload EVERY part. Try one
-        # sync + backfill to recover their refs first; parts that still
-        # lack a ref were likely deleted on the cloud and get re-uploaded.
-        pending_resume = [
-            x for x in existing_vols
-            if x.status == "uploaded" and not x.source_ref
-        ]
-        if pending_resume and op.payload.get("parent_resource_id_full"):
-            lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
-            sync_result = await self.sync.run_full_sync(op.target, lock)
-            if sync_result.ok:
-                await self.backfill_volume_refs(
-                    op.target, op.payload["parent_resource_id_full"]
-                )
-                existing_vols = await self.store.list_volumes(parent_key)
-        for v in volumes:
-            cur = next(
-                (x for x in existing_vols if x.seq == v.seq),
-                v,
-            )
-            if cur.status == "uploaded" and cur.source_ref:
-                continue  # already uploaded -> skipped for resume
-            await self.queue.pause_check(op)
-            await self.store.update_volume_fields(parent_key, v.seq, status="uploading")
-            await self.api.upload_group_file(
-                op.target,
-                (cut_dir / v.part_name).as_posix(),
-                v.part_name,
-                folder_id=folder,
-            )
-            await self.store.update_volume_fields(
-                parent_key,
-                v.seq,
-                status="uploaded",
-                sha256=v.sha256,
-                size=v.size,
-            )
-            self.queue.publish(
-                {
-                    "type": "progress",
-                    "kind": "vol_upload",
-                    "target": op.target,
-                    "i": v.seq,
-                    "n": total_count,
-                    "part": v.part_name,
-                }
-            )
-        # Parent resource meta records the total sha256 (used to verify
-        # reassembly on download)
-        import json
-
-        await self.queue.pause_check(op)
-        detail = await self.store.get_resource_by_resource_id(
-            op.payload.get("parent_resource_id_full") or parent_id
-        )
-        if detail:
-            from core.application.composition.spec import encode_composition
-
-            meta = dict(detail["meta"] or {})
-            meta["volumes"] = True
-            # zip-part: each volume is an individual zip (split first,
-            # compress after); legacy "zip" = one zip split into raw slices
-            meta["compression"] = "zip-part"
-            meta["original_name"] = (
-                op.payload.get("original_name") or op.payload.get("name") or name
-            )
-            if op.payload.get("original_size"):
-                meta["original_size"] = int(op.payload["original_size"])
-            meta["total_sha256"] = total_sha_hex
-            meta["composition"] = encode_composition(
-                "volumes", total_count, "binary", total_sha_hex
-            )
-            await self.store.update_resource_fields(
-                detail["id"], meta=json.dumps(meta, ensure_ascii=False)
-            )
-        logger.info(f"[file-ops] volume upload done: {name} -> {len(volumes)} parts")
-        # Clean up the local volume slices
-        for v in volumes:
-            (cut_dir / v.part_name).unlink(missing_ok=True)
         try:
-            cut_dir.rmdir()
-        except OSError:
-            pass
+            # H3: insert_volumes upserts on (parent_resource_id, seq) and keeps
+            # an existing "uploaded" status (SQL CASE on volumes.status), so
+            # re-entering this pipeline on a retry / pause->resume does not
+            # demote finished parts to "pending" and the skip below still
+            # matches. The skip criterion is persisted DB state, not
+            # op.retries/replayed: a first pass over an already-uploaded part
+            # (in-place convert reusing the resource_id) must skip it too.
+            await self.store.insert_volumes(volumes)
+            existing_vols = await self.store.list_volumes(parent_key)
+            # Resume support: parts already marked "uploaded" but without a
+            # backfilled source_ref would never qualify for the skip below
+            # (source_ref only arrives via backfill_volume_refs after a full
+            # sync), so a queue retry used to re-upload EVERY part. Try one
+            # sync + backfill to recover their refs first; parts that still
+            # lack a ref were likely deleted on the cloud and get re-uploaded.
+            pending_resume = [
+                x for x in existing_vols
+                if x.status == "uploaded" and not x.source_ref
+            ]
+            if pending_resume and op.payload.get("parent_resource_id_full"):
+                lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
+                sync_result = await self.sync.run_full_sync(op.target, lock)
+                if sync_result.ok:
+                    await self.backfill_volume_refs(
+                        op.target, op.payload["parent_resource_id_full"]
+                    )
+                    existing_vols = await self.store.list_volumes(parent_key)
+            for v in volumes:
+                cur = next(
+                    (x for x in existing_vols if x.seq == v.seq),
+                    v,
+                )
+                if cur.status == "uploaded" and cur.source_ref:
+                    continue  # already uploaded -> skipped for resume
+                await self.queue.pause_check(op)
+                await self.store.update_volume_fields(parent_key, v.seq, status="uploading")
+                await self.api.upload_group_file(
+                    op.target,
+                    (cut_dir / v.part_name).as_posix(),
+                    v.part_name,
+                    folder_id=folder,
+                )
+                await self.store.update_volume_fields(
+                    parent_key,
+                    v.seq,
+                    status="uploaded",
+                    sha256=v.sha256,
+                    size=v.size,
+                )
+                self.queue.publish(
+                    {
+                        "type": "progress",
+                        "kind": "vol_upload",
+                        "target": op.target,
+                        "i": v.seq,
+                        "n": total_count,
+                        "part": v.part_name,
+                    }
+                )
+            # Parent resource meta records the total sha256 (used to verify
+            # reassembly on download)
+            import json
+
+            await self.queue.pause_check(op)
+            detail = await self.store.get_resource_by_resource_id(
+                op.payload.get("parent_resource_id_full") or parent_id
+            )
+            if detail:
+                from core.application.composition.spec import encode_composition
+
+                meta = dict(detail["meta"] or {})
+                meta["volumes"] = True
+                # zip-part: each volume is an individual zip (split first,
+                # compress after); legacy "zip" = one zip split into raw slices
+                meta["compression"] = "zip-part"
+                meta["original_name"] = (
+                    op.payload.get("original_name") or op.payload.get("name") or name
+                )
+                if op.payload.get("original_size"):
+                    meta["original_size"] = int(op.payload["original_size"])
+                meta["total_sha256"] = total_sha_hex
+                meta["composition"] = encode_composition(
+                    "volumes", total_count, "binary", total_sha_hex
+                )
+                await self.store.update_resource_fields(
+                    detail["id"], meta=json.dumps(meta, ensure_ascii=False)
+                )
+            logger.info(f"[file-ops] volume upload done: {name} -> {len(volumes)} parts")
+        finally:
+            # A failure mid-loop (upload error / cancel / pause_check) used
+            # to leave every .zip -- and any .raw_* -- behind in
+            # tmp_dir/vol_<parent>/, so one failed large-file conversion
+            # could pin hundreds of MB to GBs on disk. The DB volume rows
+            # are the resume source of truth, so wiping the whole dir is
+            # safe (a retry re-splits and re-compresses from the source).
+            shutil.rmtree(cut_dir, ignore_errors=True)
 
     async def recommend_upload_group(
         self, kind: str = "file", requested_bytes: int = 0
@@ -434,17 +450,21 @@ class VolumeMixin:
             op.payload.get("folder") or None,
         )
         fid, busid = fresh or (op.payload["file_id"], op.payload["busid"] or 0)
-        data = await self._fetch_bytes(
-            await self.api.get_group_file_url(op.target, fid, busid, op.payload["name"])
-        )
-        if not data:
-            raise ValueError("download returned empty content")
+        # Stream the original straight to disk: conversion targets are
+        # >95MB by definition and _fetch_bytes would hold the whole body
+        # (multi-GB possible) in RAM.
         src = self.tmp_dir / f"conv_{op.payload['id']}_{uuid.uuid4().hex[:8]}.tmp"
-        src.write_bytes(data)
+        n = await self._download_to_file(
+            await self.api.get_group_file_url(op.target, fid, busid, op.payload["name"]),
+            src,
+        )
+        if n <= 0:
+            src.unlink(missing_ok=True)
+            raise ValueError("download returned empty content")
         # Split first, compress after: the raw download goes straight into
         # the volume pipeline (each volume is zipped individually there;
         # download reassembly extracts it automatically)
-        op.payload["original_size"] = src.stat().st_size
+        op.payload["original_size"] = n
         try:
             # Reuse the volume upload pipeline: use the existing resource_id as
             # the parent key (in-place index conversion)

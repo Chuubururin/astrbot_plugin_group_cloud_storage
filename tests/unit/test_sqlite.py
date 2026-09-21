@@ -151,10 +151,18 @@ async def test_successor_row_inherits_composition_and_relinks_volumes(store):
 
 
 @pytest.mark.asyncio
-async def test_same_name_smaller_file_does_not_inherit_composition(store):
-    """尺寸门（2026-09-10 线上 10879 案例）：同名新上传的更小文件不是旧
-    组合文件的接续（云端原件在转换后已删除），不得继承 composition、
-    不得重挂分卷。旧行保留、分卷仍挂旧行。"""
+async def test_same_name_is_the_same_logical_file_regardless_of_size(store):
+    """线上 10879 案例，按 logical_key 语义重新钉定（行为已反转，故保留此用例）。
+
+    旧规则：尺寸门用文件大小猜「同名的新文件是不是旧组合文件的接续」，
+    2KB 的新文件被判为不同文件 → 不继承 composition、旧行保留、分卷挂旧行。
+
+    新规则：身份是 (group_id, type, name)，同名同群即同一逻辑文件；
+    大小只是同步产物（同一云端文件在不同次列表里大小会变），不是身份。
+    因此继承 composition 并把分卷重挂到存活行，是正确行为。
+
+    保留用例是为了让后来者看到这次反转是有意为之，而不是误改。
+    """
     from core.domain.sync import VolumeInfo
 
     old = Resource(
@@ -170,7 +178,7 @@ async def test_same_name_smaller_file_does_not_inherit_composition(store):
                    busid=1, size=100, sha256="a" * 64, status="ready",
                    upload_time=1, group_id=None),
     ])
-    # 同名但小得多的新文件（旧组合原件 200MB，转换后云端已删）
+    # 同名同群、小得多、自身无 meta 的新文件
     small = Resource(
         group_id="g1", type=ResourceType.FILE, name="vol_test.bin",
         source_ref="new_ref", size=2048, uploader_id="10001", busid=9,
@@ -178,21 +186,16 @@ async def test_same_name_smaller_file_does_not_inherit_composition(store):
     )
     await store.upsert_resources([small])
 
-    d = await store.get_resource_by_resource_id("g1:file:new_ref")
-    assert (d["meta"] or {}) == {}
-    assert await store.get_resource_by_resource_id("g1:file:old_ref") is not None
-    vols = await store.list_volumes("g1:file:old_ref")
-    assert len(vols) == 1
-    # 更大（或同尺寸）的接续者仍然继承（覆盖旧路径不回归）
-    big = Resource(
-        group_id="g1", type=ResourceType.FILE, name="vol_test.bin",
-        source_ref="big_ref", size=200000000, uploader_id="10001", busid=9,
-        created_at=1700000003,
+    page = await store.query_resources(
+        ResourceQuery(group_id="g1", keyword="vol_test.bin", page_size=50)
     )
-    await store.upsert_resources([big])
-    d2 = await store.get_resource_by_resource_id("g1:file:big_ref")
-    assert (d2["meta"] or {}).get("volumes") is True
-    assert await store.list_volumes("g1:file:big_ref")
+    assert page.total == 1, "一个逻辑文件只应有一行存活"
+
+    d = await store.get_resource_by_resource_id("g1:file:new_ref")
+    assert (d["meta"] or {}).get("composition", {}).get("kind") == "volumes"
+    vols = await store.list_volumes("g1:file:new_ref")
+    assert len(vols) == 1, "分卷必须跟随存活行，不能成为孤儿"
+    assert await store.list_volumes("g1:file:old_ref") == []
 
 
 @pytest.mark.asyncio
@@ -292,16 +295,25 @@ async def test_query_sort_by_size_and_name(store):
 
 
 @pytest.mark.asyncio
-async def test_upsert_does_not_resurrect_deleted(store):
+async def test_upsert_resurrects_deleted_row(store):
+    """M1：软删不是终态。
+
+    原实现（status=CASE WHEN excluded.status != 'active' THEN excluded.status
+    ELSE status END）在新行为 active 时永远保留旧状态，而全库没有把 status
+    置回 active 的路径：mark_missing_as_deleted 被一次不完整的列表触发后，
+    同一 file_id 即使重新出现在云端也永远回不来。现在两个方向都成立：
+    新行 deleted → 置 deleted；新行 active 且旧行 deleted → 复活。
+    """
     await store.upsert_resources([_res(1)])
     # 孤儿清理将其置 deleted
     await store.mark_missing_as_deleted("g1", True, {"other"})
     active = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
     assert active.total == 0
-    # 事件/同步再次 upsert 同一文件：不得复活（status 保留原值）
+    # 同一文件重新出现在云端列表：复活
     await store.upsert_resources([_res(1)])
     active = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
-    assert active.total == 0  # 未复活
+    assert active.total == 1  # 复活
+    assert active.items[0].name == "f1.zip"
 
 
 @pytest.mark.asyncio
@@ -569,3 +581,255 @@ async def test_list_accounts_aggregation(store):
     accounts = await store.list_accounts()
     assert accounts == [{"account_id": "10001", "groups": 2},
                         {"account_id": "20002", "groups": 1}]
+
+
+@pytest.mark.asyncio
+async def test_query_resources_exts_filter_matches_transient_intermediates(store):
+    """类型过滤（exts）对临时中间态命名保持超集匹配：classify() 剥离临时后缀
+    后归入某类型的文件（如 SnowLuma 的 x.rar.netdisk.p.downloading → archive）
+    必须能被该类型的 exts 查询命中，与列表显示的分类一致。"""
+    from core.domain.resource import Resource
+
+    def _named(name: str, i: int) -> Resource:
+        return Resource(
+            group_id="g1", type=ResourceType.FILE, name=name, source_ref=f"ref_{i}",
+            size=10, uploader_id="10001", uploader_name="Alice", busid=1,
+            folder_id="dir1", folder_name="Docs", created_at=1700000000 + i,
+        )
+
+    await store.upsert_resources([
+        _named("movie.rar", 1),
+        _named("movie.rar.netdisk.p.downloading", 2),
+        _named("movie.rar.part2", 3),
+        _named("notes.txt", 4),
+        _named("music.zip.bak", 5),
+    ])
+    page = await store.query_resources(
+        ResourceQuery(group_id="g1", type="file", exts=[".rar"], page_size=100)
+    )
+    names = {r.name for r in page.items}
+    # ".rar" 精确后缀 + ".rar." 中间态变体都命中；".txt"/".bak" 结尾不误入
+    assert names == {"movie.rar", "movie.rar.netdisk.p.downloading", "movie.rar.part2"}
+
+
+@pytest.mark.asyncio
+async def test_mark_missing_preserves_volume_parent_after_json_patch(store):
+    """回归：分卷父行在 meta 被 json_patch 压缩（紧凑 JSON，无空格）后，
+    NOT LIKE '"volumes": true' 字节守卫曾失效，导致父行在普通同步里被误软删。
+    现在守卫走 json_extract(meta,'$.volumes')，压缩后仍能识别并保留父行。"""
+    from core.domain.resource import Resource
+    from core.domain.sync import ResourceQuery
+
+    parent = Resource(
+        group_id="g1", type=ResourceType.FILE, name="pkg.rar", size=10,
+        source_ref="volgroup:pkg", uploader_id="10001", uploader_name="Alice",
+        busid=1, folder_id="dir1", folder_name="Docs", created_at=1700000000,
+        meta={"volumes": True, "composition": {"kind": "volumes"}, "note": None},
+    )
+    # 两次 upsert：第二次走 json_patch 分支，把父行 meta 压成紧凑格式
+    await store.upsert_resources([parent])
+    await store.upsert_resources([
+        Resource(
+            group_id="g1", type=ResourceType.FILE, name="pkg.rar", size=10,
+            source_ref="volgroup:pkg", uploader_id="10001", uploader_name="Alice",
+            busid=1, folder_id="dir1", folder_name="Docs", created_at=1700000000,
+            meta={"volumes": True, "composition": {"kind": "volumes"}},
+        ),
+        Resource(
+            group_id="g1", type=ResourceType.FILE, name="plain.txt", size=10,
+            source_ref="ref_plain", uploader_id="10001", uploader_name="Alice",
+            busid=1, folder_id="dir1", folder_name="Docs", created_at=1700000001,
+        ),
+    ])
+    removed = await store.mark_missing_as_deleted(
+        "g1", complete=True, source_file_ids={"whatever"}  # 父行 source_ref 不在云端
+    )
+    assert removed == 1  # 只删 plain.txt；分卷父行必须被保留
+    page = await store.query_resources(ResourceQuery(group_id="g1", type="file", page_size=100))
+    names = {r.name for r in page.items}
+    assert "pkg.rar" in names
+    assert "plain.txt" not in names
+
+
+@pytest.mark.asyncio
+async def test_query_resources_empty_groups_is_empty_set_not_no_filter(store):
+    """H8 回归：groups=[] 是空集语义（“匹配任何群”都不成立）→ 必须返回空，
+    绝不等于“不过滤”。旧实现 `if q.groups:` 把空列表当假，于是不加任何群过滤；
+    webapi 凋零口径在全部账号离线时 target_groups=[]，本应返回空却把全量列表
+    泄漏了出去。groups=None 才是“不过滤”。"""
+    await store.upsert_resources([_res(1, "g1"), _res(2, "g2")])
+
+    empty = await store.query_resources(ResourceQuery(groups=[], page_size=100))
+    assert empty.total == 0
+    assert empty.items == []
+    # None = 不过滤（跨群全量聚合仍可用）
+    everything = await store.query_resources(ResourceQuery(groups=None, page_size=100))
+    assert {it.group_id for it in everything.items} == {"g1", "g2"}
+    # 非空集合仍走 IN 过滤
+    one = await store.query_resources(ResourceQuery(groups=["g2"], page_size=100))
+    assert {it.group_id for it in one.items} == {"g2"}
+
+
+def _corrupt_meta(name: str, value: str = "{oops"):
+    """把一个已有行的 meta 写成非法 JSON（L1 场景的库形态）。
+
+    前提：FTS 投影缺失的库——v17 的触发器不在，搜索退化为 LIKE。带触发器的库
+    里 UPDATE/INSERT meta 会先在触发器里撞上同一个 json_extract 错误，非法 JSON
+    根本写不进去；而“旧文本守卫容错”的历史数据正是这种无触发器的库写下的。
+    """
+
+    def _do(conn):
+        for trg in ("resources_fts_ai", "resources_fts_ad", "resources_fts_au"):
+            conn.execute(f"DROP TRIGGER IF EXISTS {trg}")
+        conn.execute("UPDATE resources SET meta=? WHERE name=?", (value, name))
+        conn.commit()
+
+    return _do
+
+
+@pytest.mark.asyncio
+async def test_reconcile_survives_malformed_meta_json(store):
+    """L1 回归：meta 非 NULL 但非法 JSON 时 json_extract 抛 “malformed JSON”。
+    相册/精华每次入库都跑这条 DELETE，一次坏行就中断整个 _reconcile
+    （conn.commit() 与随后的 upsert_resources 都不执行）。坏行无法证明自己是
+    自建拆分精华行，仍按旧文本守卫的容错口径被对账删除。"""
+    await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.ESSENCE, name="坏行",
+                 source_ref="m_bad", size=0),
+        Resource(group_id="g1", type=ResourceType.ESSENCE, name="长文",
+                 source_ref="text:abc", size=1, meta={"kind": "text_split"}),
+    ])
+
+    await store._conn.exec(_corrupt_meta("坏行"))
+
+    def _read_meta(conn):
+        return conn.execute("SELECT meta FROM resources WHERE name='坏行'").fetchone()[0]
+
+    assert await store._conn.exec(_read_meta) == "{oops"  # 前提：坏行真的写进去了
+    await store.upsert_album_essence("g1", [], [])  # 修复前：malformed JSON 异常
+    page = await store.query_resources(ResourceQuery(group_id="g1", type="essence"))
+    assert {it.name for it in page.items} == {"长文"}
+
+
+@pytest.mark.asyncio
+async def test_upsert_survives_malformed_meta_in_composition_scan(store):
+    """L1 回归：_inherit_composition_identity 用 json_extract 扫描 composition
+    行，库里一条非法 JSON 的 meta 就让整批 upsert 抛 malformed JSON。加
+    json_valid 前置过滤后，坏行只是不被当作 composition 行。"""
+    await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.FILE, name="big.bin",
+                 source_ref="old_ref", size=1000, created_at=1,
+                 meta={"volumes": True, "composition": {"kind": "volumes"}}),
+    ])
+
+    await store._conn.exec(_corrupt_meta("big.bin"))
+
+    def _read_meta(conn):
+        return conn.execute("SELECT meta FROM resources WHERE name='big.bin'").fetchone()[0]
+
+    assert await store._conn.exec(_read_meta) == "{oops"  # 前提：坏行真的写进去了
+    n = await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.FILE, name="big.bin",
+                 source_ref="new_ref", size=1000, created_at=2),
+    ])
+    assert n >= 1
+
+
+@pytest.mark.asyncio
+async def test_mark_missing_survives_malformed_meta_json(store):
+    """L1 回归：清扫的 volumes 守卫走 json_extract，一条非法 JSON 的 meta 让
+    整轮清扫抛 malformed JSON（一行都标不了删除）。加 json_valid 后坏行无法
+    证明自己是分卷父行，正常参与清扫。"""
+    await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.FILE, name="bad.bin",
+                 source_ref="bad_ref", size=10, created_at=1),
+    ])
+
+    await store._conn.exec(_corrupt_meta("bad.bin"))
+
+    def _read_meta(conn):
+        return conn.execute("SELECT meta FROM resources WHERE name='bad.bin'").fetchone()[0]
+
+    assert await store._conn.exec(_read_meta) == "{oops"  # 前提：坏行真的写进去了
+    removed = await store.mark_missing_as_deleted(
+        "g1", complete=True, source_file_ids={"other_ref"}
+    )
+    assert removed == 1
+
+
+@pytest.mark.asyncio
+async def test_keyword_query_survives_malformed_meta_json(store):
+    """L1 回归：关键词搜索的 summary 投影走 json_extract(meta, '$.summary')，
+    一条非法 JSON 的 meta 就让整次搜索抛 malformed JSON（用户可见的 500）。
+    加 json_valid 后坏行只是不参与 summary 匹配。"""
+    await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.FILE, name="good.txt",
+                 source_ref="ref_good", size=1, created_at=1),
+        Resource(group_id="g1", type=ResourceType.FILE, name="bad.txt",
+                 source_ref="ref_bad", size=1, created_at=2),
+    ])
+    await store._conn.exec(_corrupt_meta("bad.txt"))
+
+    page = await store.query_resources(
+        ResourceQuery(group_id="g1", keyword="good", page_size=100)
+    )
+    assert {it.name for it in page.items} == {"good.txt"}
+
+
+@pytest.mark.asyncio
+async def test_reupsert_survives_malformed_meta_json(store):
+    """L1 回归：upsert 的 ON CONFLICT 分支用 json_extract(resources.meta, …)
+    判断是否 json_patch，库里一条非法 JSON 的 meta 让整批 upsert 抛 malformed
+    JSON（坏行永远修不回来）。加 json_valid 后坏行按“无 composition”走 ELSE，
+    被本次同步的 meta 覆盖。"""
+    await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.FILE, name="bad.bin",
+                 source_ref="ref_bad", size=10, created_at=1),
+    ])
+    await store._conn.exec(_corrupt_meta("bad.bin"))
+
+    n = await store.upsert_resources([
+        Resource(group_id="g1", type=ResourceType.FILE, name="bad.bin",
+                 source_ref="ref_bad", size=10, created_at=1,
+                 meta={"healed": True}),
+    ])
+    assert n >= 1
+    detail = await store.get_resource_by_resource_id("g1:file:ref_bad")
+    assert (detail["meta"] or {}).get("healed") is True
+
+
+@pytest.mark.asyncio
+async def test_fts_repair_failure_does_not_veto_version_chain(tmp_path, monkeypatch):
+    """M3 回归：事后 FTS 修复块是 best-effort。旧实现 on_skip 恒为 None →
+    修复语句失败直接 raise，且与版本链共用同一个 BEGIN IMMEDIATE 事务 →
+    所有版本步骤都成功了但版本号不推进；下次启动重试同一处失败 →
+    store.init() 每次抛错，插件再也初始化不了（搜索本可退化为 LIKE）。"""
+    import sqlite3
+
+    from adapters.persistence.sqlite import migrations as M
+
+    db = tmp_path / "fts_repair.db"
+    conn = sqlite3.connect(db)
+    conn.execute("BEGIN IMMEDIATE")
+    M.migrate(conn)
+    conn.commit()
+    # 构造“版本标记已推进、扩展 FTS 投影只建了一半”的库
+    conn.execute("DROP TABLE resources_fts")
+    conn.execute("CREATE VIRTUAL TABLE resources_fts USING fts5(name)")
+    conn.commit()
+    # 让修复块必然失败
+    monkeypatch.setitem(M.MIGRATIONS, 17, ["SELECT * FROM no_such_table_fts_repair"])
+
+    conn.execute("BEGIN IMMEDIATE")
+    version = M.migrate(conn)  # 修复前：OperationalError 逃出，整条链被否决
+    conn.commit()
+
+    assert version == M.SCHEMA_VERSION
+    assert (
+        conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        == M.SCHEMA_VERSION
+    )
+    # 修复块失败只回滚自己：事务仍可用，后续写入照常
+    conn.execute("CREATE TABLE _post_repair_probe (x INTEGER)")
+    conn.commit()
+    conn.close()

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from core.application.queue import OpQueue
 from core.application.sync import ResourceSyncService
 from core.application.transfer import FETCH_MAX_BYTES, FETCH_TIMEOUT_SEC
-from core.application.composition.splitter import ESSENCE_CHUNK_MAX_CHARS
 from core.config import PluginConfig
 from ports.meta_store import MetaStorePort
 from ports.onebot_api import OneBotApiPort
@@ -15,6 +15,12 @@ from .video import VideoMixin, VIDEO_SEGMENT_MAX_SECONDS
 from .album import AlbumMixin
 from .fetch import FetchMixin
 from .context import IngestContext
+
+# Fallback used when the config dict carries no key: PluginConfig.get is a
+# strict dict.get (no DEFAULTS fallback), so this base must match defaults.py
+# / _conf_schema.json (4000 / 599 -- the QQ hard limits). It used to be 4500
+# here while album.py fell back to 599: three bases for the same limit.
+ESSENCE_CHUNK_FALLBACK_CHARS = 4000
 
 
 class CloudIngestService(EssenceMixin, VideoMixin, AlbumMixin, FetchMixin):
@@ -28,6 +34,7 @@ class CloudIngestService(EssenceMixin, VideoMixin, AlbumMixin, FetchMixin):
         config: dict | None = None,
         transfer=None,
         converter=None,
+        sync_locks: dict[str, asyncio.Lock] | None = None,
     ):
         # Config object injection: unified PluginConfig boundary (dicts pass
         # through for compatibility, see core.config.model)
@@ -40,7 +47,14 @@ class CloudIngestService(EssenceMixin, VideoMixin, AlbumMixin, FetchMixin):
             tmp_dir=Path(tmp_dir),
             transfer=transfer,
             converter=converter,
-            essence_chunk_chars=int(cfg.get("essence_chunk_size", ESSENCE_CHUNK_MAX_CHARS) or ESSENCE_CHUNK_MAX_CHARS),
+            # Shared with FileOpsService / Services.lock_for (bootstrap injects
+            # one dict): a private dict here would let an ingest-triggered
+            # run_full_sync race a file_scan/sync op on the same group.
+            sync_locks=sync_locks if sync_locks is not None else {},
+            essence_chunk_chars=int(
+                cfg.get("essence_chunk_size", ESSENCE_CHUNK_FALLBACK_CHARS)
+                or ESSENCE_CHUNK_FALLBACK_CHARS
+            ),
             video_segment_seconds=int(cfg.get("video_segment_seconds", VIDEO_SEGMENT_MAX_SECONDS) or VIDEO_SEGMENT_MAX_SECONDS),
             fetch_max_bytes=cfg.fetch_max_bytes or FETCH_MAX_BYTES,
             fetch_timeout=float(cfg.get("fetch_timeout_sec", FETCH_TIMEOUT_SEC) or FETCH_TIMEOUT_SEC),

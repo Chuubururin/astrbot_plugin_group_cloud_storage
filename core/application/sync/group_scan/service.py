@@ -48,6 +48,10 @@ class GroupScanService(ScanMixin, CapacityMixin):
     async def run_batch_ops(self, op) -> None:
         """Batch group ops: rename / join option / remark, real per-group
         API calls plus local backfill."""
+        # Idempotent by construction: every action is a "set to value"
+        # API (set_group_name / set_group_add_option / set_group_remark),
+        # so replaying lands on the same state. No replay guard needed
+        # (see R-2 audit).
         action = op.payload.get("action")
         value = op.payload.get("value")
         group_ids = list(op.payload.get("group_ids") or [])
@@ -246,17 +250,22 @@ class GroupScanService(ScanMixin, CapacityMixin):
         gid = str(group_id or "")
         row = await self._group_row(gid)
         owner = str(getattr(row, "account_id", "") or "") if row else ""
-        # The remote verify must run under the owning account: without the
-        # scope it lands on best_bot, which is usually not a member of this
-        # group, and the empty reply misreads as "dissolved".
-        with account_scope(owner):
-            info: dict = {}
-            try:
-                info = await self.api.get_group_info(gid, no_cache=True) or {}
-            except Exception:
-                info = {}
-        if not str((info or {}).get("group_name") or ""):
-            raise ValueError("群已解散或不可访问")
+        # No recorded owner (legacy rows) -> no attributable bot to verify
+        # with: probing under best_bot would false-positive "dissolved"
+        # whenever best_bot is simply not a member. The gate stays open,
+        # matching the unknown-owner semantics of group_open_state.
+        if owner:
+            # The remote verify must run under the owning account: without
+            # the scope it lands on best_bot, which is usually not a member
+            # of this group, and the empty reply misreads as "dissolved".
+            with account_scope(owner):
+                info: dict = {}
+                try:
+                    info = await self.api.get_group_info(gid, no_cache=True) or {}
+                except Exception:
+                    info = {}
+            if not str((info or {}).get("group_name") or ""):
+                raise ValueError("群已解散或不可访问")
 
     async def _group_row(self, group_id: str):
         """Local groups-table row for the gate (include hidden)."""

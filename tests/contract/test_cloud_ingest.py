@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from core.domain.sync import ResourceQuery  # noqa: E402
+from core.domain.enums import CapabilityState, OneBotApiError, OneBotErrorKind  # noqa: E402
 from core.application.ingest import CloudIngestService  # noqa: E402
 from core.application.composition.splitter import effective_chunk_limit, split_text  # noqa: E402
 from core.application.files import FileOpsService  # noqa: E402
@@ -215,6 +216,25 @@ async def test_fetch_image_to_album_autocreate(env):
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_to_album_stale_declared_name(env):
+    """同名 declared 暂存残留时仍以上报名为准（2026-09-12 真机坏链：
+    旧"精华_N.png"残留让改名静默跳过，QQ 相册显示 fetch_xxx.tmp）。"""
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "我的相册"}]}
+    api.essences = {"g1": []}
+    # 预置同名残留（上一次运行遗留）
+    (ingest.tmp_dir / "精华_9.png").write_bytes(b"stale")
+    tid = await ingest.submit_fetch(
+        "g1", "https://example.com/pic.png", name="精华_9.png",
+        to_album=True, album_name="我的相册",
+    )
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    assert len(api.album_uploads) == 1
+    assert api.album_uploads[0]["file"].endswith("精华_9.png")
+
+
+@pytest.mark.asyncio
 async def test_fetch_image_to_album_create_unsupported(env):
     """协议端无创建相册接口（NapCat）时报出可操作的中文指引。"""
     tmp_path, store, api, queue, ingest = env
@@ -365,9 +385,12 @@ async def test_video_recon_concat(env, monkeypatch):
     assert detail and detail["resource_id"] == "g1:file:vidgroup:x"
 
     seg_bytes = [b"AAAA", b"BBBB"]
-    async def _fetch(self, url):
-        return seg_bytes.pop(0)
-    monkeypatch.setattr(FileOpsService, "_fetch_bytes", _fetch)
+    async def _fetch(self, url, dest):
+        # 重组走流式落盘下载（_download_to_file）：分段直写磁盘再哈希
+        data = seg_bytes.pop(0)
+        dest.write_bytes(data)
+        return len(data)
+    monkeypatch.setattr(FileOpsService, "_download_to_file", _fetch)
 
     captured = {}
 
@@ -584,13 +607,17 @@ async def test_video_preview_missing_entry_raises(env):
 
 
 @pytest.mark.asyncio
-async def test_video_album_splits_and_uploads(env):
-    """化整为零（v2.8）：媒体分片入群相册——ffmpeg 分段逐段上传 + 相册刷新。"""
+async def test_video_album_splits_and_uploads(env, monkeypatch):
+    """化整为零（v2.8）：媒体分片入群相册——ffmpeg 分段逐段上传 + 相册刷新。
+
+    仅在协议端支持相册视频时可达（`album_accepts_video`，默认关闭，见下一条）。
+    """
     import shutil as _sh
     import subprocess as _sp
 
     if not _sh.which("ffmpeg"):
         pytest.skip("ffmpeg not available")
+    monkeypatch.setattr(CloudIngestService, "album_accepts_video", True)
     tmp_path, store, api, _, ingest = env
     api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
     src = tmp_path / "v.mp4"
@@ -608,6 +635,31 @@ async def test_video_album_splits_and_uploads(env):
 
 
 @pytest.mark.asyncio
+async def test_video_album_refused_on_image_only_protocol(env):
+    """默认协议端相册只收图片：视频任务一次终态拒绝，且不做任何 ffmpeg/相册操作。
+
+    真机证据（2026-09-16）：NapCat `upload_image_to_qun_album` 对视频返回
+    retcode=100「群相册上传仅支持 JPEG、PNG、GIF、WebP 或 BMP 图片」。
+    拒绝必须发生在切割之前（否则长视频会被完整切分后才逐段被拒），且不可重试：
+    按 ValueError 抛会被队列重试 3 次（2+4+8s = 14s），6s 的 drain 超时会直接失败。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"fakemp4" * 10)  # 无需 ffmpeg：拒绝先于时长探测/切割
+    tid = await ingest.submit_video_album("g1", src.as_posix(), "v.mp4", "测试相册")
+    r = await drain_op(queue, tid, timeout=6)
+    assert r["state"] == "failed"
+    assert "仅支持图片" in r["error"]
+    assert "入群文件" in r["error"]  # 可操作指引
+    assert api.album_uploads == []
+    assert not src.exists()  # 拒绝是终态：暂存文件一并清掉（否则 tmp 里留垃圾）
+    assert not any(
+        c.startswith(("get_qun_album_list", "create_group_album")) for c in api.calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_image_album_single_upload(env):
     """2026-09-01 N-06：单图导入群相册（upload_image_to_qun_album + 资源化刷新）。"""
     tmp_path, store, api, _, ingest = env
@@ -620,6 +672,208 @@ async def test_image_album_single_upload(env):
     assert api.album_uploads[0]["album_name"] == "测试相册"
     assert "get_qun_album_list" in " ".join(api.calls)
     assert not src.exists()  # 暂存已清理
+
+
+@pytest.mark.asyncio
+async def test_image_album_replay_does_not_duplicate_media(env):
+    """重试不得把同一张图二次入册（上传非幂等）。
+
+    场景：服务端已收下媒体，但调用以超时收场（TIMEOUT 可重试）。旧实现重放整个
+    任务会再传一次，相册里出现两张同名图。重放时必须先查相册媒体列表再决定。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    api.album_media = {}
+    uploads = {"n": 0}
+    real_upload = api.upload_image_to_qun_album
+
+    async def _flaky(group_id, album_id, album_name, file):
+        uploads["n"] += 1
+        await real_upload(group_id, album_id, album_name, file)
+        # 服务端已收下：相册媒体列表出现该条目
+        api.album_media.setdefault(f"{group_id}:{album_id}", []).append(
+            {"type": "image", "desc": Path(file).name}
+        )
+        if uploads["n"] == 1:
+            raise OneBotApiError(
+                OneBotErrorKind.TIMEOUT, "upload_image_to_qun_album", "timeout"
+            )
+
+    api.upload_image_to_qun_album = _flaky
+    src = tmp_path / "pic.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    tid = await ingest.submit_image_album("g1", src.as_posix(), "pic.png", "测试相册")
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    assert uploads["n"] == 1  # 重放未再上传
+    assert len(api.album_uploads) == 1
+    assert any(c.startswith("get_group_album_media_list") for c in api.calls)
+
+
+@pytest.mark.asyncio
+async def test_image_album_replay_dedup_falls_back_to_name_and_file_name(env):
+    """去重键必须回落到 name / file_name：真实协议端的条目不一定给 desc。
+
+    旧用例只覆盖 desc（{"desc": ...}）；媒体条目只有 name / file_name 时去重会
+    静默失效，重放把同一张图再传一遍。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    api.album_media = {}
+    uploads = {"n": 0}
+    real_upload = api.upload_image_to_qun_album
+
+    async def _flaky(group_id, album_id, album_name, file):
+        uploads["n"] += 1
+        await real_upload(group_id, album_id, album_name, file)
+        # 服务端已收下，但条目里没有 desc（真实协议端的常见形态）
+        api.album_media.setdefault(f"{group_id}:{album_id}", []).append(
+            {"type": "image", "name": Path(file).name}
+        )
+        if uploads["n"] == 1:
+            raise OneBotApiError(
+                OneBotErrorKind.TIMEOUT, "upload_image_to_qun_album", "timeout"
+            )
+
+    api.upload_image_to_qun_album = _flaky
+    src = tmp_path / "pic.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    tid = await ingest.submit_image_album("g1", src.as_posix(), "pic.png", "测试相册")
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    assert uploads["n"] == 1, "name 回落失效：重放把同一张图又传了一遍"
+
+    # 三个回落分支都必须命中（desc / name / file_name），且不误判别的名字
+    for entry in ({"desc": "封面.png"}, {"name": "封面.png"}, {"file_name": "封面.png"}):
+        api.album_media = {"g1:a1": [entry]}
+        assert await ingest._album_has_media("g1", "a1", "封面.png") is True, entry
+    api.album_media = {"g1:a1": [{"desc": "别的.png"}]}
+    assert await ingest._album_has_media("g1", "a1", "封面.png") is False
+
+
+@pytest.mark.asyncio
+async def test_image_album_replay_reuses_renamed_staged_file(env):
+    """真机坏链（2026-09-16）：改名后的重放必须找到改名后的文件。
+
+    首次尝试把 uuid 暂存名改成 declared 名再上传；上传以 REMOTE_ERROR 收场
+    （可重试分类），此时 payload["path"] 已不存在。旧实现重放时找不到源文件：
+    图片路径抛 ValueError（又被重试 3 次），视频路径掉进切割分支报出误导性的
+    「ffmpeg split failed: No such file or directory」。改名后的路径必须写回 payload。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    api.album_media = {}
+    attempts = {"n": 0}
+    real_upload = api.upload_image_to_qun_album
+
+    async def _flaky(group_id, album_id, album_name, file):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # 协议端拒绝且未落地：重放必须能重传（而非报「暂存文件已不存在」）
+            raise OneBotApiError(
+                OneBotErrorKind.REMOTE_ERROR, "upload_image_to_qun_album", "boom"
+            )
+        await real_upload(group_id, album_id, album_name, file)
+
+    api.upload_image_to_qun_album = _flaky
+    staged = tmp_path / "fetch_img_ab12cd.png"  # uuid 前缀暂存名
+    staged.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    tid = await ingest.submit_image_album(
+        "g1", staged.as_posix(), "封面.png", "测试相册"
+    )
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    assert attempts["n"] == 2  # 重放确实重传了，而不是找不到文件
+    assert api.album_uploads[0]["file"].endswith("封面.png")  # 仍以 declared 名入册
+    assert not staged.exists()
+
+
+@pytest.mark.asyncio
+async def test_image_album_missing_staged_file_fails_once(env):
+    """暂存文件缺失是本地静态条件：一次终态失败，不重试也不误报 ffmpeg。
+
+    旧实现抛 ValueError（队列视为可重试）→ 重试 3 次共 14s 后仍报同一错误；
+    视频路径更会掉进切割分支，报出误导性的「ffmpeg split failed」。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    missing = tmp_path / "gone.png"  # 从未创建
+    tid = await ingest.submit_image_album(
+        "g1", missing.as_posix(), "gone.png", "测试相册"
+    )
+    r = await drain_op(queue, tid, timeout=6)  # 重试版本会超时（2+4+8s）
+    assert r["state"] == "failed"
+    assert "暂存文件已不存在" in r["error"]
+    assert api.album_uploads == []
+
+
+# ---------- 相册上传的协议端能力探测（明示降级） ----------
+
+@pytest.mark.asyncio
+async def test_video_album_degrades_when_album_upload_unsupported(env):
+    """`upload_image_to_qun_album` 不可用（非 NapCat/旧版协议端）时立即降级。
+
+    docs/入库与组合存储.md「已知限制」要求相册视频上传经协议端能力探测、不可用时
+    明示降级。两点必须同时成立：
+    - 探测在 ffmpeg 切割之前（否则长视频会被完整切分后才逐段被拒）；
+    - 失败不可重试（UNSUPPORTED 语义）。按 ValueError 抛出会被队列重试 3 次
+      （2+4+8s = 14s），6s 的 drain 超时正是为此——重试版本会直接超时。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    api.capability = lambda action: CapabilityState.UNSUPPORTED
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"fakemp4" * 10)  # 无需 ffmpeg：探测先于时长/切割
+    tid = await ingest.submit_video_album("g1", src.as_posix(), "v.mp4", "测试相册")
+    r = await drain_op(queue, tid, timeout=6)
+    assert r["state"] == "failed"
+    assert "upload_image_to_qun_album" in r["error"]
+    assert api.album_uploads == []  # 未提交注定失败的上传
+    # 探测在最前：既未解析相册，也未尝试建相册
+    assert not any(c.startswith(("get_qun_album_list", "create_group_album")) for c in api.calls)
+
+
+@pytest.mark.asyncio
+async def test_image_album_degrades_when_album_upload_unsupported(env):
+    """图片路径同款降级（两条路径共用 upload_image_to_qun_album）。"""
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": [{"album_id": "a1", "name": "测试相册"}]}
+    api.capability = lambda action: CapabilityState.UNSUPPORTED
+    src = tmp_path / "pic.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    tid = await ingest.submit_image_album("g1", src.as_posix(), "pic.png", "测试相册")
+    r = await drain_op(queue, tid, timeout=6)
+    assert r["state"] == "failed"
+    assert "upload_image_to_qun_album" in r["error"]
+    assert api.album_uploads == []
+
+
+@pytest.mark.asyncio
+async def test_album_create_unsupported_fails_once_not_retried(env):
+    """协议端无创建相册接口（NapCat）时立即终态，且只尝试一次。
+
+    「没有该接口」是静态条件：旧实现把它包成 ValueError，队列会重试 3 次
+    （每次重新列一遍相册 + 再试一次创建）后才报错。改为 UNSUPPORTED 语义后
+    应当只尝试一次并给出可操作指引。
+    """
+    tmp_path, store, api, queue, ingest = env
+    api.albums = {"g1": []}
+
+    async def _no_create(group_id, album_name, album_desc=""):
+        api.calls.append("create_group_album")
+        raise OneBotApiError(
+            OneBotErrorKind.UNSUPPORTED, "create_group_album", "api not found"
+        )
+
+    api.create_group_album = _no_create
+    src = tmp_path / "pic.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    tid = await ingest.submit_image_album("g1", src.as_posix(), "pic.png", "AstrBot云盘")
+    r = await drain_op(queue, tid, timeout=6)
+    assert r["state"] == "failed"
+    assert "手动创建" in r["error"]
+    assert api.calls.count("create_group_album") == 1  # 非重试：只尝试一次
+    assert api.album_uploads == []
 
 
 @pytest.mark.asyncio
@@ -651,3 +905,223 @@ async def test_fetch_to_essence_mutually_exclusive(env):
         await ingest.submit_fetch(
             "g1", "https://example.com/a.png", to_album=True, to_essence=True
         )
+
+
+# ---------- M9：短视频直传必须清理暂存源文件 ----------
+
+@pytest.mark.asyncio
+async def test_video_direct_cleans_staged_source(env, monkeypatch):
+    """M9：直传是常态路径，返回前必须删掉暂存视频。
+
+    修复前：直传分支 return 前不 unlink，暂存视频一直留到下次进程重启才被清扫。
+    """
+    tmp_path, store, api, queue, ingest = env
+    src = tmp_path / "short.mp4"
+    src.write_bytes(b"fakemp4" * 10)
+    monkeypatch.setattr(CloudIngestService, "_probe_duration", _fixed_duration(120))
+    tid = await ingest.submit_video_upload("g1", src.as_posix(), "short.mp4")
+    r = await drain_op(queue, tid)
+    assert r["state"] == "ok"
+    assert not src.exists()
+
+
+@pytest.mark.asyncio
+async def test_video_direct_keeps_staged_source_on_retriable_failure(env, monkeypatch):
+    """H1：直传抛可重试错误（TIMEOUT）时必须保留暂存源文件。
+
+    修复前 `finally` 无条件 unlink：队列重放时 src.exists() 为假 → 命中「暂存文件
+    已不存在」LOCAL_ERROR（不可重试）→ 3 次重试预算作废、用户视频丢失。分片分支
+    特意保留源文件，直传分支却删掉，两个分支对重试的契约自相矛盾。
+
+    这里是 handler 级断言（快速、确定性）；真实的队列 retries/backoff 重放路径见
+    tests/unit/test_ingest_regressions.py::
+    test_video_direct_retriable_failure_keeps_source_for_replay。
+    """
+    from types import SimpleNamespace
+
+    tmp_path, store, api, queue, ingest = env
+    src = tmp_path / "short.mp4"
+    src.write_bytes(b"fakemp4" * 10)
+    monkeypatch.setattr(CloudIngestService, "_probe_duration", _fixed_duration(120))
+
+    async def _boom(group_id, file_path, name="", folder_id=None, folder="",
+                    upload_file=True):
+        raise OneBotApiError(OneBotErrorKind.TIMEOUT, "upload_group_file", "boom")
+
+    monkeypatch.setattr(api, "upload_group_file", _boom)
+    op = SimpleNamespace(
+        task_id="t1", kind="video_upload", target="g1", cancel=False, pause=False,
+        payload={"path": src.as_posix(), "name": "short.mp4", "folder_id": ""},
+    )
+    with pytest.raises(OneBotApiError) as ei:
+        await ingest._do_video_upload(op)
+    assert ei.value.kind is OneBotErrorKind.TIMEOUT
+    assert src.exists(), "可重试失败必须保留暂存源文件供重放"
+
+
+# ---------- M13：分段上传重试必须跳过已上传分片 ----------
+
+@pytest.mark.asyncio
+async def test_video_retry_skips_already_uploaded_parts(env, monkeypatch):
+    """M13：分片上传失败后重试，已上传分片不得再传一遍。
+
+    修复前：上传动作从 seq=1 重跑，QQ 侧出现同名重复分片。
+    """
+    from types import SimpleNamespace
+
+    tmp_path, store, api, queue, ingest = env
+    src = tmp_path / "long.mp4"
+    src.write_bytes(b"fakemp4" * 100)
+    monkeypatch.setattr(CloudIngestService, "_probe_duration", _fixed_duration(1300))
+
+    async def _fake_split(srcp, out_dir, stem, max_sec):
+        segs = []
+        for i in range(1, 4):
+            seg = out_dir / f"{stem}_seg{i:03d}.mp4"
+            seg.write_bytes(f"SEG{i}".encode() * 100)
+            segs.append(seg)
+        return sorted(segs)
+
+    import core.application.ingest.video as video_mod
+
+    monkeypatch.setattr(video_mod, "split_video", _fake_split)
+
+    op = SimpleNamespace(
+        task_id="t1", kind="video_upload", target="g1", cancel=False, pause=False,
+        payload={"path": src.as_posix(), "name": "long.mp4", "folder_id": ""},
+    )
+    real_upload = api.upload_group_file
+    seen = {"n": 0}
+
+    async def _flaky(group_id, file_path, name="", folder_id=None, folder="",
+                     upload_file=True):
+        seen["n"] += 1
+        if seen["n"] == 2:  # 第 2 片失败 -> 真实队列会带着同一 payload 重试
+            raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, "upload_group_file", "boom")
+        return await real_upload(group_id, file_path, name=name, folder_id=folder_id,
+                                 folder=folder, upload_file=upload_file)
+
+    monkeypatch.setattr(api, "upload_group_file", _flaky)
+    with pytest.raises(OneBotApiError):
+        await ingest._do_video_upload(op)
+    parent_key = f"g1:file:{op.payload['parent_resource_id']}"
+    assert [v.seq for v in await store.list_volumes(parent_key)] == [1]
+
+    # 手工二次进入同一个 op / payload，模拟队列重放：parent_resource_id 被复用。
+    # （这里的失败是 LOCAL_ERROR，不可重试，走不到队列重放；真实队列的
+    #  retries/backoff 重派路径见 tests/unit/test_ingest_regressions.py
+    #  ::test_video_split_retry_skips_uploaded_parts）
+    monkeypatch.setattr(api, "upload_group_file", real_upload)
+    api.calls.clear()
+    await ingest._do_video_upload(op)
+
+    parts = [c for c in api.calls if "long.part" in c]
+    assert len(parts) == 2, parts  # 只补传 part02/part03
+    assert all("part01" not in c for c in parts), parts
+    assert [v.seq for v in await store.list_volumes(parent_key)] == [1, 2, 3]
+
+
+# ---------- 低危：兜底常量 / URL 名字长度 / 大文档上限 / pause_check ----------
+
+@pytest.mark.asyncio
+async def test_ingest_fallback_limits_match_qq_hard_limits(tmp_path):
+    """低危：配置缺键时的兜底必须与 defaults.py / _conf_schema.json 一致（4000/599）。
+
+    PluginConfig.get 是严格 dict.get（不回落 DEFAULTS），所以缺键时 base 就取
+    兜底值；之前 ingest 写 4500/600、album 写 599，三处不一致。
+    """
+    import core.application.ingest.video as video_mod
+    from core.application.ingest.service import ESSENCE_CHUNK_FALLBACK_CHARS
+
+    assert ESSENCE_CHUNK_FALLBACK_CHARS == 4000
+    assert video_mod.VIDEO_SEGMENT_MAX_SECONDS == 599
+
+    # 自建的 store 必须自己关：同文件其他用例都关，否则 SQLite 连接泄漏
+    store = SqliteMetaStore(tmp_path / "m.db")
+    await store.init()
+    try:
+        svc = CloudIngestService(
+            FakeOneBotApi(tree={None: ([], [])}), store,
+            OpQueue(lambda op: None, interval=0.0),
+            ResourceSyncService(FakeOneBotApi(tree={None: ([], [])}), store),
+            tmp_dir=tmp_path / "t", config={},
+        )
+        assert svc.essence_chunk_chars == 4000
+        assert svc.video_segment_seconds == 599
+    finally:
+        await store.close()
+
+
+def test_fetch_name_clamped_to_downstream_contract():
+    """低危：URL 路径段派生的名字必须满足 1..80 契约。
+
+    修复前：长 URL 文件名会让整次导入在**下载完成后**才失败并重试 3 次。
+    """
+    from core.application.ingest.fetch import _clamp_name
+
+    assert _clamp_name("a.txt") == "a.txt"
+    out = _clamp_name("x" * 200 + ".mp4")
+    assert 1 <= len(out) <= 80
+    assert out.endswith(".mp4")  # 保留扩展名（媒体类型判定仍有效）
+    assert len(_clamp_name("y" * 300)) == 80
+    assert _clamp_name("") == "fetched"
+
+
+@pytest.mark.asyncio
+async def test_fetch_to_essence_rejects_oversized_document(env, monkeypatch):
+    """低危：to_essence 不再把整个下载文件一次性读入内存（加大小上限）。"""
+    from types import SimpleNamespace
+
+    import core.application.ingest.fetch as fetch_mod
+
+    tmp_path, store, api, _, ingest = env
+    monkeypatch.setattr(fetch_mod, "_ESSENCE_TEXT_MAX_BYTES", 16)
+
+    async def fake_download(url, dest):
+        dest.write_bytes(b"x" * 64)
+        return 64
+
+    ingest.transfer = type("T", (), {"download_to": fake_download})()
+    op = SimpleNamespace(
+        task_id="t1", kind="fetch", target="g1", cancel=False, pause=False,
+        payload={"url": "https://example.com/big.txt", "name": "big.txt",
+                 "to_essence": True},
+    )
+    with pytest.raises(OneBotApiError, match="exceeds") as ei:
+        await ingest._do_fetch(op)
+    # 静态条件必须不可重试，否则整份大文档会被重下 4 次（2/4/8s 退避）
+    assert ei.value.kind is OneBotErrorKind.LOCAL_ERROR
+
+
+@pytest.mark.asyncio
+async def test_essence_save_loop_honours_pause_check(env):
+    """低危：长文本分段保存的循环里必须有 pause_check（否则无法中断）。"""
+    from types import SimpleNamespace
+
+    from core.application.queue import OpCancelError
+
+    tmp_path, store, api, queue, ingest = env
+    op = SimpleNamespace(
+        task_id="t1", kind="essence_save", target="g1", cancel=True, pause=False,
+        payload={"title": "标题", "text": "正文内容" * 2000},
+    )
+    with pytest.raises(OpCancelError):
+        await ingest._do_essence_save(op)
+    assert not api.sent_messages  # 一个分段都不应发出
+
+
+@pytest.mark.asyncio
+async def test_essence_delete_loop_honours_pause_check(env):
+    """低危：多分片删除的循环里必须有 pause_check。"""
+    from types import SimpleNamespace
+
+    from core.application.queue import OpCancelError
+
+    tmp_path, store, api, queue, ingest = env
+    op = SimpleNamespace(
+        task_id="t1", kind="essence_delete", target="g1", cancel=True, pause=False,
+        payload={"id": 1, "parts": [{"seq": 1, "message_id": "m1"}]},
+    )
+    with pytest.raises(OpCancelError):
+        await ingest._do_essence_delete(op)
+    assert not api.essence_deleted

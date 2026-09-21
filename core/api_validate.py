@@ -90,7 +90,12 @@ def pick(
     else:
         try:
             converted = cast(value)
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError, OverflowError) as e:
+            # OverflowError: a JSON-legal big number (1e400) parses to
+            # float('inf') and int(inf) raises. The module contract is "bad
+            # parameter -> ApiValidationError -> 400", so every conversion
+            # failure must be translated here (otherwise it falls through to
+            # _Bound's catch-all and becomes a 500 + traceback).
             raise ApiValidationError(f"{prefix} 无效: 期望 {cast.__name__}") from e
 
     if not empty_allowed and isinstance(converted, (str, list)) and not converted:

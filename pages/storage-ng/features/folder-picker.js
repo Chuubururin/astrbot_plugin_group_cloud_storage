@@ -5,6 +5,10 @@
  * folder expands on demand via files/list (folder contract), keeping the
  * initial fetch and the memory footprint minimal.
  *
+ * The `folder` query parameter matches the folder NAME (''=all,
+ * '__root__'=root only) - never the folder_id. A picked value therefore
+ * carries both: `name` for navigation and `id` for the caller's folder_id.
+ *
  * @module features/folder-picker
  */
 
@@ -14,9 +18,12 @@ import { getIcon } from '../icons.js';
 import { escapeHtml } from '../utils/helpers.js';
 import { toast } from '../components/toast.js';
 
+/** Root sentinel: id '' is the real root marker the callers map to '/'. */
+const ROOT = { id: '', name: '根目录', isRoot: true };
+
 let overlay = null;
 let resolvePick = null;
-let selectedFolder = { id: '', name: '根目录' };
+let selectedFolder = { id: ROOT.id, name: ROOT.name };
 
 function ensure() {
   if (overlay) return;
@@ -55,44 +62,66 @@ async function fetchFolders(group, folder) {
   }
 }
 
-function renderNode(container, node, depth, group) {
+/** Single-selection highlight. */
+function markActive(row) {
+  overlay.querySelectorAll('.tree-row').forEach((r) => r.classList.remove('active'));
+  row.classList.add('active');
+}
+
+/**
+ * Build one tree row. The root row and every fetched node share this builder
+ * so the two paths cannot drift apart: the root row used to be a plain div
+ * with no click listener, which made "back to root" impossible once a
+ * subfolder had been selected.
+ */
+function makeRow(container, node, depth, group) {
   const row = document.createElement('div');
-  row.className = 'tree-row' + (selectedFolder.id === node.id ? ' active' : '');
+  const isSelected = selectedFolder.id === node.id && selectedFolder.name === node.name;
+  row.className = 'tree-row' + (isSelected ? ' active' : '');
   row.style.paddingLeft = `${8 + depth * 16}px`;
   row.innerHTML = `${getIcon('FOLDER', 13)} <span class="tree-label">${escapeHtml(node.name)}</span>`;
   row.addEventListener('click', (e) => {
     if (e.target.closest('.tree-toggle')) return;
+    // 缺 folder_id 的节点（data-sources 会把后端的字符串文件夹映射成
+    // {name}）不能作为移动目标：显式提示，绝不静默回退成根目录。
+    if (!node.isRoot && !node.id) {
+      toast(`目录「${node.name}」缺少 folder_id，无法作为移动目标`, 'warn');
+      return;
+    }
     selectedFolder = { id: node.id, name: node.name };
-    overlay.querySelectorAll('.tree-row').forEach((r) => r.classList.remove('active'));
-    row.classList.add('active');
+    markActive(row);
   });
   container.appendChild(row);
+  return row;
+}
 
-  if (node.id) {
-    const childrenBox = document.createElement('div');
-    childrenBox.className = 'hidden';
-    container.appendChild(childrenBox);
-    const toggle = document.createElement('button');
-    toggle.className = 'tree-toggle';
-    toggle.textContent = '展开';
-    row.appendChild(toggle);
-    toggle.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (childrenBox.classList.contains('hidden')) {
-        if (!childrenBox.dataset.loaded) {
-          toggle.textContent = '...';
-          const kids = await fetchFolders(group, node.id);
-          for (const k of kids) renderNode(childrenBox, k, depth + 1, group);
-          childrenBox.dataset.loaded = '1';
-        }
-        childrenBox.classList.remove('hidden');
-        toggle.textContent = '收起';
-      } else {
-        childrenBox.classList.add('hidden');
-        toggle.textContent = '展开';
+function renderNode(container, node, depth, group) {
+  const row = makeRow(container, node, depth, group);
+  if (!node.id) return; // 无 folder_id 的节点没有子目录可展开
+  const childrenBox = document.createElement('div');
+  childrenBox.className = 'hidden';
+  container.appendChild(childrenBox);
+  const toggle = document.createElement('button');
+  toggle.className = 'tree-toggle';
+  toggle.textContent = '展开';
+  row.appendChild(toggle);
+  toggle.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (childrenBox.classList.contains('hidden')) {
+      if (!childrenBox.dataset.loaded) {
+        toggle.textContent = '...';
+        // folder 查询参数匹配文件夹名（不是 folder_id）：传 id 必得空结果。
+        const kids = await fetchFolders(group, node.name);
+        for (const k of kids) renderNode(childrenBox, k, depth + 1, group);
+        childrenBox.dataset.loaded = '1';
       }
-    });
-  }
+      childrenBox.classList.remove('hidden');
+      toggle.textContent = '收起';
+    } else {
+      childrenBox.classList.add('hidden');
+      toggle.textContent = '展开';
+    }
+  });
 }
 
 /**
@@ -104,9 +133,10 @@ export async function pickFolder(group) {
   ensure();
   const gid = group || getState().currentGroup;
   if (!gid) return null;
-  selectedFolder = { id: '', name: '根目录' };
+  selectedFolder = { id: ROOT.id, name: ROOT.name };
   const tree = overlay.querySelector('.folder-tree');
-  tree.innerHTML = '<div class="tree-row active">根目录</div>';
+  tree.innerHTML = '';
+  makeRow(tree, ROOT, 0, gid);
   const roots = await fetchFolders(gid, '');
   for (const f of roots) renderNode(tree, f, 1, gid);
   overlay.classList.remove('hidden');

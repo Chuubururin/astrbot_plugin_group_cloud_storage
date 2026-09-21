@@ -10,7 +10,8 @@
  */
 
 import { getState, set, subscribe, refresh } from '../store.js';
-import { API, apiGet, apiPost, BRIDGE_STATE_LABELS } from '../api.js';
+import { API, apiGet, apiPost } from '../api.js';
+import { BRIDGE_STATE_LABELS, BRIDGE_CAPABILITY_LABELS } from '../views/task-labels.js';
 import { BRIDGE_STATES } from '../constants.js';
 import { getIcon } from '../icons.js';
 import { formatTimeFull, escapeHtml } from '../utils/helpers.js';
@@ -29,12 +30,19 @@ const CONFIG_FIELDS = [
     options: [{ value: 'false', label: '否' }, { value: 'true', label: '是' }] },
 ];
 
+/** capability machine value -> 中文 label (missing/unknown reads as 未知). */
+function capabilityLabel(cap) {
+  return BRIDGE_CAPABILITY_LABELS[cap] || '未知';
+}
+
 /**
  * Initialize the bridge panel (status + transfer tasks).
  * @param {HTMLElement} container
  * @returns {function} cleanup
  */
 export function initBridgePanel(container) {
+  const direction = getState().currentBridgeDirection || 'out';
+  tasksLoadFailed = false;
   container.innerHTML = `
     <div class="bridge-header">
       <h2>桥接传输</h2>
@@ -45,8 +53,8 @@ export function initBridgePanel(container) {
       <button id="btn-bridge-config">${getIcon('SETTINGS', 13)} 配置</button>
     </div>
     <div class="bridge-tabs">
-      <button class="tab-btn active" data-direction="out">转存到网盘</button>
-      <button class="tab-btn" data-direction="in">转存到群</button>
+      <button class="tab-btn${direction === 'out' ? ' active' : ''}" data-direction="out">转存到网盘</button>
+      <button class="tab-btn${direction === 'in' ? ' active' : ''}" data-direction="in">转存到群</button>
     </div>
     <div class="table-wrap">
       <table class="compact bridge-table">
@@ -59,7 +67,7 @@ export function initBridgePanel(container) {
   `;
 
   loadBridgeStatus();
-  loadBridgeTasks(getState().currentBridgeDirection || 'out');
+  loadBridgeTasks(direction);
 
   const unsubRefresh = subscribe('refresh:bridge', () => {
     loadBridgeStatus();
@@ -92,23 +100,39 @@ async function loadBridgeStatus() {
     if (el) {
       el.innerHTML = `
         <span>启用: ${status.enabled ? '是' : '否'}</span>
-        <span>能力: ${status.capability || 'unknown'}</span>
+        <span>能力: ${escapeHtml(capabilityLabel(status.capability))}</span>
         <span>下载服务: ${status.dlserver_ready ? '就绪' : '未就绪'}</span>
         <span>待处理: ${(status.pending_out || 0) + (status.pending_in || 0)}</span>
       `;
     }
   } catch (e) {
     console.error('[bridge] status load failed:', e);
+    const el = document.getElementById('bridge-status');
+    if (el && !el.textContent.trim()) el.textContent = '桥接状态加载失败';
+    toast('桥接状态加载失败', 'error');
   }
 }
 
+// last-request-wins 守卫：快速来回切方向时两个 POST 并发，旧响应后到
+// 会覆盖新方向的数据（同 data-table.js 的 seq 模式）。
+let tasksSeq = 0;
+/** True when the last ledger load failed: the table must say so. */
+let tasksLoadFailed = false;
+
 async function loadBridgeTasks(direction) {
+  const seq = ++tasksSeq;
   try {
     const data = await apiPost(API.BRIDGE.TASKS, { direction });
+    if (seq !== tasksSeq) return;
+    tasksLoadFailed = false;
     set('tasks', data.tasks || []);
     renderBridgeTasks();
   } catch (e) {
+    if (seq !== tasksSeq) return;
     console.error('[bridge] tasks load failed:', e);
+    tasksLoadFailed = true;
+    renderBridgeTasks();
+    toast('桥接任务加载失败', 'error');
   }
 }
 
@@ -118,7 +142,13 @@ function renderBridgeTasks() {
   const tasks = getState().tasks || [];
   tbody.innerHTML = '';
 
-  if (tasks.length === 0) {
+  // A failed load must not masquerade as an empty ledger: the failure row
+  // replaces "暂无任务" and the last known rows stay visible underneath.
+  if (tasksLoadFailed) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="6" class="empty-hint">任务列表加载失败，以下为上次数据</td>`;
+    tbody.appendChild(tr);
+  } else if (tasks.length === 0) {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td colspan="6" class="empty-hint">暂无任务</td>`;
     tbody.appendChild(tr);
@@ -132,7 +162,7 @@ function renderBridgeTasks() {
       <td>${escapeHtml(String(task.task_id || '').slice(0, 8))}</td>
       <td>${escapeHtml(String(task.resource_id || '-'))}</td>
       <td>${escapeHtml(task.remote_path || '-')}</td>
-      <td><span class="badge ${escapeHtml(task.state)}">${BRIDGE_STATE_LABELS[task.state] || escapeHtml(task.state)}</span>
+      <td><span class="badge ${escapeHtml(task.state)}">${escapeHtml(BRIDGE_STATE_LABELS[task.state] || '未知')}</span>
         ${task.detail ? `<span class="detail-hint" title="${escapeHtml(task.detail)}">${getIcon('INFO', 12)}</span>` : ''}</td>
       <td>${formatTimeFull(task.updated_at)}</td>
       <td>
@@ -145,40 +175,48 @@ function renderBridgeTasks() {
     tbody.appendChild(tr);
   }
 
-    tbody.querySelectorAll('.btn-retry').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        await mutate('重试', API.BRIDGE.RETRY, { task_id: btn.dataset.taskId },
-          { successText: '重试已提交' });
-        loadBridgeTasks(getState().currentBridgeDirection || 'out');
-      });
+  tbody.querySelectorAll('.btn-retry').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await mutate('重试', API.BRIDGE.RETRY, { task_id: btn.dataset.taskId },
+        { successText: '重试已提交' });
+      loadBridgeTasks(getState().currentBridgeDirection || 'out');
     });
-    tbody.querySelectorAll('.btn-cancel').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        await mutate('取消', API.BRIDGE.CANCEL, { task_id: btn.dataset.taskId },
-          { successText: '已取消' });
-        loadBridgeTasks(getState().currentBridgeDirection || 'out');
-      });
+  });
+  tbody.querySelectorAll('.btn-cancel').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await mutate('取消', API.BRIDGE.CANCEL, { task_id: btn.dataset.taskId },
+        { successText: '已取消' });
+      loadBridgeTasks(getState().currentBridgeDirection || 'out');
     });
+  });
 }
 
 async function openBridgeConfig() {
+  let config;
   try {
-    const config = await apiGet(API.BRIDGE.CONFIG_GET);
-    const rows = CONFIG_FIELDS.map((f) => ({
-      ...f,
-      value: String(config[f.name] ?? ''),
-    }));
-    const res = await showFormModal('桥接配置', rows, { okText: '保存' });
-    if (!res) return;
-    const body = {};
-    for (const f of CONFIG_FIELDS) {
-      if (res[f.name] !== undefined) {
-        if (f.type === 'select') body[f.name] = res[f.name] === 'true';
-        else body[f.name] = res[f.name];
-      }
+    config = await apiGet(API.BRIDGE.CONFIG_GET);
+  } catch (e) {
+    toast('加载配置失败', 'error');
+    return;
+  }
+  const rows = CONFIG_FIELDS.map((f) => ({
+    ...f,
+    value: String(config[f.name] ?? ''),
+  }));
+  const res = await showFormModal('桥接配置', rows, { okText: '保存' });
+  if (!res) return;
+  const body = {};
+  for (const f of CONFIG_FIELDS) {
+    if (res[f.name] !== undefined) {
+      if (f.type === 'select') body[f.name] = res[f.name] === 'true';
+      else body[f.name] = res[f.name];
     }
+  }
+  try {
     await apiPost(API.BRIDGE.CONFIG_SAVE, body);
     toast('配置已保存', 'success');
     loadBridgeStatus();
-  } catch (e) { toast('加载配置失败', 'error'); }
+  } catch (e) {
+    toast(`保存配置失败: ${(e && e.message) || e}`, 'error');
+  }
 }

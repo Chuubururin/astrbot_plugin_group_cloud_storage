@@ -27,6 +27,7 @@ class ConnectionManager:
         self._pool_size = max(1, pool_size)
         self._pool: queue.Queue[sqlite3.Connection] = queue.Queue()
         self._created = 0
+        self._closed = False
         self._lock = threading.Lock()  # only guards the _created counter
 
     def _connect(self) -> sqlite3.Connection:
@@ -41,6 +42,8 @@ class ConnectionManager:
         return conn
 
     def _acquire(self) -> sqlite3.Connection:
+        if self._closed:
+            raise RuntimeError("connection manager is closed")
         try:
             return self._pool.get_nowait()
         except queue.Empty:
@@ -48,7 +51,17 @@ class ConnectionManager:
         with self._lock:
             if self._created < self._pool_size:
                 self._created += 1
-                return self._connect()
+                # Reserve before connecting (the lock is held across the
+                # blocking connect) but give the slot back when _connect()
+                # fails: a permanent reservation leaked one unit of pool
+                # capacity per failure, so after pool_size failures no new
+                # connection could ever be created and every call blocked
+                # for 30s before raising TimeoutError.
+                try:
+                    return self._connect()
+                except BaseException:
+                    self._created -= 1
+                    raise
         # BUG-11 fix: timeout prevents permanent hang when pool is exhausted
         # (e.g. all connections stuck in long-running FTS queries).
         try:
@@ -69,7 +82,15 @@ class ConnectionManager:
                     conn.rollback()
                 except Exception:
                     pass
-            self._pool.put(conn)
+            if self._closed:
+                # close() ran while this call was in flight: retire the
+                # connection instead of pooling it (nothing will drain it).
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            else:
+                self._pool.put(conn)
 
     async def execute(self, fn, *args):
         """Run blocking fn(conn, *args) on a pooled connection."""
@@ -79,6 +100,10 @@ class ConnectionManager:
     exec = execute
 
     async def close(self) -> None:
+        # Drain idle connections; the closed flag goes up first so checkouts
+        # still in flight are retired by _run on return instead of being
+        # pooled again (no connection outlives close()).
+        self._closed = True
         while True:
             try:
                 conn = self._pool.get_nowait()

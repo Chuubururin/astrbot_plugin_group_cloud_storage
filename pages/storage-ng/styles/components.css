@@ -467,7 +467,20 @@
 }
 
 .toast-show { transform: translateX(0); }
-.toast-hide { transform: translateX(120%); }
+
+/* The dismiss animation must be a keyframe, not the base transition: only
+   animationend lets toast.js reclaim the node. Without it every toast stayed
+   in the flex column (translated out but still occupying space) until new
+   ones were pushed out of the viewport. */
+@keyframes toast-out {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(120%); }
+}
+
+.toast-hide {
+  transform: translateX(120%);
+  animation: toast-out 0.2s ease forwards;
+}
 .toast-icon { display: inline-flex; }
 .toast-success .toast-icon { color: var(--ok); }
 .toast-error .toast-icon { color: var(--danger); }

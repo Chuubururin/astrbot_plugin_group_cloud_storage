@@ -62,13 +62,17 @@ export const GROUP_SOURCE = {
       query.order = params.sort_dir;
     }
     const data = await apiGet(API.FILES.LIST, query);
-    let items = data.items || data.files || [];
-    if (params.type === 'folder') items = [];
+    // Folder rows are a local row class (never sent as a server type filter):
+    // the file items are dropped locally and only the folder rows render, so
+    // the page total must follow the folder count — keeping the server total
+    // made the pager promise pages of rows that no longer exist.
+    const folders = (data.folders || []).map((f) =>
+      typeof f === 'string' ? { name: f } : f);
+    const folderOnly = params.type === 'folder';
     return {
-      items,
-      total: data.total || 0,
-      folders: (data.folders || []).map((f) =>
-        typeof f === 'string' ? { name: f } : f),
+      items: folderOnly ? [] : (data.items || data.files || []),
+      total: folderOnly ? folders.length : (data.total || 0),
+      folders,
       tags: data.tags || null,
     };
   },
@@ -122,7 +126,14 @@ export const ALBUM_SOURCE = makeKindSource({
   id: 'album', kind: 'album',
   itemsKey: 'albumItems', totalKey: 'albumTotal', pageKey: 'albumPage',
   selectedKey: 'albumSelected', groupKey: 'albumGroup', tagFilterKey: 'albumTagFilter',
-  capabilities: ['album-create', 'album-gallery', 'album-detail', 'tags', 'clear'],
+  // album-distribute (albums/distribute, album_id-keyed) is the album-level
+  // transfer entry: local direct link / netdisk offline / group fetch /
+  // essence. The action bar and the row context menu render capabilities
+  // only, so omitting it left the whole album transfer column unreachable.
+  capabilities: [
+    'album-create', 'album-gallery', 'album-detail',
+    'album-distribute', 'tags', 'clear',
+  ],
 });
 
 /** Essence messages: kind=essence, text only, full-text search . */
@@ -150,6 +161,7 @@ export const NETDISK_SOURCE = {
     'netdisk-link', 'netdisk-download', 'netdisk-rename',
     'netdisk-tags', 'netdisk-detail', 'netdisk-delete', 'clear',
     'netdisk-distribute',
+    'netdisk-move', 'netdisk-copy', 'netdisk-rename-batch',
   ],
   async list(state, params) {
     const data = await apiPost(API.BRIDGE.NETDISK, {
@@ -167,9 +179,14 @@ export const NETDISK_SOURCE = {
 };
 
 /**
- * Netdisk has its own classification (not the group-file 13 classes):
- * text / audio / video / image / other — local extension mapping, no
- * server-side table.
+ * Netdisk has its own coarse classification (text / audio / video / image /
+ * other) derived from the file extension — local filter only, no server-side
+ * table.
+ *
+ * The bridge listing carries the 13-class value in `type` (`.txt` ->
+ * `document`), which can never equal a chip value from this vocabulary:
+ * comparing the two made every non-coincident chip (文本 above all) match
+ * nothing. The class therefore comes from the extension map alone.
  */
 const NETDISK_EXT_TYPES = {
   text: ['.txt', '.md', '.log', '.json', '.xml', '.yaml', '.yml', '.csv', '.ini', '.cfg', '.conf'],
@@ -198,7 +215,10 @@ export function netdiskTypeMap() {
   return map;
 }
 
-/** Local type filter + sort for sources without server support (netdisk). */
+/** Local type filter + sort for sources without server support (netdisk).
+ * The class comes from the extension map only (see NETDISK_EXT_TYPES): the
+ * bridge `type` is the 13-class value, a different vocabulary from the
+ * netdisk chips. */
 export function applyLocalFilterSort(items, params, extTypes) {
   let rows = items;
   if (params.type) {
@@ -206,8 +226,7 @@ export function applyLocalFilterSort(items, params, extTypes) {
       const name = f.name || '';
       const dot = name.lastIndexOf('.');
       const ext = dot > -1 ? name.slice(dot).toLowerCase() : '';
-      const type = f.type || (extTypes && extTypes.get(ext)) || 'other';
-      return type === params.type;
+      return ((extTypes && extTypes.get(ext)) || 'other') === params.type;
     });
   }
   const by = params.sort_by || 'name';

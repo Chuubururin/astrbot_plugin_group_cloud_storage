@@ -139,3 +139,81 @@ def test_download_unsupported_scheme(env):
         asyncio.run(svc.download_to("ldap://h/x", tmp_path / "x"))
 
 
+def test_download_to_sftp_over_limit(env, monkeypatch):
+    # 大小上限对全部协议生效：sftp 远端 stat 超限即拒绝，不开始下载
+    pytest.importorskip("paramiko")
+    tmp_path, store, queue, svc = env
+    svc._adapters["sftp"].max_bytes = 4
+
+    class FakeSFTPClient:
+        def stat(self, remote):
+            return type("S", (), {"st_size": 1 << 40})()
+        def get(self, remote, local):
+            raise AssertionError("oversized fetch must not start")
+        def close(self): pass
+
+    class FakeSSHClient:
+        def load_system_host_keys(self): pass
+        def load_host_keys(self, filename): pass
+        def set_missing_host_key_policy(self, policy): pass
+        def connect(self, *a, **kw): pass
+        def open_sftp(self): return FakeSFTPClient()
+        def close(self): pass
+
+    import paramiko
+    monkeypatch.setattr(paramiko, "SSHClient", FakeSSHClient)
+    dest = tmp_path / "big.bin"
+    with pytest.raises(ValueError, match="max bytes"):
+        asyncio.run(svc.download_to("sftp://u:p@127.0.0.1:2222/big.bin", dest))
+    assert not dest.exists()
+
+
+def test_download_to_smb_over_limit(env, monkeypatch):
+    # 大小上限对全部协议生效：smb 属性查询超限即拒绝，不开始下载
+    pytest.importorskip("smb")
+    tmp_path, store, queue, svc = env
+    svc._adapters["smb"].max_bytes = 4
+
+    class FakeConn:
+        def __init__(self, *a, **kw): pass
+        def connect(self, host, port, timeout): return True
+        def getAttributes(self, share, path):
+            return type("A", (), {"file_size": 1 << 40})()
+        def retrieveFile(self, share, path, fh, timeout):
+            raise AssertionError("oversized fetch must not start")
+        def close(self): pass
+
+    monkeypatch.setattr("smb.SMBConnection.SMBConnection", FakeConn)
+    dest = tmp_path / "big.bin"
+    with pytest.raises(ValueError, match="max bytes"):
+        asyncio.run(svc.download_to("smb://u:p@h/share/big.bin", dest))
+    assert not dest.exists()
+
+
+def test_download_post_check_unlinks_over_limit(env, monkeypatch):
+    # 后置兜底：远端不支持 stat（预检被跳过）时，超限文件下载后也不得进入管线
+    pytest.importorskip("paramiko")
+    tmp_path, store, queue, svc = env
+    svc._adapters["sftp"].max_bytes = 4
+
+    class FakeSFTPClient:
+        def get(self, remote, local): pass
+        def close(self): pass
+
+    class FakeSSHClient:
+        def load_system_host_keys(self): pass
+        def load_host_keys(self, filename): pass
+        def set_missing_host_key_policy(self, policy): pass
+        def connect(self, *a, **kw): pass
+        def open_sftp(self): return FakeSFTPClient()
+        def close(self): pass
+
+    import paramiko
+    monkeypatch.setattr(paramiko, "SSHClient", FakeSSHClient)
+    dest = tmp_path / "big.bin"
+    dest.write_bytes(b"12345678")
+    with pytest.raises(ValueError, match="max bytes"):
+        asyncio.run(svc.download_to("sftp://u:p@127.0.0.1:2222/big.bin", dest))
+    assert not dest.exists()
+
+

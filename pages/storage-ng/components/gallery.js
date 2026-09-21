@@ -44,6 +44,10 @@ function ensure() {
 
 /** F14: request a keyframe GIF from the backend and show it. */
 async function generateKeyframe(holder, item, ctx) {
+  // albums/video-preview forwards album_id straight to the QQ protocol with
+  // no numeric-id resolution, so a placeholder value would only produce a
+  // 404/502. Refuse locally instead of firing a request that cannot succeed.
+  if (!ctx || !ctx.albumId) { toast('缺少相册 ID，无法生成关键帧预览', 'error'); return; }
   const btn = holder.querySelector('.gallery-vid-btn');
   if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
   try {
@@ -168,8 +172,9 @@ function mountActions(holder, item, ctx) {
     e.stopPropagation();
     const payload = { group: ctx.group, album_id: ctx.albumId, lloc: item.lloc };
     if (act === 'copy') {
-      await copyToClipboard(item.url || '');
-      toast('直链已复制', 'success');
+      if (!item.url) { toast('该媒体无直链可复制', 'warn'); return; }
+      const ok = await copyToClipboard(item.url);
+      toast(ok ? '直链已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
       return;
     }
     if (act === 'comment') {
@@ -217,9 +222,12 @@ function mountLazily(items, grid, ctx) {
     holder.className = 'gallery-item';
     holder.__item = item;
     if (item.is_video) {
+      // The keyframe button needs a real QQ album ID (see generateKeyframe):
+      // render it only when the caller resolved one.
+      const canKeyframe = Boolean(ctx && ctx.albumId);
       holder.innerHTML =
         `<span class="gallery-hint">[视频] ${escapeHtml(item.name || '')}</span>` +
-        `<button class="gallery-vid-btn">生成关键帧预览</button>`;
+        (canKeyframe ? '<button class="gallery-vid-btn">生成关键帧预览</button>' : '');
       holder.querySelector('.gallery-vid-btn')?.addEventListener('click', (e) => {
         e.stopPropagation();
         generateKeyframe(holder, item, ctx || {});

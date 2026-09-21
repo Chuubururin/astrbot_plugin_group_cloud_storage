@@ -19,7 +19,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import webapi  # noqa: E402
+from webapi import config as _config_module  # noqa: E402
 from webapi import webapi as _wp  # noqa: E402
+
+# autouse 的 _patch_config_persist 会把 _read_plugin_config 换成 tmp_path 读写；
+# 在导入时先把真实实现存下来，供下面的“真实失败路径”用例使用。
+_REAL_READ_PLUGIN_CONFIG = _config_module._read_plugin_config
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +41,28 @@ def _error_response(msg, status_code=400):
 def _patch_responses(monkeypatch):
     monkeypatch.setattr(_wp, "json_response", _json_response)
     monkeypatch.setattr(_wp, "error_response", _error_response)
+
+
+@pytest.fixture(autouse=True)
+def _patch_config_persist(monkeypatch, tmp_path):
+    """配置落盘接缝：测试机上不存在宿主配置目录，真实写入必然失败。
+
+    归一化/脱敏用例只关心“落盘成功”之后的响应与内存，所以把读写接到
+    tmp_path；落盘失败路径由 TestApiConfigPersistFailure 单独覆盖。
+    """
+    target = tmp_path / "plugin_config.json"
+
+    def _read():
+        if not target.exists():
+            return {}
+        return json.loads(target.read_text(encoding="utf-8"))
+
+    def _write(data):
+        target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setattr(_config_module, "_read_plugin_config", _read)
+    monkeypatch.setattr(_config_module, "_write_plugin_config", _write)
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +182,7 @@ class TestApiConfigGet:
                     assert item["value"] == ""
                     assert item.get("masked") is not True
                     return
+        pytest.fail("openlist_password not found in config groups")
 
     @pytest.mark.asyncio
     async def test_config_get_reload_required_markers(self, monkeypatch):
@@ -217,18 +245,14 @@ class TestApiConfigSave:
 
     @pytest.mark.asyncio
     async def test_save_masked_empty_string_skipped(self, monkeypatch):
-        """masked 字段值为空字符串时应跳过（前端修复后的行为）。"""
+        """masked 字段值为空字符串时按真实值保存（不是 '***' 就不跳过）。"""
         svc = _make_services()
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
             {"values": {"openlist_password": ""}}
         ))
         result = await _wp.api_config_save(svc)
-        # 空字符串在 masked_keys 中，但不是 "***"，所以会被当作有效值
-        # 这个测试验证后端的行为：空字符串不是 "***"，所以不会被跳过
-        # 前端应确保不发送空字符串（已在 config.js 中修复）
-        # 如果后端收到空字符串，应该让它通过（前端负责过滤）
-        # 这里我们只验证不崩溃
-        assert "status" in result or "saved" in result
+        # 空字符串在 masked_keys 中但不是 "***"：被当作真实值归一化后保存
+        assert result.get("saved") == ["openlist_password"]
 
     @pytest.mark.asyncio
     async def test_save_bool_type_normalization(self, monkeypatch):
@@ -249,8 +273,8 @@ class TestApiConfigSave:
             {"values": {key: "true"}}
         ))
         result = await _wp.api_config_save(svc)
-        # Should not crash; bool normalization should work
-        assert "saved" in result or result.get("status") == "error"
+        # bool 归一化恒成功：键必须出现在 saved 中（"true" → True）
+        assert result.get("saved") == [key]
 
     @pytest.mark.asyncio
     async def test_save_request_interval_normalization(self, monkeypatch):
@@ -260,8 +284,7 @@ class TestApiConfigSave:
             {"values": {"request_interval": "0.6"}}
         ))
         result = await _wp.api_config_save(svc)
-        if "saved" in result:
-            assert "request_interval" in result["saved"]
+        assert result.get("saved") == ["request_interval"]
 
     @pytest.mark.asyncio
     async def test_save_invalid_int_skipped(self, monkeypatch):
@@ -291,7 +314,7 @@ class TestApiConfigSave:
             {"values": {key: "3.14"}}
         ))
         result = await _wp.api_config_save(svc)
-        assert "saved" in result or result.get("status") == "error"
+        assert result.get("saved") == [key]
 
     @pytest.mark.asyncio
     async def test_save_list_type_normalization(self, monkeypatch):
@@ -310,8 +333,8 @@ class TestApiConfigSave:
             {"values": {key: "not_a_list"}}
         ))
         result = await _wp.api_config_save(svc)
-        # Should not crash
-        assert "saved" in result or result.get("status") == "error"
+        # 非 list 输入归一化为空 list 后照常保存
+        assert result.get("saved") == [key]
 
     @pytest.mark.asyncio
     async def test_save_dict_type_normalization(self, monkeypatch):
@@ -330,4 +353,84 @@ class TestApiConfigSave:
             {"values": {key: "not_a_dict"}}
         ))
         result = await _wp.api_config_save(svc)
-        assert "saved" in result or result.get("status") == "error"
+        # 非 dict 输入归一化为空 dict 后照常保存
+        assert result.get("saved") == [key]
+
+
+# ---------------------------------------------------------------------------
+# M16: 落盘失败必须如实返回失败（不得“已保存”）
+# ---------------------------------------------------------------------------
+
+class _RecordingConfig(_FakeConfig):
+    """带 set() 的配置替身：记录内存写入，验证失败时内存不被污染。"""
+
+    def __init__(self, data=None):
+        super().__init__(data)
+        self.set_calls: list[tuple[str, object]] = []
+
+    def set(self, key, value):
+        self.set_calls.append((key, value))
+        self._data[key] = value
+
+
+def _services_with(config):
+    return SimpleNamespace(config=config, store=_FakeStore(Path("/tmp")), ready=None)
+
+
+class TestApiConfigPersistFailure:
+    @pytest.mark.asyncio
+    async def test_persist_failure_returns_500_and_keeps_memory(self, monkeypatch):
+        """写盘失败 ⇒ 如实返回 500，且内存不动（否则 reload 后前后端不一致）。"""
+        def _boom(data):
+            raise FileNotFoundError("no such config dir")
+
+        monkeypatch.setattr(_config_module, "_write_plugin_config", _boom)
+        cfg = _RecordingConfig({"request_interval": 0.5})
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
+            {"values": {"request_interval": "0.6"}}
+        ))
+        result = await _wp.api_config_save(_services_with(cfg))
+        # 反向验证：修复前这里返回 {"saved": ["request_interval"], ...}
+        assert result.get("status_code") == 500
+        assert result.get("status") == "error"
+        assert "saved" not in result
+        assert cfg.set_calls == []
+        assert cfg.get("request_interval") == 0.5
+
+    @pytest.mark.asyncio
+    async def test_persist_success_still_reports_saved(self, monkeypatch, tmp_path):
+        cfg = _RecordingConfig({"request_interval": 0.5})
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body(
+            {"values": {"request_interval": "0.6"}}
+        ))
+        result = await _wp.api_config_save(_services_with(cfg))
+        assert result.get("saved") == ["request_interval"]
+        assert cfg.set_calls == [("request_interval", 0.6)]
+        # 真的落到了“宿主配置文件”
+        assert (tmp_path / "plugin_config.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 真实 _read_plugin_config 的失败路径（不依赖 autouse 落盘替身）
+# ---------------------------------------------------------------------------
+
+class TestRealPluginConfigReadPath:
+    """autouse 打桩把“宿主配置目录不存在”这个真实条件从整个文件里挤走了，
+    于是 _read_plugin_config 的降级/拒绝分支只剩 0 条覆盖。这里直接调真实实现。
+    """
+
+    def test_missing_host_config_dir_degrades_to_empty(self, monkeypatch, tmp_path):
+        """宿主配置目录不存在时 _read_plugin_config 必须返回 {}（降级为空配置），
+        而不是把 FileNotFoundError 抛给 WebUI。"""
+        missing = tmp_path / "no_such_dir" / _config_module._PLUGIN_CONFIG_FILE
+        monkeypatch.setattr(
+            _config_module, "_config_candidates", lambda: (missing, missing)
+        )
+        assert _REAL_READ_PLUGIN_CONFIG() == {}
+
+    def test_off_whitelist_path_is_rejected(self, monkeypatch, tmp_path):
+        """解析出的路径不是白名单文件名时必须 PermissionError（不得去读任意文件）。"""
+        evil = tmp_path / "not_the_plugin_config.json"
+        monkeypatch.setattr(_config_module, "_validated_config_path", lambda: evil)
+        with pytest.raises(PermissionError):
+            _REAL_READ_PLUGIN_CONFIG()

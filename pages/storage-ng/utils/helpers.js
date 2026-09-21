@@ -71,14 +71,39 @@ export function formatDuration(seconds) {
 }
 
 /**
+ * Coerce a row timestamp to a Date.
+ *
+ * Unix seconds arrive as a number or — since some backends serialize them
+ * through JSON strings — as a digit-only string ("1757000000"); treating
+ * the latter as a date string yields Invalid Date. A string is taken as
+ * seconds only when it is a finite number that round-trips unchanged.
+ * @param {number|string} ts
+ * @returns {Date}
+ */
+function toDate(ts) {
+  if (typeof ts === 'string') {
+    const n = Number(ts);
+    if (Number.isFinite(n) && String(n) === ts) return new Date(n * 1000);
+  }
+  return new Date(typeof ts === 'number' ? ts * 1000 : ts);
+}
+
+/** Parse a timestamp, or null when it is absent/unparseable. */
+function parseTs(ts) {
+  if (!ts) return null;
+  const d = toDate(ts);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
  * Format a timestamp compactly (month/day hour:minute).
- * Accepts unix seconds or an ISO string.
+ * Accepts unix seconds or an ISO string; unparseable input renders '-'.
  * @param {number|string} ts
  * @returns {string}
  */
 export function formatTime(ts) {
-  if (!ts) return '-';
-  const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+  const d = parseTs(ts);
+  if (!d) return '-';
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
@@ -88,8 +113,8 @@ export function formatTime(ts) {
  * @returns {string}
  */
 export function formatTimeFull(ts) {
-  if (!ts) return '-';
-  const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+  const d = parseTs(ts);
+  if (!d) return '-';
   return d.toLocaleString('zh-CN', {
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
@@ -103,13 +128,17 @@ export function formatTimeFull(ts) {
  * title=, data-*) additionally need the quote characters escaped
  * (OWASP XSS Prevention, HTML Attribute Context), so quotes are
  * re-escaped explicitly afterwards.
- * @param {string} str
+ *
+ * Only null/undefined/'' are treated as empty: the numeric 0 and the
+ * boolean false are real values (detail grids render "0" sizes) and must
+ * survive as "0"/"false" instead of collapsing to an empty cell.
+ * @param {*} str
  * @returns {string}
  */
 export function escapeHtml(str) {
-  if (!str) return '';
+  if (str == null || str === '') return '';
   const el = document.createElement('span');
-  el.textContent = str;
+  el.textContent = String(str);
   return el.innerHTML
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
@@ -173,18 +202,26 @@ export async function openExternal(url) {
   return false;
 }
 
-/** Copy text to the clipboard with a fallback for insecure contexts. */
+/**
+ * Copy text to the clipboard with a fallback for insecure contexts.
+ * @returns {Promise<boolean>} true only when a clipboard write actually
+ *   succeeded. The fallback can fail too (execCommand removed or denied, no
+ *   user gesture), so callers must not report an unconditional "已复制".
+ */
 export async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch {
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.cssText = 'position:fixed;left:-9999px';
     document.body.appendChild(ta);
     ta.select();
-    document.execCommand('copy');
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
     ta.remove();
+    return ok;
   }
 }
 

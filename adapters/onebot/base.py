@@ -11,19 +11,44 @@ from adapters.limiter.tier import interval_mult
 from core.domain.enums import CapabilityState, OneBotApiError, OneBotErrorKind
 from core.log import logger
 
-# Exception message hints treated as "unsupported"
+# Exception message hints treated as "unsupported".
+#
+# Action-level phrasing ONLY. Verified against the live protocol bundle
+# (SnowLuma/NapCat, /app/runtime/config-DwoxthVc.js): the WS dispatcher answers
+# an unknown action with `retcode=1404, wording="unknown action"`. Resource-level
+# misses use entirely different wordings that all contain "not found" ("message
+# not found", "image not found in cache", "record not found in cache", "stream
+# not found"), and the same protocol emits "unsupported" for ~20 unrelated
+# conditions (content-type, media format, message element type). Matching those
+# here marks the *action* UNSUPPORTED for the whole process lifetime: `_states`
+# is never reset, and both consumers treat a cached UNSUPPORTED as final (the
+# album upload gate in core/application/ingest/album.py, and the bridge
+# URL-upload probe in core/application/bridge/inbound.py). A false UNSUPPORTED
+# silently disables a working action forever; a false REMOTE_ERROR only costs
+# three bounded retries.
 _UNSUPPORTED_HINTS = (
-    "unsupported",
-    "not found",
-    "notfound",
-    "no such action",
     "unknown action",
+    "no such action",
+    "action not found",
+    "action not exist",
+    "unsupported action",
     "api not found",
-    "404",
-    "无此接口",
-    "不支持",
+    "api not exist",
+    "unsupported api",
     "method not exist",
+    "无此接口",
+    "接口不存在",
+    "api不存在",
+    "不支持的api",
 )
+
+# Protocol-defined "unknown action" retcode (SnowLuma/NapCat RETCODE map:
+# ACTION_FAILED=100, BAD_REQUEST=1400, UNKNOWN_ACTION=1404). Only 1404 means "this
+# action does not exist"; 100/1400 are resource or argument failures and must not
+# disable the action. This replaces the old bare "404" hint, which matched this
+# code by accident ("1404" contains "404") and also matched forwarded HTTP 404s
+# from a dead download URL.
+_UNKNOWN_ACTION_RETCODE = 1404
 
 
 class NapCatBase:
@@ -92,7 +117,20 @@ class NapCatBase:
             return data
 
     def _classify(self, action: str, msg: str, src: Exception) -> None:
-        if any(h in msg.lower() for h in _UNSUPPORTED_HINTS):
+        # ActionFailed.retcode is a *property* (aiocqhttp: return
+        # self.result['retcode']), so a response body without that key raises
+        # KeyError -- and getattr() only swallows AttributeError. The raw
+        # KeyError used to escape _classify and reach the caller as a
+        # non-OneBotApiError, which OpQueue treats as retryable instead of a
+        # capability verdict. Same semantics as before: 1404 -> UNSUPPORTED.
+        try:
+            retcode = getattr(src, "retcode", None)
+        except Exception:
+            retcode = None
+        if (
+            retcode == _UNKNOWN_ACTION_RETCODE
+            or any(h in msg.lower() for h in _UNSUPPORTED_HINTS)
+        ):
             self._mark(action, CapabilityState.UNSUPPORTED)
             raise OneBotApiError(OneBotErrorKind.UNSUPPORTED, action, msg) from src
         if "timeout" in msg.lower():

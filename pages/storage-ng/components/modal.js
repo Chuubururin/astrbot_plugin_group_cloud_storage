@@ -3,10 +3,10 @@ import { escapeHtml } from '../utils/helpers.js';
 /**
  * Modal - sandbox-safe dialogs (F1-F4/F20/D5).
  *
- * The plugin page runs in a sandboxed iframe where native alert/confirm/
- * prompt are blocked, so every dialog is drawn here: confirm (text),
- * prompt (single input), form (label+field rows), detail (key/value grid).
- * Returns a Promise; resolves null on cancel.
+ * Native alert/confirm/prompt are blocked in the sandboxed iframe, so every
+ * dialog is drawn here: confirm / prompt / form / detail. Resolves null on
+ * cancel. The overlay is aria-modal, so it owns keyboard focus too: Tab
+ * cycles inside it and Enter never double-fires the focused action button.
  *
  * @module components/modal
  */
@@ -15,6 +15,48 @@ let overlay = null;
 let box = null;
 let resolveCurrent = null;
 let lastFocused = null;
+/** [{name, label}] required rows of the open form ([] for every other dialog). */
+let requiredFields = [];
+/** Input currently flagged as empty-required (inline-marked, no CSS class). */
+let invalidInput = null;
+
+/** Keep Tab / Shift+Tab cycling inside the dialog (aria-modal focus trap). */
+function trapTab(e) {
+  const items = Array.from(
+    overlay.querySelectorAll('button, input, select, textarea, a[href]'),
+  ).filter((el) => !el.disabled && !el.classList.contains('hidden'));
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  const current = document.activeElement;
+  const outside = !overlay.contains(current);
+  if (e.shiftKey ? (outside || current === first) : (outside || current === last)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+  }
+}
+
+/** Gate the form on its required rows; focus the first offender and stay open. */
+function validateForm(form, inputs) {
+  if (invalidInput) invalidInput.style.borderColor = '';
+  invalidInput = null;
+  const err = form.querySelector('.form-error');
+  const bad = Array.from(inputs).find((inp) =>
+    requiredFields.some((f) => f.name === inp.name) && !String(inp.value ?? '').trim());
+  if (!bad) {
+    if (err) err.classList.add('hidden');
+    return true;
+  }
+  const field = requiredFields.find((f) => f.name === bad.name);
+  invalidInput = bad;
+  bad.style.borderColor = 'var(--danger)';
+  if (err) {
+    err.textContent = `请填写必填项：${field ? field.label : bad.name}`;
+    err.classList.remove('hidden');
+  }
+  bad.focus();
+  return false;
+}
 
 /** Lazily build the modal DOM (shared by all dialog types). */
 function ensure() {
@@ -40,29 +82,52 @@ function ensure() {
   overlay.querySelector('.modal-cancel').addEventListener('click', () => close(null));
   overlay.querySelector('.modal-ok').addEventListener('click', () => {
     const form = overlay.querySelector('.modal-form');
-    if (!form.classList.contains('hidden')) {
-      const inputs = form.querySelectorAll('input, textarea, select');
-      const result = {};
-      inputs.forEach((inp) => { result[inp.name || inp.id] = inp.value; });
-      close(result);
-    } else {
+    if (form.classList.contains('hidden')) {
       close(true);
+      return;
     }
+    const inputs = form.querySelectorAll('input, textarea, select');
+    const result = {};
+    inputs.forEach((inp) => { result[inp.name || inp.id] = inp.value; });
+    // A required marker is a promise: an empty field keeps the dialog open.
+    if (!validateForm(form, inputs)) return;
+    close(result);
   });
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) close(null);
   });
+  overlay.querySelector('.modal-form').addEventListener('input', (e) => {
+    if (invalidInput && e.target === invalidInput) {
+      invalidInput.style.borderColor = '';
+      invalidInput = null;
+    }
+  });
   document.addEventListener('keydown', (e) => {
     if (overlay.classList.contains('hidden')) return;
-    if (e.key === 'Escape') close(null);
-    if (e.key === 'Enter' && !e.target.matches('textarea')) {
-      overlay.querySelector('.modal-ok')?.click();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close(null);
+      return;
     }
+    if (e.key === 'Tab') {
+      trapTab(e);
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    // A focused button/link already turns Enter into a click (browser default,
+    // dispatched after this handler), so clicking .modal-ok here too would fire
+    // 确定 first. Only non-activatable targets are intercepted.
+    if (e.target.matches && e.target.matches('textarea, button, a, [role="button"]')) return;
+    e.preventDefault();
+    overlay.querySelector('.modal-ok')?.click();
   });
 }
 
 function close(value) {
   overlay.classList.add('hidden');
+  requiredFields = [];
+  if (invalidInput) invalidInput.style.borderColor = '';
+  invalidInput = null;
   if (resolveCurrent) {
     resolveCurrent(value);
     resolveCurrent = null;
@@ -75,6 +140,12 @@ function close(value) {
 }
 
 function open() {
+  // 单例 overlay 复用：若上一次对话尚未关闭（resolveCurrent 挂起），先以
+  // null 结束它——否则旧 Promise 永不 resolve，其调用方的 busy 锁泄漏。
+  if (resolveCurrent) {
+    resolveCurrent(null);
+    resolveCurrent = null;
+  }
   lastFocused = document.activeElement;
   overlay.classList.remove('hidden');
 }
@@ -102,12 +173,16 @@ export function confirmEx(title, text, opts = {}) {
   overlay.querySelector('.modal-cancel').textContent = cancelText;
   overlay.querySelector('.modal-cancel').classList.remove('hidden');
   open();
-  okBtn.focus();
+  // Danger dialogs focus 取消: the initial focus must never be the button that
+  // a reflexive Enter turns into a destructive confirmation.
+  (danger ? overlay.querySelector('.modal-cancel') : okBtn).focus();
   return new Promise((r) => { resolveCurrent = r; });
 }
 
 /**
- * Prompt dialog (single text input).
+ * Prompt dialog (single text input). The value is optional by contract (an
+ * empty submit is meaningful, e.g. clearing all tags): no field is marked
+ * required and no legend is shown.
  * @returns {Promise<string|null>} entered value, null on cancel
  */
 export function promptEx(title, text, opts = {}) {
@@ -119,10 +194,7 @@ export function promptEx(title, text, opts = {}) {
   body.classList.toggle('hidden', !text);
   const form = overlay.querySelector('.modal-form');
   form.classList.remove('hidden');
-  // The single prompt input is required by definition: mark it and add the
-  // legend so required vs optional fields is visible everywhere.
-  form.innerHTML = `<input type="text" name="value" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || '')}" style="width:100%">` +
-    `<div class="form-legend">带 <i class="req-mark">*</i> 为必填项，其余为可选项</div>`;
+  form.innerHTML = `<input type="text" name="value" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || '')}" style="width:100%">`;
   overlay.querySelector('.modal-ok').textContent = okText;
   overlay.querySelector('.modal-ok').className = 'modal-ok primary';
   overlay.querySelector('.modal-cancel').textContent = '取消';
@@ -164,24 +236,26 @@ export function detailEx(title, fields) {
 
 /**
  * Form dialog - label + field rows.
- *
  * @param {string} title
- * @param {Array<{name: string, label: string, type?: string, value?: string,
- *         placeholder?: string, rows?: number, options?: Array<{value,label}>}>} rows
+ * @param {Array<Object>} rows - {name,label,type?,value?,placeholder?,rows?,
+ *        required?,options?:[{value,label}]}
  * @param {Object} [opts] - {okText}
  * @returns {Promise<Object|null>} map of field name -> string value
  */
 export function showFormModal(title, rows, opts = {}) {
   ensure();
   const { okText = '确定' } = opts;
+  requiredFields = rows
+    .filter((r) => r.required)
+    .map((r) => ({ name: r.name || r.label, label: r.label }));
   overlay.querySelector('.modal-title').textContent = title;
   const body = overlay.querySelector('.modal-body');
   body.classList.add('hidden');
   body.textContent = '';
   const form = overlay.querySelector('.modal-form');
   form.classList.remove('hidden');
-  // Required rows get a trailing "*" so required vs optional is visible;
-  // the legend renders only when the form actually has required fields.
+  // Required rows get a trailing "*"; the legend only renders when the form
+  // actually has required fields.
   const reqMark = '<i class="req-mark" title="必填">*</i>';
   form.innerHTML = rows.map((r) => {
     const id = r.name || r.label;
@@ -198,9 +272,10 @@ export function showFormModal(title, rows, opts = {}) {
     return `<label class="form-row"><span>${label}</span>` +
       `<input type="${escapeHtml(r.type || 'text')}" name="${escapeHtml(id)}" value="${escapeHtml(r.value == null ? '' : r.value)}" placeholder="${escapeHtml(r.placeholder || '')}"></label>`;
   }).join('');
-  if (rows.some((r) => r.required)) {
+  if (requiredFields.length) {
     form.innerHTML += '<div class="form-legend">带 <i class="req-mark">*</i> 为必填项，其余为可选项</div>';
   }
+  form.innerHTML += '<div class="form-error hidden" style="color:var(--danger);font-size:11px;margin-top:4px"></div>';
   overlay.querySelector('.modal-ok').textContent = okText;
   overlay.querySelector('.modal-ok').className = 'modal-ok primary';
   overlay.querySelector('.modal-cancel').textContent = '取消';

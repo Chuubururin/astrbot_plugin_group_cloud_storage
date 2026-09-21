@@ -43,28 +43,44 @@ export function createResilientSSE(options = {}) {
   function armWatchdog() {
     clearTimeout(watchdog);
     watchdog = setTimeout(() => {
-      degraded = true;
-      if (onConnectionChange) onConnectionChange(false);
+      // 只在状态跃迁时通知：连续两次看门狗超时（第一次重连后仍无心跳）
+      // 不是新的「连接断开」事件，重复 false 会让订阅方收到噪声状态。
+      if (!degraded) {
+        degraded = true;
+        if (onConnectionChange) onConnectionChange(false);
+      }
       resubscribe(true);
     }, timings.heartbeatTimeoutMs);
   }
 
-  function teardown() {
-    clearTimeout(watchdog);
-    watchdog = null;
+  /** Drop the current bridge subscription (cancel wrapper). */
+  function release() {
     if (unsub) {
       try { unsub(); } catch (e) { /* listener already gone */ }
       unsub = null;
     }
   }
 
+  function teardown() {
+    clearTimeout(watchdog);
+    watchdog = null;
+    release();
+  }
+
   function resubscribe(afterTimeout) {
-    teardown();
+    // 旧订阅在退避窗口内保持挂载：先 teardown 会立刻 cancel 旧包装器，
+    // 退避期间到达的事件会被静默丢弃（慢死的连接其实还活着，恢复事件会漏）。
+    // 新订阅建立后再释放旧的，消除这段无覆盖窗口。
+    clearTimeout(watchdog);
+    watchdog = null;
     const delay = afterTimeout ? backoffMs : 0;
-    backoffMs = Math.min(backoffMs * 2, timings.maxMs);
+    // 只有看门狗触发的重连才推进退避档位。start() 的首次订阅若也翻倍，
+    // 首次重连会直接跳到 2×base（1s 档永不出现，实际序列 2/4/8/16/30s）。
+    if (afterTimeout) backoffMs = Math.min(backoffMs * 2, timings.maxMs);
     clearTimeout(redialTimer);
     redialTimer = setTimeout(() => {
       if (stopped) return;
+      const prev = unsub;
       try {
         unsub = subscribeSSE(handleEvent, () => {
           // Bridge-side channel error: reconnect immediately instead of
@@ -77,6 +93,7 @@ export function createResilientSSE(options = {}) {
         resubscribe(true);
         return;
       }
+      if (prev) { try { prev(); } catch (e) { /* already gone */ } }
       armWatchdog();
     }, delay);
   }

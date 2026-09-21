@@ -2,11 +2,23 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from adapters.external.base import ExternalApiError, normalize_task_state
 from core.domain.enums import BridgeTaskState
 from core.log import logger
 from core.application.bridge import _now, _split_ext, _short_suffix
+
+# Manual-mode (poll interval = 0) convergence sweep. Live 2026-09-12: with
+# polling disabled the only convergers are the read-repair paths —
+# /csbridge status and POST bridge/tasks — and neither has a panel caller,
+# so a panel bridge_out left the OpenList file under its URL-tail UUID name
+# and the ledger row pending forever. Anti-entropy convention: read repair
+# alone is reactive; a proactive background sweep converges submitted tasks.
+# Bounded: ticks only while actionable out-rows exist and self-terminates,
+# so manual mode keeps zero steady-state background work.
+SWEEP_TICK_SEC = 15.0
+SWEEP_MAX_LIFETIME_SEC = 3600.0
 
 
 class PollingMixin:
@@ -17,7 +29,7 @@ class PollingMixin:
         gid = op.target
         rid = op.payload["resource_id"]
 
-        # Step 1: dlserver guard 
+        # Step 1: dlserver guard
         if not (self._dlserver.enabled and self._dlserver.http_port > 0):
             return self._fail(op, "download_server_disabled")
 
@@ -29,7 +41,7 @@ class PollingMixin:
         if not self._size_ok(size):
             return self._fail(op, "size_filtered")
 
-        # Step 3: Idempotency + remote probe 
+        # Step 3: Idempotency + remote probe
         row = await self._store.get_archive_map(gid, rid, direction="out")
         if row and not op.payload.get("force"):
             # Check if row state is already done (idempotency)
@@ -61,11 +73,20 @@ class PollingMixin:
             base, ext = _split_ext(name_part)
             remote_path = f"{remote_dir}/{base}_{short_id}{ext}"
 
-        # Step 5: Idempotent mkdir 
+        # Step 5: Idempotent mkdir
         await self._client.mkdir(remote_dir)
 
-        # Step 6: File source direct link 
-        url = self._dlserver.download_url(gid, rid)
+        # Step 6: File source direct link — wrap through the proxy so
+        # OpenList's downloader receives a Content-Disposition with the real
+        # filename.  The plain /download?group=…&id=… link returns a bare302
+        # to the QQ CDN (no CD header); OpenList falls back to the URL tail
+        # which is a spec segment (/0 /400 /800), storing the file under a
+        # numeric name (Issue #8 / bad-link #18).
+        name = res["name"] or str(rid)
+        raw_url = self._dlserver.download_url(gid, rid)
+        url = self._dlserver.register_proxy(
+            raw_url, name, allow_private=getattr(self._dlserver, "allow_private", False)
+        )
 
         # Step 7: Control plane submit + ledger
         try:
@@ -147,6 +168,7 @@ class PollingMixin:
     def _ensure_poll_task(self) -> None:
         """Lazy create poll task; interval=0 means manual mode."""
         if self._interval <= 0:
+            self._ensure_manual_sweep()
             return
         if self._poll_task is not None and not self._poll_task.done():
             return
@@ -154,10 +176,51 @@ class PollingMixin:
         self._poll_task = asyncio.create_task(self._poll_loop(), name="bridge-poll")
         logger.info("[bridge] poll task started")
 
+    def _ensure_manual_sweep(self) -> None:
+        """Manual mode: arm the bounded convergence sweep (idempotent)."""
+        task = getattr(self, "_sweep_task", None)
+        if task is not None and not task.done():
+            return
+        self._sweep_task = asyncio.create_task(
+            self._manual_sweep_loop(), name="bridge-sweep"
+        )
+        logger.info("[bridge] manual-mode sweep armed")
+
+    async def _manual_sweep_loop(self) -> None:
+        """Converge pending out-rows until terminal or lifetime cap.
+
+        Mirrors read_repair_pending's decision tree via the same call, so
+        states converge, UUID names get renamed, and SSE publishes fire —
+        without the always-on poll loop. Re-armed by the next submission
+        after the lifetime cap expires.
+        """
+        import core.application.bridge.polling as _polling
+
+        deadline = time.monotonic() + _polling.SWEEP_MAX_LIFETIME_SEC
+        while not self._stopping and time.monotonic() < deadline:
+            await asyncio.sleep(_polling.SWEEP_TICK_SEC)
+            try:
+                rows = await self._store.list_archive_map(
+                    states=(
+                        BridgeTaskState.PENDING.value,
+                        BridgeTaskState.RUNNING.value,
+                        BridgeTaskState.UNKNOWN.value,
+                    ),
+                    direction="out",
+                )
+                if not rows:
+                    return
+                await self.read_repair_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[bridge] manual sweep tick failed: {e}")
+        logger.info("[bridge] manual-mode sweep finished (lifetime cap)")
+
     async def stop_polling(self) -> None:
         """Stop poll and ledger tasks ."""
         self._stopping = True
-        for attr in ("_poll_task", "_ledger_task"):
+        for attr in ("_poll_task", "_ledger_task", "_sweep_task"):
             task = getattr(self, attr)
             if task is not None and not task.done():
                 task.cancel()
@@ -183,7 +246,7 @@ class PollingMixin:
             in_pending = await self._in_pending()
 
             if not rows and not in_pending:
-                # No unfinished tasks -> auto stop 
+                # No unfinished tasks -> auto stop
                 self._poll_task = None
                 logger.info("[bridge] poll task stopped: no pending tasks")
                 return
@@ -197,7 +260,7 @@ class PollingMixin:
                 for row in rows:
                     task = undone.get(row["task_id"]) or done.get(row["task_id"])
                     if task is None:
-                        # Double list missing -> backoff probe 
+                        # Double list missing -> backoff probe
                         n = backoff.get(row["task_id"], 0)
                         backoff[row["task_id"]] = n + 1
                         # Poll ticks are ~10s apart; probe stat() only every

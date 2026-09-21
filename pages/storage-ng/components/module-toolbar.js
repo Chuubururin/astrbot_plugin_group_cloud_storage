@@ -22,6 +22,7 @@ import {
   showEssenceUploadModal, handleEssenceFileUpload,
 } from '../features/ingest.js';
 import { filterByAccount, loadAccounts, loadGroups } from '../features/group-data.js';
+import { checkGroupOpenable } from '../features/group-open-state.js';
 
 /** Module specs: everything the shared toolbar needs to differ per tab. */
 export const MODULE_TOOLBAR_SPECS = {
@@ -78,7 +79,7 @@ export function initModuleToolbar(container, modId) {
           <button class="menu-item" data-act="cloud">${mod.refreshHint}</button>
         </div>
       </span>
-      <input type="search" id="${mod.id}-search" placeholder="${mod.searchPlaceholder}" value="${getState()[mod.queryKey] || ''}" />
+      <input type="search" id="${mod.id}-search" placeholder="${mod.searchPlaceholder}" value="${escapeHtml(getState()[mod.queryKey] || '')}" />
       <input type="file" id="${mod.id}-file" accept="${mod.accept}" multiple style="display:none" />
     </div>
     <div class="toolbar-right">
@@ -173,8 +174,21 @@ function renderGroupFocus(selectEl, mod) {
   selectEl.innerHTML = '<option value="">全部群（在线聚合）</option>' + filtered.map((g) =>
     `<option value="${g.group_id}" ${g.group_id === cur ? 'selected' : ''}>` +
     `${escapeHtml(g.group_name || String(g.group_id))} (${g.group_id})</option>`).join('');
-  selectEl.onchange = () => {
-    set(mod.groupKey, selectEl.value);
+  selectEl.onchange = async () => {
+    let gid = selectEl.value;
+    if (gid) {
+      // Doc: every group-scoped read/write runs the same gate (managed +
+      // owning account online + group alive). The gate answers HTTP 200
+      // with the reason in the body; a refusal falls back to the
+      // all-groups aggregate instead of focusing the group.
+      const gate = await checkGroupOpenable(gid);
+      if (!gate.ok) {
+        toast(gate.label, 'warn');
+        gid = '';
+        selectEl.value = '';
+      }
+    }
+    set(mod.groupKey, gid);
     set(mod.id === 'album' ? 'albumPage' : 'essencePage', 1);
     refresh(mod.topic);
   };

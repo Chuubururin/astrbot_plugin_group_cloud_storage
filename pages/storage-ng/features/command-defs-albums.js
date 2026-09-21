@@ -13,7 +13,6 @@ import { API, apiGet, apiPost } from '../api.js';
 import { detailEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { openPreview } from './preview.js';
-import { refresh } from '../store.js';
 
 /** Register the album domain commands. */
 export function registerAllAlbumCommands() {
@@ -24,21 +23,19 @@ export function registerAllAlbumCommands() {
     allowNoSelection: true,
     async run(ctx) {
       const group = ctx.state.albumGroup || ctx.rows[0]?.group_id || ctx.state.currentGroup || '';
-      if (!group) { toast('请先在上方选择群', 'warn'); return; }
+      if (!group) { toast('请先在上方选择群', 'warn'); return false; }
       const res = await showFormModal('创建群相册', [
         { name: 'album_name', label: '相册名称', required: true, placeholder: '如 AstrBot云盘' },
         { name: 'album_desc', label: '相册描述（可选）' },
       ]);
       if (!res?.album_name?.trim()) return false;
-      try {
-        await apiPost(API.ALBUMS.CREATE, {
-          group, album_name: res.album_name.trim(), album_desc: res.album_desc || '',
-        });
-        toast('相册创建成功', 'success');
-        refresh('albums');
-      } catch (e) {
-        toast(`创建失败: ${e.message || e}`, 'error');
-      }
+      // No local try/catch: a failed create must reach the unified lifecycle
+      // (error toast + recoverAfterFailure) instead of being swallowed and
+      // then reported as a success that refreshes and clears the selection.
+      await apiPost(API.ALBUMS.CREATE, {
+        group, album_name: res.album_name.trim(), album_desc: res.album_desc || '',
+      });
+      toast('相册创建成功', 'success');
     },
     refresh: ['albums'],
   });

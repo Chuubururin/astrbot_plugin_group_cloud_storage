@@ -90,10 +90,12 @@ ROUTES = [
     ("config/get", ["GET"], "api_config_get", "配置查询", "page"),
     ("config/save", ["POST"], "api_config_save", "配置保存", "page"),
     ("config/reload", ["POST"], "api_config_reload", "配置热重载", "page"),
-    # Database administration
-    ("database/health", ["GET"], "api_database_health", "数据库健康", "db"),
-    ("database/integrity", ["GET"], "api_database_integrity", "数据库完整性", "db"),
-    ("database/backups", ["GET"], "api_database_backups", "数据库备份列表", "db"),
+    # Database administration (POST-only: the admin token travels in the
+    # request body, never in URLs/headers; read ops follow the same
+    # body-carried-parameters convention as tasks/netdisk)
+    ("database/health", ["POST"], "api_database_health", "数据库健康", "db"),
+    ("database/integrity", ["POST"], "api_database_integrity", "数据库完整性", "db"),
+    ("database/backups", ["POST"], "api_database_backups", "数据库备份列表", "db"),
     ("database/backup", ["POST"], "api_database_backup", "数据库备份", "db"),
     ("database/restore", ["POST"], "api_database_restore", "数据库恢复", "db"),
     # Sync
@@ -162,6 +164,9 @@ class RouteRegistry:
         """Register every route, resolving handlers only at registration time."""
         for suffix, methods, handler_name, description, _auth in self.routes:
             handler = handler_lookup(handler_name)
+            # handler_lookup must return None for undefined names (see
+            # webapi._route_handler_lookup): a missing handler has to fail here,
+            # while routes are wired, instead of surfacing as a request-time 500.
             if handler is None:
                 raise LookupError(f"route handler not found: {handler_name}")
             context.register_web_api(

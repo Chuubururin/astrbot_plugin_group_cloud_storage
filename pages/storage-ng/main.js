@@ -19,6 +19,7 @@ import { initTaskPanel } from './components/task-panel.js';
 import { initStatBar } from './components/stat-bar.js';
 import { EVENT_TYPES, DATA_CHANGED_TOPICS, EVENT_KINDS } from './constants.js';
 import { createResilientSSE } from './utils/sse.js';
+import { startQueueIndicator } from './utils/queue-indicator.js';
 import { toast } from './components/toast.js';
 
 // ---------- SSE  ----------
@@ -31,10 +32,11 @@ const TASK_LOG_TYPES = new Set([
 ]);
 
 /** Queue-state transitions that must repaint the tasks ledger immediately:
- * without this the row keeps the pre-click state (e.g. "排队中" after a
- * pause) until an unrelated reload happens. */
+ * otherwise the row keeps the pre-click state ("排队中" after a pause) until an
+ * unrelated reload; retry included so 重试中 rows expose pause/interrupt. */
 const LEDGER_SYNC_TYPES = new Set([
   EVENT_TYPES.PAUSED, EVENT_TYPES.RESUMED, EVENT_TYPES.CANCELLED,
+  EVENT_TYPES.RETRY,
 ]);
 
 /** After a reconnection: one refresh per data topic. */
@@ -50,9 +52,8 @@ function refreshAllTopics() {
 }
 
 // ---------- data_changed topic refresh coalescing ----------
-// Batch task completion pushes consecutive data_changed events: refreshes
-// for the same topic within a 150ms window coalesce into one refresh,
-// avoiding a request storm of concurrent full refetches across topics.
+// Batch completions push consecutive data_changed events: same-topic refreshes
+// within 150ms coalesce into one request instead of a concurrent refetch storm.
 const _pendingDataRefresh = new Map();
 
 function debouncedTopicRefresh(topics) {
@@ -66,12 +67,15 @@ function debouncedTopicRefresh(topics) {
 }
 
 function handleSSEEvent(ev) {
-  const { type, task_id, kind, state: taskState, percent, detail } = ev;
+  const { type, task_id, kind, state: taskState, percent, i, n, detail } = ev;
 
   if (TASK_LOG_TYPES.has(type)) {
+    // i/n 是 OpQueue progress 的主形状（percent 为 bridge 专属回退）；
+    // CANCELLED 是终态，与 DONE/FAILED 一致地清顶栏指示器。
     set('activeTask', type === EVENT_TYPES.DONE || type === EVENT_TYPES.FAILED
+      || type === EVENT_TYPES.CANCELLED
       ? null
-      : { kind, task_id, i: percent || 0, n: 100, detail: detail || type });
+      : { kind, task_id, i: i ?? percent ?? 0, n: n ?? 100, detail: detail || type });
     pushTaskLog(ev);
   }
 
@@ -85,7 +89,9 @@ function handleSSEEvent(ev) {
     case EVENT_TYPES.DONE:
       if (kind === EVENT_KINDS.BRIDGE_OUT || kind === EVENT_KINDS.BRIDGE_IN) {
         toast(`${kind === EVENT_KINDS.BRIDGE_OUT ? '转存网盘' : '转存群'}完成`, 'success');
-        refresh('bridge');
+        // Bridge ops emit no data_changed: reload the affected topics
+        // (netdisk/files) and the bridge ledger from the shared map.
+        debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
       }
       break;
 
@@ -101,6 +107,16 @@ function handleSSEEvent(ev) {
       // 中断同样是部分写入后的终态（批量任务可能已改了一半云状态）：
       // 与 FAILED 同样处理, 避免表格停留在中断前的旧数据上。
       debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
+      break;
+
+    case EVENT_TYPES.BRIDGE:
+      // 转存任务级事件（type:"bridge"）：OpQueue 对 bridge_out/bridge_in 的
+      // op 层终态只说明调度成功，传输失败只从这里可见。成功 toast 由
+      // DONE 分支负责，这里只补失败可见性。
+      if (taskState === 'failed') {
+        toast(`转存失败: ${detail || task_id || ''}`, 'error');
+        debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
+      }
       break;
 
     case EVENT_TYPES.PAUSED:
@@ -136,7 +152,8 @@ function initSSE() {
     onReconnected: refreshAllTopics,
   });
   sse.start();
-  window.addEventListener('unload', () => sse.stop());
+  const stopQueue = startQueueIndicator(); // 队列深度：SSE 只有单任务进度，全局深度靠轮询
+  window.addEventListener('unload', () => { sse.stop(); stopQueue(); });
 
   // Visibility staleness guard: after a long time in a hidden tab, missed
   // SSE events (or silent connection decay) can leave stale rows; a re-
@@ -180,16 +197,12 @@ import { initKeyboard } from './components/keyboard.js';
 
 // ---------- View loading ----------
 
-// View loading: stale-import guard + retry. After the import resolves,
-// loadView checks the container is still owned by this view via the router
-// generation counter (dataset.routerGen) — a fast tab switch must not let a
-// stale dynamic import write DOM into #content. A failed dynamic import stays
-// cached as a failure for the document's lifetime (a views/*.js fetch broken
-// mid-flight would fail instantly on every retry), so failed attempts are
-// retried with ?retry=N cache-busting specifiers. The dashboard rewrites
-// import specifiers with a regex that only sees string literals — every
-// attempt is therefore a spelled-out literal thunk; a runtime-built specifier
-// would fetch a second, unrewritten module graph with its own store/router.
+// View loading: stale-import guard + retry. After the import resolves, loadView
+// checks the container is still owned by this view (dataset.routerGen) so a fast
+// tab switch cannot let a stale import write DOM. A failed dynamic import is
+// cached for the document's lifetime, so retries use ?retry=N literals — the
+// dashboard rewrites only string-literal specifiers, so every attempt is a
+// spelled-out thunk (a runtime-built specifier would fetch an unrewritten graph).
 async function loadView(attempts, container) {
   const gen = container.dataset.routerGen;
   let mod;
@@ -226,9 +239,8 @@ const VIEW_IMPORTS = {
 
 // ---------- Init ----------
 
-/** E2E mode detection inline (testing/ is not shipped with the plugin —
- * a GitHub install lacks the file, and any top-level import of it would
- * 404 the whole module graph and blank the page). */
+/** E2E mode detection inline: testing/ is not shipped with the plugin, so a
+ * top-level import of it would 404 the whole module graph and blank the page. */
 function isE2EMode() {
   return new URLSearchParams(window.location.search).get('e2e') === '1';
 }
@@ -264,10 +276,17 @@ async function init() {
   for (const value of Object.values(VIEW_IMPORTS)) {
     value[1]().catch(() => { /* loadView retries at click time */ });
   }
-  // classification table preload (drives netdisk local chips).
+  // classification table preload (drives netdisk local chips) + the live
+  // page_size so the config item actually governs the file list page size.
   import('./api.js').then(async ({ apiGet, API }) => {
     try { set('extTypes', await apiGet(API.META_CLASSIFY)); }
     catch (e) { console.warn('[main] classify table unavailable:', e); }
+    try {
+      const c = await apiGet(API.CONFIG_GET);
+      const size = Number((c?.groups || []).flatMap((g) => g.items || [])
+        .find((i) => i.key === 'page_size')?.value);
+      if (Number.isFinite(size) && size > 0) set('filePageSize', size);
+    } catch (e) { console.warn('[main] page_size unavailable:', e); }
   });
 
   initRouter();

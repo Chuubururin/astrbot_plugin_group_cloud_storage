@@ -38,6 +38,11 @@ def split_text(text: str, limit: int = ESSENCE_CHUNK_MAX_CHARS) -> list[str]:
     back to hard cuts at sentence-punctuation/whitespace boundaries (each
     chunk <= limit).
     """
+    # Lower bound: a zero/negative limit (essence_chunk_size is passed through
+    # as a raw int, see essence._do_essence_save) made _best_cut return a
+    # non-positive cut, so the line never shrank -> infinite loop + unbounded
+    # chunk list while blocking the event loop (this is a sync function).
+    limit = max(1, int(limit))
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
@@ -55,15 +60,16 @@ def split_text(text: str, limit: int = ESSENCE_CHUNK_MAX_CHARS) -> list[str]:
         # so a section header never trails the previous section's tail
         if buf and (_HEADING_RE.match(line) or _ORDINAL_RE.match(line)):
             _flush()
-            buf = line
-            return
-        if len(buf) + len(line) + 1 <= limit:
+        elif len(buf) + len(line) + 1 <= limit:
             buf = f"{buf}\n{line}" if buf else line
             return
-        if buf:
+        elif buf:
             _flush()
+        # A structural line that does not fit falls through to the hard-cut
+        # loop below: `buf = line` used to emit a > limit chunk (violating the
+        # "each chunk <= limit" contract, which gets QQ essence truncated).
         while len(line) > limit:
-            cut = _best_cut(line, limit)
+            cut = max(1, _best_cut(line, limit))  # always advance
             chunks.append(line[:cut].rstrip())
             line = line[cut:].lstrip("\n")
         buf = line

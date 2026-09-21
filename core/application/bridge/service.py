@@ -52,6 +52,7 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
         # Polling state
         self._poll_task = None
         self._ledger_task = None
+        self._sweep_task = None
         self._stopping = False
         self._in_task_ids: set[str] = set()
         # Cached URL-upload capability; None = not yet probed
@@ -109,6 +110,98 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
     ) -> None:
         await self._client.recursive_move(src_dir, dst_dir, names)
 
+    async def verify_copy(
+        self, src_dir: str, dst_dir: str, names: list[str]
+    ) -> list[dict]:
+        """Post-copy size verification (advisory; never raises).
+
+        OpenList copies are fire-and-forget from our side: a same-storage
+        copy finishes immediately, a cross-storage copy runs as a background
+        task. Size comparison is the cheap first-pass integrity check (the
+        rclone convention): it cannot detect bit rot, but it does catch
+        silent truncation — 2026-09-12 live: OpenList v4.2.5 same-mount copy
+        truncated a 20 MiB file to exactly 16 MiB while reporting success.
+        Statuses: ok / mismatch (with sizes) / pending (dst not visible yet,
+        copy task may still be running) / skipped (src gone or stat error).
+        """
+        results: list[dict] = []
+        for name in names:
+            try:
+                src = await self._client.stat(f"{src_dir.rstrip('/')}/{name}")
+                dst = await self._client.stat(f"{dst_dir.rstrip('/')}/{name}")
+            except Exception:
+                results.append({"name": name, "status": "skipped"})
+                continue
+            if src is None:
+                results.append({"name": name, "status": "skipped"})
+                continue
+            if dst is None:
+                results.append({"name": name, "status": "pending"})
+                continue
+            if src.is_dir or dst.is_dir:
+                results.append({"name": name, "status": "ok"})
+                continue
+            if src.size == dst.size:
+                results.append({"name": name, "status": "ok"})
+            else:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "mismatch",
+                        "src_size": src.size,
+                        "dst_size": dst.size,
+                    }
+                )
+        return results
+
+    # -- Startup preflight --
+
+    async def preflight_dst(self) -> bool:
+        """Check that ``openlist_dst_dir`` lives under an OpenList mount.
+
+        Walks the destination root's ancestor chain and reports the first
+        prefix that no mount owns.  The plugin cannot fix the configuration,
+        but it can move the failure from "first user transfer" (where the
+        queue classifies it as a retriable IO error, backs off three times
+        and then fails permanently - a config error never heals) to "plugin
+        load", with a log that says what to change.
+
+        Read-only: only ``fs/get`` probes, nothing is created.  Returns True
+        when the chain is addressable, False otherwise.  Never raises.
+        """
+        dst = (self._dst_dir or "").strip().rstrip("/")
+        if not dst:
+            return True
+        parts = [seg for seg in dst.split("/") if seg]
+        # Shallowest first: the first prefix no mount owns *is* the
+        # misconfiguration, and stopping there keeps the healthy case at a
+        # single probe (a mounted root answers for its whole subtree).
+        for depth in range(1, len(parts) + 1):
+            prefix = "/" + "/".join(parts[:depth])
+            try:
+                ok, reason = await self._client.probe_mount(prefix)
+            except Exception as e:
+                logger.warning(f"[bridge] preflight probe {prefix!r} failed: {e}")
+                return True
+            if not ok:
+                logger.error(
+                    f"[bridge] preflight FAILED: openlist_dst_dir {dst!r} is not "
+                    f"under any OpenList mount - {prefix!r} reports {reason!r}. "
+                    f"Every bridge_out transfer will fail until this is fixed "
+                    f"(OpenList's mkdir cannot create a mount point). Fix: create "
+                    f"a storage in OpenList whose mount_path is a parent of "
+                    f"{dst!r}, or point openlist_dst_dir at an existing mount "
+                    f"(e.g. /smb/bridge-test)."
+                )
+                return False
+            # A mount owns this prefix, so the whole subtree is addressable
+            # (mkdir creates the remaining directories inside it).
+            logger.info(
+                f"[bridge] preflight ok: openlist_dst_dir {dst!r} resolves under "
+                f"mount prefix {prefix!r}"
+            )
+            return True
+
     # -- Internal helpers --
 
     def _fail(self, op, reason: str) -> None:
@@ -131,7 +224,9 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
         if hasattr(op_or_row, "kind"):
             kind = op_or_row.kind
             target = op_or_row.target
-            task_id = op_or_row.id if hasattr(op_or_row, "id") else ""
+            # Op carries the correlation id in task_id (never .id) -- the
+            # frontend matches SSE events against queued task ids.
+            task_id = op_or_row.task_id
         else:
             kind = f"bridge_{op_or_row.get('direction', 'out')}"
             target = op_or_row.get("group_id", "")
@@ -259,11 +354,15 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
             for f in files:
                 if f.is_dir:
                     continue
-                # Match by size (exact or within 1% tolerance for rounding)
-                if expected_size > 0 and f.size > 0:
-                    size_diff = abs(f.size - expected_size) / expected_size
-                    if size_diff > 0.01:  # More than 1% difference
-                        continue
+                # Match by size (exact or within 1% tolerance for rounding).
+                # Unknown size on either side -> skip: without this guard the
+                # loop renames an arbitrary file in the directory (e.g. after
+                # the resource row was deleted and expected_size is 0).
+                if expected_size <= 0 or f.size <= 0:
+                    continue
+                size_diff = abs(f.size - expected_size) / expected_size
+                if size_diff > 0.01:  # More than 1% difference
+                    continue
 
                 # Found a match - rename it
                 try:

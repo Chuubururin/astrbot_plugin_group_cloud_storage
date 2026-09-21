@@ -121,13 +121,53 @@ class EssenceMixin:
             total = len(split_text(text, limit))
         chunks = split_text(text, limit)
         total = len(chunks)
+        # Replay ledger: sending a part *and* setting it as essence is not
+        # idempotent, while the checkpoint below means a pause -> resume
+        # re-enters this handler from its first line. The parts an earlier run
+        # already sent are kept in the payload (same retry-reuse convention as
+        # video.py's parent_resource_id) and skipped here: without it the group
+        # got duplicate essence messages, and the first batch's message_ids
+        # lived only in memory -> the re-run wrote a new source_ref, orphaning
+        # messages the plugin could no longer delete. Only seq/message_id/chars
+        # are persisted: the payload is written to the task ledger, and the
+        # chunk texts already travel in payload["text"].
+        sent: dict[int, str] = {
+            int(p["seq"]): str(p.get("message_id") or "")
+            for p in (op.payload.get("sent_parts") or [])
+            if p.get("seq")
+        }
         parts: list[dict] = []
         for seq, chunk in enumerate(chunks, 1):
-            mid = await self._part_essence_set(op.target, title, seq, total, chunk)
+            # Cooperative checkpoint: a long document shards into many parts,
+            # so this loop must honor 中断/暂停 like every other handler loop.
+            await self.queue.pause_check(op)
+            if seq in sent:
+                logger.info(
+                    f"[ingest] essence part {seq}/{total} already sent, skipping"
+                )
+            else:
+                sent[seq] = await self._part_essence_set(
+                    op.target, title, seq, total, chunk
+                )
+                op.payload["sent_parts"] = [
+                    {"seq": s, "message_id": sent[s], "chars": len(chunks[s - 1])}
+                    for s in sorted(sent)
+                ]
+                # Persist the ledger now, not at the next state transition.
+                # The paused write already captures it, but a crash/kill does
+                # not: the restart would replay from the *running* snapshot,
+                # re-send every part, and orphan the earlier messages (their
+                # ids exist nowhere else, so they can no longer be deleted).
+                await self.queue.checkpoint_payload(op)
             # Part texts are stored locally as redundancy: the full text can
             # be rebuilt offline if the cloud is unavailable
             parts.append(
-                {"seq": seq, "message_id": mid, "chars": len(chunk), "text": chunk}
+                {
+                    "seq": seq,
+                    "message_id": sent[seq],
+                    "chars": len(chunk),
+                    "text": chunk,
+                }
             )
             self.queue.publish(
                 {
@@ -294,6 +334,9 @@ class EssenceMixin:
         parts = op.payload.get("parts") or []
         failed = 0
         for p in parts:
+            # Cooperative checkpoint (same contract as _do_essence_save):
+            # a multi-part delete must be interruptible.
+            await self.queue.pause_check(op)
             try:
                 await self.api.delete_essence_msg(str(p.get("message_id") or ""))
             except Exception as e:

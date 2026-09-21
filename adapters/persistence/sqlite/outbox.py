@@ -13,6 +13,46 @@ if TYPE_CHECKING:
 
 LEDGER_BREAKPOINT_KINDS = ("convert_volumes", "video_upload", "netdisk_index")
 
+# Parameterized upsert (values bind via ?, see _do below). The WHERE clause is
+# the terminal-state guard: ledger writes race by design (fire-and-forget
+# pause/resume/cancel fires vs awaited worker writes over the connection
+# pool), so ordering cannot be relied on — the guard makes terminal states win
+# under EITHER arrival order. A terminal write always overwrites a
+# non-terminal row; a non-terminal write (pending/running/paused/retry)
+# arriving after done/failed is dropped. cancelled stays absolutely sticky:
+# only a cancelled write itself (idempotent rewrite) may touch a cancelled
+# row. done/failed may still overwrite each other so retry/reconcile
+# bookkeeping keeps working.
+_LEDGER_UPSERT_SQL = """
+INSERT INTO op_ledger
+   (task_id, kind, target, payload, state, retries, error,
+    created_at, updated_at)
+   VALUES (?,?,?,?,?,?,?,?,?)
+   ON CONFLICT(task_id) DO UPDATE SET
+     payload=excluded.payload,
+     state=excluded.state,
+     retries=excluded.retries,
+     error=CASE WHEN excluded.error IS NOT NULL THEN excluded.error
+                WHEN excluded.state IN ('done','cancelled') THEN NULL
+                ELSE op_ledger.error END,
+     updated_at=excluded.updated_at
+   WHERE (op_ledger.state != 'cancelled'
+          AND op_ledger.state != 'done'
+          AND op_ledger.state != 'failed')
+      OR excluded.state = 'cancelled'
+      OR (op_ledger.state != 'cancelled'
+          AND (excluded.state = 'done' OR excluded.state = 'failed'))
+"""
+#
+# payload IS refreshed on conflict, deliberately. It used to be INSERT-only,
+# which meant every payload key a handler added while running was silently
+# dropped: the ledger kept the snapshot taken before the handler started.
+# Two live defects followed -- essence_save's sent_parts ledger was lost so a
+# crash re-sent every part and orphaned the already-sent messages, and
+# upload's staged parent_resource_id was lost so a retry created a second
+# volume parent and orphaned the first. It also starved the breakpoint resume
+# path (webapi/tasks.py), which re-submits the op from row["payload"].
+
 
 def _now_ts() -> str:
     # UTC ISO-8601, the store-wide standard (see archive.py / common.utc_now_iso).
@@ -39,24 +79,8 @@ class OutboxMixin(StorePart):
     ) -> None:
         def _do(conn: sqlite3.Connection):
             now = _now_ts()
-            # Terminal-state guard: once a task is cancelled, stale async
-            # writes must not resurrect it to a non-terminal state (out of
-            # order ledger writes race with pause/cancel finalization).
-            # done/failed remain overwritable so retry bookkeeping works.
             conn.execute(
-                """INSERT INTO op_ledger
-                   (task_id, kind, target, payload, state, retries, error,
-                    created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(task_id) DO UPDATE SET
-                     state=excluded.state,
-                     retries=excluded.retries,
-                     error=CASE WHEN excluded.error IS NOT NULL THEN excluded.error
-                                WHEN excluded.state IN ('done','cancelled') THEN NULL
-                                ELSE op_ledger.error END,
-                     updated_at=excluded.updated_at
-                   WHERE op_ledger.state != 'cancelled'
-                      OR excluded.state = 'cancelled'""",
+                _LEDGER_UPSERT_SQL,
                 (
                     task_id,
                     kind,
@@ -93,10 +117,16 @@ class OutboxMixin(StorePart):
         target: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        task_ids: list[str] | None = None,
     ) -> list[dict]:
         def _do(conn: sqlite3.Connection):
             sql = "SELECT * FROM op_ledger WHERE 1=1"
             args: list = []
+            if task_ids:
+                # 精确匹配：接力链按已知 task_id 轮询时不受分页截断影响
+                placeholders = ",".join("?" * len(task_ids))
+                sql += f" AND task_id IN ({placeholders})"
+                args.extend(str(t) for t in task_ids)
             if state:
                 sql += " AND state=?"
                 args.append(state)
@@ -143,21 +173,23 @@ class OutboxMixin(StorePart):
         self, task_id: str, action: str, before: dict | None, after: dict | None
     ) -> None:
         def _do(conn: sqlite3.Connection):
-            row = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) + 1 AS s FROM op_ops WHERE task_id=?",
-                (task_id,),
-            ).fetchone()
-            seq = row["s"] if row else 1
+            # seq is computed inside the INSERT statement: a separate
+            # "SELECT MAX(seq)+1" followed by an INSERT let two writers read
+            # the same MAX and both insert it (op_ops only has the plain
+            # idx_ops_task index, no unique constraint), silently producing
+            # duplicate sequence numbers in the operation log. One statement
+            # makes read+write a single atomic step.
             conn.execute(
                 """INSERT INTO op_ops (task_id, seq, action, before, after, created_at)
-                   VALUES (?,?,?,?,?,?)""",
+                   SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?
+                   FROM op_ops WHERE task_id=?""",
                 (
                     task_id,
-                    seq,
                     action,
                     json.dumps(before or {}, ensure_ascii=False),
                     json.dumps(after or {}, ensure_ascii=False),
                     _now_ts(),
+                    task_id,
                 ),
             )
             conn.commit()

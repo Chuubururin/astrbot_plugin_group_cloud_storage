@@ -1,4 +1,10 @@
-"""Resources domain — CRUD, query, stats, URI, tags."""
+"""Resources domain — CRUD, query, stats, URI, tags.
+
+``resource_id`` DERIVES from the session-scoped NapCat file_id, so it is not a
+stable identity. ``logical_key`` (``group:type:name``) is, behind a PARTIAL
+unique index (``WHERE status != 'deleted'``): one live row per logical file,
+tombstones retained. See ``upsert_resources``.
+"""
 from __future__ import annotations
 
 import json
@@ -6,8 +12,10 @@ import sqlite3
 import time
 
 from .state import StorePart
+from .like import like_contains, like_escape
+from .row_identity import _logical_key, _logical_path, _path_for
+from .status_policy import resource_status_sql
 from typing import TYPE_CHECKING
-
 from core.domain.enums import ResourceStatus, ResourceType
 from core.domain.resource import Resource
 from core.domain.sync import Page, PageItem, ResourceQuery, ResourceStats
@@ -19,11 +27,46 @@ _RESOURCE_FIELD_WHITELIST = frozenset(
     {"name", "folder_id", "folder_name", "status", "size", "mime", "meta", "tags"}
 )
 
-# Volume part folding (list semantics): rows whose name matches a part_name
-# registered in volumes and whose logical parent entry still exists are hidden
-# from list/search/stats -- listings show only the logical large-file entry,
-# so parts do not appear twice alongside their parent. Parts become visible
-# again once the parent is deleted, for manual cleanup.
+# Shared ON CONFLICT body. Both targets need it: SQLite applies the FIRST
+# matching clause and skips the rest, so the two must not drift.
+_RESOURCE_CONFLICT_BODY = f"""\
+  resource_id=excluded.resource_id,
+  source_ref=excluded.source_ref,
+  name=excluded.name, size=excluded.size,
+  uploader_id=COALESCE(excluded.uploader_id, uploader_id),
+  uploader_name=COALESCE(excluded.uploader_name, uploader_name),
+  busid=COALESCE(excluded.busid, busid),
+  folder_id=excluded.folder_id, folder_name=excluded.folder_name,
+  created_at=CASE WHEN excluded.created_at > 0
+      THEN excluded.created_at ELSE created_at END,
+  status={resource_status_sql()},
+  -- json_valid first: json_extract raises on a non-NULL invalid meta.
+  -- '$.volumes'=1 covers the legacy volts-only shape (no composition key)
+  -- written by ingest/video.py; without it that meta was overwritten.
+  meta=CASE WHEN resources.meta IS NOT NULL AND json_valid(resources.meta)
+      AND (json_extract(resources.meta, '$.composition') IS NOT NULL
+           OR json_extract(resources.meta, '$.volumes') = 1)
+    THEN json_patch(resources.meta, excluded.meta) ELSE excluded.meta END,
+  updated_at=excluded.updated_at,
+  path=excluded.path, ext=excluded.ext"""
+
+# ``logical_key`` is what the partial unique index enforces, so a rename must
+# refresh it: left stale, the OLD name's return matched this row and overwrote
+# it (a.mp4 -> b.mp4, then a.mp4 returned and b.mp4 was lost). Guarded --
+# renaming onto a name a live row holds would violate the index, so the key is
+# then left alone and the next upsert reconciles through the row key.
+_RENAME_LOGICAL_KEY = (
+    "UPDATE resources SET logical_key = CASE WHEN NOT EXISTS ("
+    "  SELECT 1 FROM resources o WHERE o.group_id=resources.group_id "
+    "    AND o.type=resources.type AND o.name=resources.name "
+    "    AND o.id != resources.id AND o.status != 'deleted') "
+    "THEN group_id||':'||type||':'||name ELSE logical_key END "
+    "WHERE id=?"
+)
+
+# A row whose name is a registered part_name with a live parent is hidden from
+# list/search/stats, so parts never appear twice beside their parent. They
+# resurface once the parent is deleted, for manual cleanup.
 _PART_FOLD_COND = (
     "NOT EXISTS ("
     "SELECT 1 FROM volumes v JOIN resources p ON p.resource_id = v.parent_resource_id "
@@ -43,36 +86,35 @@ class ResourcesMixin(StorePart):
     def _inherit_composition_identity(
         self, conn: sqlite3.Connection, items: list[Resource]
     ) -> None:
-        """Successor-row identity carry-over (same logical file, new file_id).
+        """Safety net for composition parents that predate ``logical_key``.
 
-        NapCat file_ids are session-scoped handles: after a restart the same
-        cloud file lists under a fresh file_id, so the sync inserts a new
-        resource_id row (meta empty) while the composition-carrying row keeps
-        the same (group, name) identity. The sweep cannot retire the old row
-        (its volumes-guard keeps composition parents), leaving two rows for
-        one logical file and a 0/n volume view on the active one.
+        Normally the ON CONFLICT(logical_key) clause collapses a restarted
+        session's file_id onto the live row, so nothing stale forms here. It
+        stays for rows already duplicated (v29 keeps their losers as
+        tombstones) and as a guard if one ever escapes the index.
 
-        One indexed pass loads every volume-composition row; each incoming
-        file row then adopts a stale same-(group_id, name) row's composition
-        meta — stale means its source_ref is no longer among the incoming
-        listing (the cloud no longer exposes that session's file_id).
-        Volumes are reattached to the successor and the stale row is
-        hard-removed so (group, name) identity stays unique. Rows whose
-        source_ref is still listed keep their data: genuinely distinct cloud
-        files with identical names in one folder are merged only when the old
-        session handle has vanished.
+        A stale same-(group_id, name) parent hands its ``meta`` to the
+        successor and is TOMBSTONED, never hard-removed -- the partial index
+        tolerates history. Rows whose ``source_ref`` is still listed are left
+        alone: two distinct cloud files may share a name in one folder, and
+        only a vanished session handle proves identity.
         """
         if not any(
             r.type == ResourceType.FILE and r.source_ref for r in items
         ):
             return
-        # O(composition rows) via idx_res_name — composition parents are rare
-        # (a handful per group), so this stays small even on 20k upserts.
+        # Indexed by idx_res_name; composition parents are rare per group.
         comp_rows = conn.execute(
             """
-            SELECT resource_id, group_id, name, size, source_ref, meta FROM resources
+            SELECT resource_id, group_id, name, source_ref, meta FROM resources
             WHERE type='file'
-              AND json_extract(meta, '$.composition.kind') = 'volumes'
+              -- Both parent shapes: canonical composition.kind and the
+              -- legacy {'volumes': true} from ingest/video.py. json_valid
+              -- first -- json_extract raises on a non-NULL invalid meta and
+              -- would abort the whole batch.
+              AND json_valid(meta)
+              AND (json_extract(meta, '$.composition.kind') = 'volumes'
+                   OR json_extract(meta, '$.volumes') = 1)
             """
         ).fetchall()
         if not comp_rows:
@@ -93,16 +135,6 @@ class ResourcesMixin(StorePart):
                 or pred["source_ref"] in incoming_refs
             ):
                 continue
-            # Size gate: a different logical file can share a name (a new
-            # small re-upload after the big original became volumes). Only
-            # sizes covering the predecessor are eligible — equal sizes are
-            # ambiguous (live 2026-09-10: a 2KB vol_test.bin inherited the
-            # 200MB original's composition and parts), smaller ones are not
-            # (the cloud original was deleted after conversion, so a same-
-            # name successor smaller than it cannot be that same file).
-            pred_size = pred["size"] or 0
-            if succ.size < pred_size:
-                continue
             pred_id, pred_meta = pred["resource_id"], pred["meta"]
             try:
                 merged = json.loads(pred_meta) if pred_meta else {}
@@ -112,15 +144,17 @@ class ResourcesMixin(StorePart):
                 "UPDATE resources SET meta=? WHERE resource_id=?",
                 (json.dumps(merged, ensure_ascii=False), succ.resource_id),
             )
-            # Reattach volume records to the successor BEFORE the predecessor
-            # row is removed (volumes rows are keyed by parent resource_id).
+            # BEFORE tombstoning -- parent_resource_id has no FK backstop.
             conn.execute(
                 "UPDATE volumes SET parent_resource_id=? WHERE parent_resource_id=?",
                 (succ.resource_id, pred_id),
             )
-            # The predecessor is superseded: hard-remove so (group, name)
-            # identity stays unique and it cannot re-shade listings.
-            conn.execute("DELETE FROM resources WHERE resource_id=?", (pred_id,))
+            # Tombstone, not DELETE: the partial index tolerates history.
+            conn.execute(
+                "UPDATE resources SET status=?, size=0, updated_at=? "
+                "WHERE resource_id=?",
+                (ResourceStatus.DELETED.value, int(time.time()), pred_id),
+            )
 
     async def upsert_resources(self, items: list[Resource]) -> int:
         if not items:
@@ -128,6 +162,7 @@ class ResourcesMixin(StorePart):
         now = int(time.time())
 
         def _do(conn: sqlite3.Connection):
+            moves = _plan_reparents(conn, items)
             rows = []
             for r in items:
                 path, ext = _logical_path(r)
@@ -152,52 +187,56 @@ class ResourcesMixin(StorePart):
                         now,
                         path,
                         ext,
+                        _logical_key(r),
                     )
                 )
             n = 0
             for i in range(0, len(rows), 500):
                 chunk = rows[i : i + 500]
-                # BUG-2 fix: removed explicit BEGIN — Python sqlite3 auto-begins
-                # transactions before DML; an explicit BEGIN would conflict with
-                # any implicit transaction already in progress.
+                # No explicit BEGIN: sqlite3 auto-begins before DML and a
+                # second BEGIN conflicts with the one already in progress.
                 try:
                     cur = conn.executemany(
-                        """
+                        f"""
                         INSERT INTO resources
                           (resource_id, group_id, type, name, size, uploader_id,
                            uploader_name, source_ref, busid, folder_id, folder_name,
                            status, tags, meta, created_at, indexed_at, updated_at,
-                           path, ext)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                           path, ext, logical_key)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        -- Two targets, both required: a violation reaches
+                        -- only a NAMED handler, and the partial predicate
+                        -- spares tombstones so a file can return. Both bodies
+                        -- are identical because SQLite applies the FIRST
+                        -- matching clause and skips the rest -- a thin
+                        -- resource_id clause would shadow the full one on a
+                        -- same-session re-index. See _RESOURCE_CONFLICT_BODY.
                         ON CONFLICT(resource_id) DO UPDATE SET
-                          name=excluded.name, size=excluded.size,
-                          uploader_id=COALESCE(excluded.uploader_id, uploader_id),
-                          uploader_name=COALESCE(excluded.uploader_name, uploader_name),
-                          busid=COALESCE(excluded.busid, busid),
-                          folder_id=excluded.folder_id, folder_name=excluded.folder_name,
-                          created_at=CASE WHEN excluded.created_at > 0
-                              THEN excluded.created_at ELSE created_at END,
-                          status=CASE WHEN excluded.status != 'active'
-                              THEN excluded.status ELSE status END,
-                          meta=CASE WHEN resources.meta IS NOT NULL
-                              AND json_extract(resources.meta, '$.composition') IS NOT NULL
-                            THEN json_patch(resources.meta, excluded.meta)
-                            ELSE excluded.meta END,
-                          updated_at=excluded.updated_at,
-                          path=excluded.path, ext=excluded.ext
+{_RESOURCE_CONFLICT_BODY}
+
+                        ON CONFLICT(group_id, type, logical_key)
+                          WHERE status != 'deleted'
+                        DO UPDATE SET
+{_RESOURCE_CONFLICT_BODY}
                         """,
                         chunk,
                     )
                     n += cur.rowcount
-                    # Successor identity carry-over: a newly listed file_id for
-                    # a known (group, name) adopts the deleted composition
-                    # row's meta (volume/composition identity survives the
-                    # session-scoped file_id churn).
-                    self._inherit_composition_identity(conn, items)
                     conn.commit()
                 except Exception:
                     conn.rollback()
                     raise
+            # AFTER every chunk on purpose: mid-loop it would touch successor
+            # rows a later chunk has not inserted yet, and drop their meta.
+            try:
+                self._inherit_composition_identity(conn, items)
+                # Same transaction: a half-moved set orphans parts for good.
+                if moves:
+                    _reparent_volumes(conn, moves)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             return n
 
         result = await self._conn.exec(_do)
@@ -205,13 +244,34 @@ class ResourcesMixin(StorePart):
         return result
 
     async def get_by_uri(self, uri: str) -> dict | None:
+        """Resolve ``cloud://<group_id>/<type>/<id>`` to an active row.
+
+        group_id and type are part of the URI identity, not decoration: the
+        URI is a public, encodable handle (webapi/resources_mutation.py
+        exposes it), so matching on the trailing id alone let
+        ``cloud://<any group>/<any type>/<id>`` reach a row belonging to
+        another group. A mismatch reads as "not found" (None), the same
+        convention as an unknown id; malformed URIs still raise ValueError.
+        """
         prefix = "cloud://"
         if not uri.startswith(prefix):
             raise ValueError("invalid resource uri")
         parts = uri[len(prefix) :].split("/")
         if len(parts) != 3 or not parts[2].isdigit():
             raise ValueError("invalid resource uri")
-        return await self.get_resource_any(int(parts[2]))
+        group_id, rtype, sid = parts[0], parts[1], int(parts[2])
+
+        def _do(conn: sqlite3.Connection):
+            row = conn.execute(
+                "SELECT * FROM resources WHERE id=? AND status='active' "
+                "AND group_id=? AND type=?",
+                (sid, group_id, rtype),
+            ).fetchone()
+            if not row:
+                return None
+            return _row_with_meta(row)
+
+        return await self._conn.exec(_do)
 
     async def query_resources(self, q: ResourceQuery, fold_parts: bool = True) -> Page:
         """fold_parts=False lets name-based backfill (e.g. writing volume
@@ -224,26 +284,40 @@ class ResourcesMixin(StorePart):
             if q.type:
                 where.append("type = ?")
                 params.append(q.type)
-            if q.groups:
-                marks = ",".join("?" for _ in q.groups)
-                where.append(f"group_id IN ({marks})")
-                params.extend(q.groups)
+            # None = no filter; [] = match nothing. `if q.groups:` treated []
+            # as falsy and dropped the filter, so the wither scope (all
+            # accounts offline) leaked every group instead of returning none.
+            if q.groups is not None:
+                if q.groups:
+                    marks = ",".join("?" for _ in q.groups)
+                    where.append(f"group_id IN ({marks})")
+                    params.extend(q.groups)
+                else:
+                    where.append("1=0")
             elif q.group_id:
                 where.append("group_id = ?")
                 params.append(q.group_id)
             if q.keyword:
                 where.append(
-                    "(name LIKE ? OR path LIKE ? OR folder_name LIKE ? "
-                    "OR ext LIKE ? OR mime LIKE ? OR uploader_name LIKE ? "
-                    "OR uploader_id LIKE ? OR sha256 LIKE ? OR source_ref LIKE ? "
-                    "OR lower(COALESCE(json_extract(meta, '$.summary'), '')) LIKE ? "
-                    "OR group_id LIKE ? "
+                    "(name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' "
+                    "OR folder_name LIKE ? ESCAPE '\\' "
+                    "OR ext LIKE ? ESCAPE '\\' OR mime LIKE ? ESCAPE '\\' "
+                    "OR uploader_name LIKE ? ESCAPE '\\' "
+                    "OR uploader_id LIKE ? ESCAPE '\\' OR sha256 LIKE ? ESCAPE '\\' "
+                    "OR source_ref LIKE ? ESCAPE '\\' "
+                    "OR lower(COALESCE("
+                    "CASE WHEN json_valid(meta) "
+                    "THEN json_extract(meta, '$.summary') END, '')) "
+                    "LIKE ? ESCAPE '\\' "
+                    "OR group_id LIKE ? ESCAPE '\\' "
                     "OR group_id IN ("
                     "  SELECT g.group_id FROM groups g "
-                    "  WHERE g.group_name LIKE ?"
+                    "  WHERE g.group_name LIKE ? ESCAPE '\\'"
                     "))"
                 )
-                keyword_like = f"%{q.keyword}%"
+                # Escape wildcards: an unescaped `_`/`%` in the keyword matched
+                # far more rows than the user typed.
+                keyword_like = like_contains(q.keyword)
                 params.extend([keyword_like] * 12)
             if q.uploader_id:
                 where.append("uploader_id = ?")
@@ -303,13 +377,27 @@ class ResourcesMixin(StorePart):
                         "AND o.id != resources.id)"
                     )
             if q.exts:
-                ext_where = " OR ".join(["LOWER(name) LIKE ?" for _ in q.exts])
-                where.append(f"({ext_where})")
-                params.extend([f"%{e.lower()}" for e in q.exts])
+                # "%{ext}" matches the plain suffix; "%{ext}.%" also matches
+                # transient intermediates ("x.rar.netdisk.p.downloading") that
+                # classify() strips down to the real extension, so type
+                # filtering stays a superset of the displayed classification.
+                clauses: list[str] = []
+                for e in q.exts:
+                    # Escaped like `keyword`: extensions come from the type
+                    # table + config overrides, but a `_`/`%` inside one
+                    # turned into a wildcard and matched unrelated names.
+                    el = like_escape(e.lower())
+                    clauses.append("LOWER(name) LIKE ? ESCAPE '\\'")
+                    params.append(f"%{el}")
+                    clauses.append("LOWER(name) LIKE ? ESCAPE '\\'")
+                    params.append(f"%{el}.%")
+                where.append(f"({' OR '.join(clauses)})")
             if q.tags:
                 for tag in q.tags:
-                    where.append("tags LIKE ?")
-                    params.append(f'%"{tag}"%')
+                    # Tag text is user-typed (#tag tokens in the search
+                    # box), so wildcards must be escaped.
+                    where.append("tags LIKE ? ESCAPE '\\'")
+                    params.append(f'%"{like_escape(tag)}"%')
             cond = " AND ".join(where)
             total = conn.execute(
                 f"SELECT COUNT(*) FROM resources WHERE {cond}", params
@@ -426,16 +514,17 @@ class ResourcesMixin(StorePart):
                 [*fields.values(), int(time.time()), id],
             )
             if "name" in fields:
-                conn.execute(
-                    "UPDATE resources SET path = CASE "
-                    "WHEN type = 'file' AND folder_name IS NOT NULL AND folder_name != '' "
-                    "THEN '/' || group_id || '/' || folder_name || '/' || name "
-                    "WHEN type = 'file' THEN '/' || group_id || '/' || name "
-                    "WHEN type = 'album' THEN '/' || group_id || '/__album__/' || name "
-                    "WHEN type = 'essence' THEN '/' || group_id || '/__essence__/' || name "
-                    "ELSE path END WHERE id=?",
+                row = conn.execute(
+                    "SELECT group_id, type, name, folder_name FROM resources WHERE id=?",
                     (id,),
-                )
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "UPDATE resources SET path=? WHERE id=?",
+                        (_path_for(row["group_id"], row["type"], row["name"],
+                                   row["folder_name"]), id),
+                    )
+                    conn.execute(_RENAME_LOGICAL_KEY, (id,))
             conn.commit()
             return cur.rowcount
 
@@ -503,7 +592,11 @@ class ResourcesMixin(StorePart):
                           SELECT 1 FROM sync_source_ids s
                           WHERE s.source_ref = resources.source_ref
                       )
-                      AND (meta IS NULL OR meta NOT LIKE '%"volumes": true%')
+                      -- NOT json_valid(meta): a corrupt row cannot prove it
+                      -- is a volume parent, and json_extract would raise
+                      -- "malformed JSON" and fail the whole sweep.
+                      AND (meta IS NULL OR NOT json_valid(meta)
+                           OR COALESCE(json_extract(meta, '$.volumes'), 0) != 1)
                     """,
                     [ResourceStatus.DELETED.value, int(time.time()), group_id],
                 )
@@ -534,25 +627,49 @@ class ResourcesMixin(StorePart):
         return await self._conn.exec(_do)
 
 
-def _logical_path(r) -> tuple[str, str]:
-    t = r.type.value if hasattr(r.type, "value") else str(r.type)
-    if t == "file":
-        if r.folder_name:
-            path = f"/{r.group_id}/{r.folder_name}/{r.name}"
-        else:
-            path = f"/{r.group_id}/{r.name}"
-        dot = r.name.rfind(".")
-        ext = r.name[dot + 1 :].lower() if dot > 0 else ""
-    elif t == "album":
-        path = f"/{r.group_id}/__album__/{r.name}"
-        ext = "album"
-    elif t == "essence":
-        path = f"/{r.group_id}/__essence__/{r.name}"
-        ext = "essence"
-    else:
-        path = f"/{r.group_id}/{r.name}"
-        ext = ""
-    return path, ext
+def _plan_reparents(
+    conn: sqlite3.Connection, items: list[Resource]
+) -> list[tuple[str, str]]:
+    """Pairs of (old, new) resource_id for every logical key being collapsed.
+
+    An ON CONFLICT(logical_key) hit updates the live row in place, rewriting
+    resource_id (which derives from source_ref). Children keyed by the old id
+    must be chased. Snapshot BEFORE the upsert, since the old id is gone after.
+    """
+    moves: list[tuple[str, str]] = []
+    for r in items:
+        if r.type != ResourceType.FILE or not r.source_ref:
+            continue
+        row = conn.execute(
+            "SELECT resource_id FROM resources "
+            "WHERE group_id=? AND type=? AND name=? AND status != 'deleted'",
+            (r.group_id, r.type.value, r.name),
+        ).fetchone()
+        if row and row[0] != r.resource_id:
+            moves.append((row[0], r.resource_id))
+    return moves
+
+
+def _reparent_volumes(
+    conn: sqlite3.Connection, moves: list[tuple[str, str]]
+) -> int:
+    """Move ``volumes.parent_resource_id`` from an old id to a new one.
+
+    ``parent_resource_id`` is a plain TEXT column with no FK backstop, so a
+    rewritten parent id orphans its children *silently* -- the part-fold JOIN
+    simply stops matching. Returns the number of rows moved, which is also the
+    only cheap signal that the chase was needed at all.
+    """
+    moved = 0
+    for old_id, new_id in moves:
+        if old_id == new_id:
+            continue
+        cur = conn.execute(
+            "UPDATE volumes SET parent_resource_id=? WHERE parent_resource_id=?",
+            (new_id, old_id),
+        )
+        moved += cur.rowcount
+    return moved
 
 
 def _row_with_meta(row) -> dict:

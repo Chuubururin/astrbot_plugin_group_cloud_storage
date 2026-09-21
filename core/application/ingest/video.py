@@ -12,18 +12,105 @@ from pathlib import Path
 
 import httpx
 
-from core.domain.enums import ResourceType
+from core.domain.enums import OneBotApiError, OneBotErrorKind, ResourceType
 from core.domain.resource import Resource
 from core.domain.sync import VolumeInfo
 from core.log import logger
+from core.application.common import sha256_file as _sha256_file
 from core.application.composition.splitter import split_video
 
 from .essence import CLOUD_CALL_TIMEOUT  # single cloud-call timeout definition (lives in essence)
 
-VIDEO_SEGMENT_MAX_SECONDS = 600
+VIDEO_SEGMENT_MAX_SECONDS = 599
 VIDEO_PREVIEW_FRAMES = 9
 VIDEO_PREVIEW_WIDTH = 320
 VIDEO_PREVIEW_MAX_BYTES = 300 * 1024 * 1024
+
+# OpQueue's retry classification (core/application/queue/execution.py): every
+# non-OneBot exception and these three kinds are replayed with the same op
+# payload, while UNSUPPORTED/LOCAL_ERROR end the op. Handlers use this to decide
+# whether a staged source file has to survive for the replay.
+_RETRIABLE_ONEBOT_KINDS = (
+    OneBotErrorKind.TIMEOUT,
+    OneBotErrorKind.RATE_LIMITED,
+    OneBotErrorKind.REMOTE_ERROR,
+)
+
+
+def retriable_by_queue(e: BaseException) -> bool:
+    """Whether OpQueue would replay the op after *e*."""
+    return not isinstance(e, OneBotApiError) or e.kind in _RETRIABLE_ONEBOT_KINDS
+
+
+def _remove_staged(path: Path) -> None:
+    """Best-effort removal of a staged file; never fails the op."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+async def remote_has_file(
+    api, group_id: str, name: str, size: int = 0, folder_id: str = ""
+) -> bool:
+    """Whether the group already lists a file called *name* (optionally with a
+    matching *size*).
+
+    Consulted on replays only (a queue retry or a pause -> resume re-runs the
+    handler from its first line). A group-file upload is not idempotent: if the
+    first attempt landed server-side but the call still raised (timeout), the
+    replay would upload the same file a second time and the cloud would hold
+    two copies under one name. Mirrors album.py's ``_album_has_media``
+    convention -- the happy path never pays for the extra listing.
+
+    Returns False when the listing itself fails (no probe channel, e.g. stub
+    adapters): the caller then uploads, i.e. the pre-guard behaviour, so a
+    probe outage degrades to a duplicate rather than a lost upload.
+    """
+    wanted = Path(name).name
+    if not wanted:
+        return False
+    try:
+        lst = (
+            await api.list_group_folder(group_id, folder_id)
+            if folder_id
+            else await api.list_group_root(group_id)
+        )
+    except Exception:
+        return False
+    for f in getattr(lst, "files", None) or []:
+        if Path(str(getattr(f, "name", "") or "")).name != wanted:
+            continue
+        if size > 0 and int(getattr(f, "size", 0) or 0) != int(size):
+            continue
+        return True
+    return False
+
+
+async def album_has_media(
+    api, group_id: str, album_id: str, name: str
+) -> bool:
+    """Whether the album already lists media called *name*.
+
+    Same role as ``remote_has_file`` for the album target, and the same
+    convention as album.py's ``_album_has_media`` (media listing probe, only
+    consulted on a replay). Kept as a module-level function so both the album
+    handlers and the URL-fetch handler share one implementation.
+    """
+    wanted = Path(name).name
+    if not wanted:
+        return False
+    try:
+        media = await api.get_group_album_media_list(group_id, album_id)
+    except Exception:
+        return False  # no probe channel (stub adapters): let the upload run
+    for item in media or []:
+        if not isinstance(item, dict):
+            continue
+        got = str(item.get("desc") or item.get("name") or item.get("file_name") or "")
+        if got and Path(got).name == wanted:
+            return True
+    return False
 
 
 class VideoMixin:
@@ -67,31 +154,41 @@ class VideoMixin:
         # transfer pipeline); manual redirect loop so a 302 cannot bypass
         # the per-hop checks.
         timeout = self.fetch_timeout
-        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
-            for hop in range(6):  # 1 direct request + up to 5 redirects
-                pinned_url, original_host = await asyncio.to_thread(
-                    self._resolve_fetch_url, url
-                )
-                headers = {}
-                if original_host:
-                    headers["Host"] = original_host
-                async with client.stream("GET", pinned_url, headers=headers) as resp:
-                    if resp.is_redirect and resp.has_redirect_location:
-                        if hop == 5:
-                            raise ValueError("_download_video: redirects exceeded (5)")
-                        from urllib.parse import urljoin
+        # Atomic publish: two concurrent previews for the same video write
+        # unique temp files, then one rename wins — interleaved writes into
+        # the shared cache name would leave a corrupt mp4 that the
+        # "already cached" check would reuse forever.
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+                for hop in range(6):  # 1 direct request + up to 5 redirects
+                    pinned_url, original_host = await asyncio.to_thread(
+                        self._resolve_fetch_url, url
+                    )
+                    headers = {}
+                    if original_host:
+                        headers["Host"] = original_host
+                    async with client.stream("GET", pinned_url, headers=headers) as resp:
+                        if resp.is_redirect and resp.has_redirect_location:
+                            if hop == 5:
+                                raise ValueError("_download_video: redirects exceeded (5)")
+                            from urllib.parse import urljoin
 
-                        url = urljoin(url, resp.headers["location"])
-                        continue
-                    resp.raise_for_status()
-                    total = 0
-                    with dest.open("wb") as f:
-                        async for chunk in resp.aiter_bytes():
-                            total += len(chunk)
-                            if total > VIDEO_PREVIEW_MAX_BYTES:
-                                raise ValueError("视频超过预览大小上限（300MB）")
-                            f.write(chunk)
-                    break
+                            url = urljoin(url, resp.headers["location"])
+                            continue
+                        resp.raise_for_status()
+                        total = 0
+                        with tmp.open("wb") as f:
+                            async for chunk in resp.aiter_bytes():
+                                total += len(chunk)
+                                if total > VIDEO_PREVIEW_MAX_BYTES:
+                                    raise ValueError("视频超过预览大小上限（300MB）")
+                                f.write(chunk)
+                        break
+            tmp.replace(dest)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
         return dest
 
     @staticmethod
@@ -244,7 +341,15 @@ class VideoMixin:
             duration_s = await self._probe_duration(src.as_posix()) or (
                 duration_ms / 1000.0 if duration_ms else 10.0
             )
-            await self._extract_gif(src, gif_path, duration_s)
+            # Atomic publish (same race as the mp4 cache): extract to a
+            # unique temp name, then move into place on success — a partial
+            # gif must never become the permanent cache entry.
+            tmp_gif = cache_dir / f".{cache_key}.{uuid.uuid4().hex[:8]}.gif"
+            try:
+                await self._extract_gif(src, tmp_gif, duration_s)
+                tmp_gif.replace(gif_path)
+            finally:
+                tmp_gif.unlink(missing_ok=True)
 
         data = gif_path.read_bytes()
         return {
@@ -294,19 +399,65 @@ class VideoMixin:
         )
         src = Path(path)
         if not src.exists():
-            raise ValueError(f"staged file missing: {path}")
+            # A missing staged file is a local, static condition: a plain
+            # ValueError is treated as retriable, so the queue would replay the
+            # op 3x (2s/4s/8s backoff) and fail identically every time.
+            raise OneBotApiError(
+                OneBotErrorKind.LOCAL_ERROR,
+                op.kind,
+                f"暂存文件已不存在：{src.name}。上传可能已完成，或暂存已被清理；"
+                "请重新发起上传。",
+            )
         size = src.stat().st_size
         stem = Path(name).stem
         dur = await self._probe_duration(path)
         max_sec = self.video_segment_seconds
-        # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split)
-        if dur is None or dur < max_sec:
-            await self.api.upload_group_file(op.target, path, name, folder_id=folder)
-            lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
-            result = await self.sync.run_full_sync(op.target, lock)
-            if not result.ok:
-                logger.warning(f"[ingest] post-video sync failed: {result.error}")
-            logger.info(f"[ingest] video direct upload: {name} ({dur}s)")
+        # Contract: <max_sec direct, >=max_sec split (e.g. 599s -> split).
+        # Unprobeable duration goes to the split path (same semantics as
+        # _do_video_album): split_video cuts by -segment_time without a
+        # probed duration, while a silent direct upload would break the
+        # over-limit contract whenever the probe merely failed on a
+        # genuinely long video.
+        if dur is not None and dur < max_sec:
+            # Direct upload is the common path and it consumes the staged
+            # source: it is cleaned up once the upload itself has landed. A
+            # *retriable* upload failure must keep the file instead -- the
+            # queue re-enters this handler and the replay needs it. The old
+            # unconditional `finally` deleted it, so every replay died on
+            # "暂存文件已不存在" (a LOCAL_ERROR, i.e. not retriable), which burnt
+            # the whole retry budget and lost the user's video. The split
+            # branch below keeps its source for exactly the same reason.
+            uploaded = False
+            # Replay guard: a retry / pause -> resume re-enters this handler
+            # from its first line. Without this probe the same video was
+            # uploaded again (same failure family as album.py's replay guard
+            # for BUG-13). Only consulted on a replay, so the happy path keeps
+            # its single upload round trip.
+            already = bool(getattr(op, "replayed", False)) and await remote_has_file(
+                self.api, op.target, name, size, folder
+            )
+            try:
+                if already:
+                    logger.info(
+                        f"[ingest] video replay: {name} already in "
+                        f"{op.target}, skipping re-upload"
+                    )
+                    uploaded = True
+                else:
+                    await self.api.upload_group_file(op.target, path, name, folder_id=folder)
+                    uploaded = True
+                lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
+                result = await self.sync.run_full_sync(op.target, lock)
+                if not result.ok:
+                    logger.warning(f"[ingest] post-video sync failed: {result.error}")
+                logger.info(f"[ingest] video direct upload: {name} ({dur}s)")
+            except Exception as e:
+                if uploaded or not retriable_by_queue(e):
+                    # The upload landed (nothing to replay it for) or the
+                    # failure is terminal: either way the staged file is spent.
+                    _remove_staged(src)
+                raise
+            _remove_staged(src)
             return
         # Long video: split storage (single logical resource + part volumes).
         # Retry reuse: a part-upload failure re-enters this handler; regenerating
@@ -318,17 +469,7 @@ class VideoMixin:
             op.payload["parent_resource_id"] = parent_id
         parent_key = f"{op.target}:file:{parent_id}"
 
-        def _hash_source() -> str:
-            h = hashlib.sha256()
-            with open(src, "rb") as fh:
-                while True:
-                    chunk = fh.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-            return h.hexdigest()
-
-        total_sha_hex = await asyncio.to_thread(_hash_source)
+        total_sha_hex = await asyncio.to_thread(_sha256_file, src)
         await self.store.upsert_resources(
             [
                 Resource(
@@ -354,11 +495,26 @@ class VideoMixin:
             # (-c copy; same implementation as album splitting)
             segments = await split_video(src, seg_dir, stem, max_sec)
             total = len(segments)
+            # Retry reuse: a part-upload failure re-enters this handler with
+            # the same parent id and deterministic part names, so rows already
+            # marked "uploaded" describe parts that really did land on QQ.
+            # Uploading them again leaves same-named duplicates in the cloud,
+            # and _backfill_volumes would then bind the volume row to the
+            # newer copy. Skip whatever is already there.
+            done = {
+                v.seq
+                for v in await self.store.list_volumes(parent_key)
+                if v.status == "uploaded"
+            }
             for seq, seg in enumerate(segments, 1):
                 part_name = f"{stem}.part{seq:02d}.mp4"
-                data = seg.read_bytes()
-                sha = hashlib.sha256(data).hexdigest()
+                sha = await asyncio.to_thread(_sha256_file, seg)
                 await self.queue.pause_check(op)
+                if seq in done:
+                    logger.info(
+                        f"[ingest] video part {part_name} already uploaded, skipping"
+                    )
+                    continue
                 await self.api.upload_group_file(
                     op.target, seg.as_posix(), part_name, folder_id=folder
                 )
@@ -368,7 +524,7 @@ class VideoMixin:
                             parent_resource_id=parent_key,
                             seq=seq,
                             part_name=part_name,
-                            size=len(data),
+                            size=seg.stat().st_size,
                             sha256=sha,
                             status="uploaded",
                         )

@@ -149,7 +149,9 @@ class NapCatFileMixin:
         return GroupFileList(group_id=group_id, files=files, folders=folders)
 
     async def list_group_root(self, group_id: str) -> GroupFileList:
-        data = await self._call("get_group_root_files", group_id=group_id)
+        # `data: null` is a legal OneBot reply; without the fallback
+        # _parse_file_list would raise AttributeError on None.get().
+        data = await self._call("get_group_root_files", group_id=group_id) or {}
         return self._parse_file_list(group_id, data)
 
     async def list_group_folder(self, group_id: str, folder_id: str = "", folder: str = "") -> GroupFileList:
@@ -158,7 +160,7 @@ class NapCatFileMixin:
             params["folder_id"] = folder_id
         if folder:
             params["folder"] = folder
-        data = await self._call("get_group_files_by_folder", **params)
+        data = await self._call("get_group_files_by_folder", **params) or {}
         return self._parse_file_list(group_id, data)
 
     async def get_group_file_url(
@@ -217,7 +219,7 @@ class NapCatFileMixin:
         )
 
     async def get_group_fs_info(self, group_id: str) -> FileSystemInfo:
-        data = await self._call("get_group_file_system_info", group_id=group_id)
+        data = await self._call("get_group_file_system_info", group_id=group_id) or {}
         return FileSystemInfo(
             file_count=int(data.get("file_count", 0) or 0),
             limit_count=int(data.get("limit_count", 0) or 0),

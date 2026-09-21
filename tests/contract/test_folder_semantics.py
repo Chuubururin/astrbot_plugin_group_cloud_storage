@@ -87,3 +87,25 @@ async def test_folders_list_is_flat(env):
         ResourceQuery(group_id="g1", folder="新建目录", page_size=20)
     )
     assert [it.name for it in page.items] == ["a.txt"]
+
+
+@pytest.mark.asyncio
+async def test_folder_rename_and_delete_entities(env):
+    """read-your-writes（2026-09-12 真机坏链）：webapi folder-rename/folder-delete
+    在 QQ 侧成功后必须同步维护本地 folders 实体表——目录树不能等下一次
+    full sync 才反映改名/删除。upsert_folders 仍以 folder_id 为唯一键，
+    full sync 的 clear+upsert 语义不受影响。"""
+    store = env
+    await store.upsert_folders("g1", [
+        {"folder_id": "/f-a", "folder_name": "旧名", "parent_id": ""},
+        {"folder_id": "/f-b", "folder_name": "保留", "parent_id": ""},
+    ])
+    await store.rename_folder("g1", "/f-a", "新名")
+    rows = {r["folder_id"]: r["folder_name"] for r in await store.list_folders_detail("g1")}
+    assert rows == {"/f-a": "新名", "/f-b": "保留"}
+    await store.delete_folder("g1", "/f-a")
+    rows = {r["folder_id"]: r["folder_name"] for r in await store.list_folders_detail("g1")}
+    assert rows == {"/f-b": "保留"}
+    # 不存在的 folder_id：幂等（无行受影响也不抛错）
+    await store.rename_folder("g1", "/f-none", "x")
+    await store.delete_folder("g1", "/f-none")

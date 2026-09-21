@@ -8,7 +8,12 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from core.domain.enums import ResourceStatus, ResourceType
+from core.domain.enums import (
+    OneBotApiError,
+    OneBotErrorKind,
+    ResourceStatus,
+    ResourceType,
+)
 from core.domain.resource import Resource
 from core.log import logger
 
@@ -49,11 +54,27 @@ class CrudMixin:
             if resolved:
                 folder = resolved
             else:
-                raise ValueError(f"目标文件夹不存在: {folder}")
+                # M6: deterministic condition -> LOCAL_ERROR. A bare
+                # ValueError is classified as retriable by OpQueue, which
+                # replayed the whole upload 3x (2/4/8s) and failed
+                # identically every time (same fix as the staged-file check
+                # 4 lines below).
+                raise OneBotApiError(
+                    OneBotErrorKind.LOCAL_ERROR,
+                    op.kind,
+                    f"目标文件夹不存在: {folder}",
+                )
         logger.info(f"[file-ops] upload {name} -> group {op.target} ({path})")
         src = Path(path)
         if not src.exists() or not src.is_file():
-            raise ValueError(f"staged file missing: {path}")
+            # Local, static condition: a bare ValueError would be replayed 3x
+            # by the queue (2s/4s/8s) and fail identically each time.
+            raise OneBotApiError(
+                OneBotErrorKind.LOCAL_ERROR,
+                op.kind,
+                f"暂存文件已不存在：{src.name}。上传可能已完成，或暂存已被清理；"
+                "请重新发起上传。",
+            )
         size = src.stat().st_size
         # Capacity overflow switching: single-file direct upload only (volume
         # uploads keep their original target to avoid parent mapping drift).
@@ -114,6 +135,12 @@ class CrudMixin:
             )
             op.payload["parent_resource_id"] = parent_id
             op.payload["parent_resource_id_full"] = f"{op.target}:file:{parent_id}"
+            # Persist immediately: the parent row is already in the DB, but the
+            # payload key that lets a retry *reuse* it lived only in memory.
+            # A crash between here and the next state transition made the retry
+            # see no parent_resource_id, create a second volgroup parent and
+            # orphan the first (plus whatever parts the first attempt uploaded).
+            await self.queue.checkpoint_payload(op)
         if size > threshold and op.payload.get("parent_resource_id"):
             # Volumes (WinRAR mode): upload a large file part by part with
             # checksum-verified reassembly (persisted in the cloud)
@@ -192,18 +219,26 @@ class CrudMixin:
                 if not v.source_ref:
                     continue
                 vg = v.group_id or op.target
-                fresh = await self._resolve_file_ref(
-                    vg,
-                    v.part_name,
-                    int(v.size or 0),
-                    detail.get("folder_id") or None,
-                )
-                if fresh is None:
-                    # Already gone from the cloud (NapCat ids are session-scoped
-                    # handles: old ids cannot be reused) -> skip
-                    logger.info(f"[file-ops] part {v.part_name} already gone")
-                    continue
-                await self.api.delete_group_file(vg, fresh[0], fresh[1])
+                # Parts may live in a group owned by a different account than
+                # the parent resource: resolve + delete each part under its own
+                # group's account (same rule as the download path). Without the
+                # scope the listing runs on the wrong account, its failure is
+                # swallowed into None and the part is skipped -- while
+                # remove_volumes + the parent soft-delete still run, leaving an
+                # orphan volume in the cloud.
+                async with self._scoped_for_group(vg):
+                    fresh = await self._resolve_file_ref(
+                        vg,
+                        v.part_name,
+                        int(v.size or 0),
+                        detail.get("folder_id") or None,
+                    )
+                    if fresh is None:
+                        # Already gone from the cloud (NapCat ids are session-scoped
+                        # handles: old ids cannot be reused) -> skip
+                        logger.info(f"[file-ops] part {v.part_name} already gone")
+                        continue
+                    await self.api.delete_group_file(vg, fresh[0], fresh[1])
             await self.store.remove_volumes(detail["resource_id"])
             await self.store.update_resource_fields(
                 op.payload["id"], status=ResourceStatus.DELETED.value
@@ -219,7 +254,19 @@ class CrudMixin:
             0,
             (detail or {}).get("folder_id") or None,
         )
-        fid, busid = fresh or (op.payload["file_id"], op.payload["busid"])
+        if fresh is not None:
+            fid, busid = fresh
+        elif op.payload.get("file_id"):
+            fid, busid = op.payload["file_id"], op.payload.get("busid") or 0
+        else:
+            # M6: deterministic condition (the file is gone from the listing
+            # and no fallback id was recorded) -> LOCAL_ERROR, not a bare
+            # ValueError that the queue replays 3x with the same outcome.
+            raise OneBotApiError(
+                OneBotErrorKind.LOCAL_ERROR,
+                op.kind,
+                "cloud listing no longer has the file and payload carries no file_id",
+            )
         try:
             await self.api.delete_group_file(op.target, fid, busid)
         except Exception as e:
@@ -231,7 +278,7 @@ class CrudMixin:
         await self.store.update_resource_fields(
             op.payload["id"], status=ResourceStatus.DELETED.value
         )
-        logger.info(f"[file-ops] deleted {op.payload['file_id']} in {op.target}")
+        logger.info(f"[file-ops] deleted {fid} in {op.target}")
 
     # ---------- Rename / Move ----------
 
@@ -275,18 +322,22 @@ class CrudMixin:
             op.payload.get("folder") or None,
         )
         fid, busid = fresh or (op.payload["file_id"], op.payload["busid"] or 0)
-        data = await self._fetch_bytes(
+        # Stream the original to disk: rename applies to non-volume rows, but
+        # a member-uploaded file can still be far beyond the volume threshold
+        # and _fetch_bytes would hold it (multi-GB possible) in RAM.
+        staged = self.tmp_dir / f"replace_{op.payload['id']}_{int(_t.time())}.tmp"
+        n = await self._download_to_file(
             await self.api.get_group_file_url(
                 op.target,
                 fid,
                 busid,
                 op.payload["name"],
-            )
+            ),
+            staged,
         )
-        if not data:
+        if n <= 0:
+            staged.unlink(missing_ok=True)
             raise ValueError("download returned empty content")
-        staged = self.tmp_dir / f"replace_{op.payload['id']}_{int(_t.time())}.tmp"
-        staged.write_bytes(data)
         try:
             await self.api.upload_group_file(
                 op.target,
@@ -359,6 +410,10 @@ class CrudMixin:
         return task_id
 
     async def _do_move(self, op) -> None:
+        # Idempotent by target, not by a guard: re-running the same move
+        # re-sends the same source->destination pair, and the local bulk
+        # update below writes the same folder fields. No replay guard is
+        # needed (see R-2 audit).
         detail = await self.store.get_resource_detail(op.target, op.payload["id"])
         cpd = (
             (op.payload.get("folder") or "!/")

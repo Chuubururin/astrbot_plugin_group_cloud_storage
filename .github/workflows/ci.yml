@@ -32,7 +32,8 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements.txt
-      - run: pip install pytest pytest-asyncio
+      # paramiko/pysmb 是可选传输依赖，测试里 importorskip——装上才能跑 sftp/smb 用例
+      - run: pip install pytest pytest-asyncio paramiko pysmb
       - run: python -m pytest tests/unit/ -x -q
 
   frontend-tests:

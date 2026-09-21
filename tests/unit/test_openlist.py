@@ -110,6 +110,27 @@ class TestNormalizeTaskState:
         assert normalize_task_state("some_new_state") == "unknown"
 
 
+class TestNormalizeTaskStateInt:
+    """OpenList integer task states (pkg/task/task.go iota order)."""
+
+    def test_known_codes(self):
+        assert normalize_task_state(0) == "pending"
+        assert normalize_task_state(1) == "running"
+        assert normalize_task_state(2) == "done"
+
+    def test_transient_cancel_and_retry(self):
+        assert normalize_task_state(3) == "running"  # Canceling
+        assert normalize_task_state(6) == "running"  # Failing
+
+    def test_terminal_cancel_and_failure(self):
+        assert normalize_task_state(4) == "failed"  # Canceled
+        assert normalize_task_state(5) == "failed"  # Errored
+        assert normalize_task_state(7) == "failed"  # Failed
+
+    def test_out_of_range(self):
+        assert normalize_task_state(9) == "unknown"
+
+
 class TestClassifyError:
     """REQ-05: error classification tests."""
 
@@ -808,17 +829,55 @@ class TestArchiveMapMigration:
 class TestDlserverGuard:
     """REQ-16: download server guard tests."""
 
-    def test_guard_requires_enabled(self):
-        """Disabled dlserver should be rejected."""
-        # This is tested at bridge service level (M3)
-        # Placeholder for integration test
-        pass
+    @pytest.mark.asyncio
+    async def test_guard_requires_enabled(self):
+        """未启用时 start() 直接返回：不绑定 HTTP/SFTP/SMB 任何服务端。"""
+        from core.application.download_server import DownloadServerService
 
-    def test_guard_requires_port(self):
-        """Zero port should be rejected."""
-        # This is tested at bridge service level (M3)
-        # Placeholder for integration test
-        pass
+        dl = DownloadServerService(None, {"download_server_enabled": False})
+        await dl.start()
+        assert dl._http_server is None
+        assert dl._sftp_server is None
+        assert dl._smb_server is None
+
+    @pytest.mark.asyncio
+    async def test_guard_requires_token(self):
+        """启用但 download_token 为空：fail-closed 翻转 enabled 并拒绝启动。"""
+        from core.application.download_server import DownloadServerService
+
+        dl = DownloadServerService(
+            None,
+            {
+                "download_server_enabled": True,
+                "download_http_port": 0,
+                "download_sftp_port": 0,
+                "download_smb_port": 0,
+                "download_token": "",
+            },
+        )
+        await dl.start()
+        assert dl.enabled is False
+        assert dl._http_server is None
+
+    @pytest.mark.asyncio
+    async def test_guard_requires_port(self):
+        """启用且带 token 但全部端口为 0：不绑定任何服务端（无可服务面）。"""
+        from core.application.download_server import DownloadServerService
+
+        dl = DownloadServerService(
+            None,
+            {
+                "download_server_enabled": True,
+                "download_http_port": 0,
+                "download_sftp_port": 0,
+                "download_smb_port": 0,
+                "download_token": "dl-tok",
+            },
+        )
+        await dl.start()
+        assert dl._http_server is None
+        assert dl._sftp_server is None
+        assert dl._smb_server is None
 
 
 class TestArchiveRename:

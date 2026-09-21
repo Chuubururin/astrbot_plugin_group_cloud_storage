@@ -11,12 +11,18 @@
 
 import { getState, set } from '../store.js';
 import { API, apiGet } from '../api.js';
-import { escapeHtml, formatSize } from '../utils/helpers.js';
+import { escapeHtml, formatSize, formatTime } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
 import { navigate } from '../router.js';
 import { toast } from '../components/toast.js';
 import { showRaw } from '../components/context-menu.js';
 import { handleMenuAction } from './group-actions.js';
+import { sortGroups } from './group-sort.js';
+import { checkGroupOpenable, clearGroupFocus } from './group-open-state.js';
+
+// Comparator moved to features/group-sort.js (line budget); re-exported
+// unchanged so existing call sites keep importing it from here.
+export { sortGroups };
 
 const ROLE_LABELS = { owner: '群主', admin: '管理员', member: '成员' };
 
@@ -147,7 +153,7 @@ function buildGroupRow(g, selectedGroups) {
     <td class="col-name"><span class="group-name">${escapeHtml(g.shown_name || g.group_name || g.group_id)}</span></td>
     <td class="col-id">${escapeHtml(g.group_id)}</td>
     <td class="col-label">${g.label ? `<span class="tag">${escapeHtml(g.label)}</span>` : ''}</td>
-    <td class="col-role">${ROLE_LABELS[g.role] || g.role || '-'}</td>
+    <td class="col-role">${escapeHtml(ROLE_LABELS[g.role] || g.role || '-')}</td>
     <td class="col-size"${g.total_space && g.total_space > 0
       ? ` title="总容量 ${formatSize(g.total_space)}${g.limit_count ? `· 文件数上限 ${g.limit_count}` : ''}"`
       : ''}>${g.total_space && g.total_space > 0
@@ -155,21 +161,19 @@ function buildGroupRow(g, selectedGroups) {
         : formatSize(g.used_space)}</td>
     <td class="col-album">${g.album_count || 0}</td>
     <td class="col-essence">${g.essence_count || 0}</td>
-    <td class="col-scan">${g.last_scan_at || g.last_scan
-      ? new Date((g.last_scan_at || g.last_scan) * 1000).toLocaleDateString('zh-CN')
-      : '-'}</td>
+    <td class="col-scan">${formatTime(g.last_scan_at || g.last_scan)}</td>
   `;
 
   tr.addEventListener('click', async (e) => {
     if (e.target.type === 'checkbox') return;
-    try {
-      const st = await apiGet(API.GROUPS.OPEN_STATE, { group: g.group_id });
-      if (st && st.reason) {
-        toast(st.reason, 'warn');
-        return;
-      }
-    } catch (err) {
-      toast('群状态校验失败: ' + (err.message || '网络错误'), 'error');
+    // Doc: the gate is managed + account online + group alive; a refusal
+    // falls back to the all-groups aggregate instead of leaving the stale
+    // group context in place (200 body reason, not a 403). A transport
+    // failure is not a refusal: keep the context so a retry can succeed.
+    const gate = await checkGroupOpenable(g.group_id);
+    if (!gate.ok) {
+      if (!gate.transportError) clearGroupFocus();
+      toast(gate.label, 'warn');
       return;
     }
     set('currentGroup', g.group_id);
@@ -213,18 +217,6 @@ function showGroupContextMenu(x, y, g, selectedGroups) {
   showRaw(x, y, items, (act) => handleMenuAction(act, selectedGroups));
 }
 
-export function sortGroups(groups, sort) {
-  const { key, dir } = sort;
-  const mul = dir === 'asc' ? 1 : -1;
-  return [...groups].sort((a, b) => {
-    if (key === 'used_space') return ((a.used_space || 0) - (b.used_space || 0)) * mul;
-    if (key === 'sort_order') return ((a.sort_order ?? 1e9) - (b.sort_order ?? 1e9)) * mul;
-    const va = key === 'label' ? a.label : (a[key] ?? '');
-    const vb = key === 'label' ? b.label : (b[key] ?? '');
-    return String(va || '').localeCompare(String(vb || '')) * mul;
-  });
-}
-
 export function updateGroupCheckboxes(selectedGroups) {
   document.querySelectorAll('tbody.group-tbody tr').forEach((tr) => {
     const cb = tr.querySelector('input[type="checkbox"]');
@@ -233,16 +225,21 @@ export function updateGroupCheckboxes(selectedGroups) {
   syncGroupSelectAll(selectedGroups);
 }
 
-/** Header select-all reflects the current page selection. */
+/**
+ * Header select-all reflects the current page selection, per pane: the
+ * dual-pane layout renders two independent tables, so each header must
+ * count only its own rows (a document-wide query would let pane A's
+ * header mirror pane B's checks).
+ */
 function syncGroupSelectAll(selectedGroups) {
-  const els = document.querySelectorAll('.group-select-all');
-  if (!els.length) return;
-  const rows = document.querySelectorAll('tbody.group-tbody tr[data-key]');
-  const sel = Array.from(rows).filter((tr) => selectedGroups.has(tr.dataset.key)).length;
-  for (const el of els) {
+  document.querySelectorAll('table.group-table').forEach((table) => {
+    const el = table.querySelector('.group-select-all');
+    if (!el) return;
+    const rows = table.querySelectorAll('tbody.group-tbody tr[data-key]');
+    const sel = Array.from(rows).filter((tr) => selectedGroups.has(tr.dataset.key)).length;
     el.checked = rows.length > 0 && sel === rows.length;
     el.indeterminate = sel > 0 && sel < rows.length;
-  }
+  });
 }
 
 export function updateGroupInfo(total) {

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from core.domain.enums import CapabilityState
+from core.domain.enums import CapabilityState, OneBotApiError, OneBotErrorKind
 from core.domain.resource import (
     FileSystemInfo,
     GroupFile,
@@ -40,6 +40,7 @@ class FakeOneBotApi(OneBotApiPort):
         self.sent_messages: list[dict] = []      # {group_id, text, message_id}
         self.essence_set: list[str] = []         # message_id 列表（设为精华）
         self.essences: dict[str, list] = {}      # group_id -> 精华条目（回读验证）
+        self.albums: dict[str, list] = {}        # group_id -> 相册列表
         self.album_uploads: list[dict] = []      # {group_id, album_id, album_name, file}
         self.essence_deleted: list[str] = []     # delete_essence_msg 记录
         self.next_message_id = 90001
@@ -49,7 +50,10 @@ class FakeOneBotApi(OneBotApiPort):
         if folder_id in self.fail_folders:
             self.calls.append(action)
             self.call_times.append(time.monotonic())
-            raise RuntimeError(f"simulated failure: {action} on folder {folder_id}")
+            raise OneBotApiError(
+                OneBotErrorKind.REMOTE_ERROR, action,
+                f"simulated failure on folder {folder_id}",
+            )
         self.calls.append(action)
         self.call_times.append(time.monotonic())
 
@@ -258,8 +262,9 @@ class FakeOneBotApi(OneBotApiPort):
         pass
 
 
-def build_tree(file_total: int, folder_total: int, files_per_folder: int = 20):
-    """构造目录树：根目录 empty，folder_i 含 files_per_folder 个文件。"""
+def build_tree(folder_total: int, files_per_folder: int = 20):
+    """构造目录树：根目录 empty，folder_i 含 files_per_folder 个文件
+    （共 folder_total * files_per_folder 个）。"""
     tree = {None: ([], [])}
     seq = 0
     for i in range(folder_total):

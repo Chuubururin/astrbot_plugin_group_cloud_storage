@@ -1,17 +1,17 @@
 /**
  * Resource table - the single list renderer for files / albums / essence /
- * netdisk .
+ * netdisk.
  *
- * The table is driven entirely by a DataSource adapter. Every source owns
- * its page key and type-filter key, so the tabs no longer share pagination
- * or chip state accidentally. Rendering stays keyed and rAF-batched via
- * features/file-rows.js and only data_changed-triggered refreshes reload
- * ; a per-topic sequence guard drops stale responses.
+ * The table is driven entirely by a DataSource adapter: every source owns
+ * its page key and type-filter key, so tabs never share pagination or chip
+ * state accidentally. Rendering stays keyed and rAF-batched via
+ * features/file-rows.js; a per-topic sequence guard drops stale responses.
  *
  * @module components/data-table
  */
 
-import { getState, set, subscribe, refresh, nextSeq, isStale } from '../store.js';
+import { getState, set, subscribe, nextSeq, isStale } from '../store.js';
+import { DEFAULT_PAGE_SIZE } from '../constants.js';
 import { getIcon } from '../icons.js';
 import { applyLocalFilterSort, netdiskTypeMap } from '../features/data-sources.js';
 import { attachMarquee } from '../features/marquee-select.js';
@@ -25,14 +25,10 @@ import { toast } from './toast.js';
 
 const PREFIX = { group: 'file', album: 'album', essence: 'essence', netdisk: 'netdisk' };
 const TOPIC = { group: 'files', album: 'albums', essence: 'essence', netdisk: 'netdisk' };
+// Page-size choices offered by the pager (the live value lives in the store).
+const PAGE_SIZES = [10, 24, 50, 100];
 
-/**
- * Build one pane of the table markup (pane B is hidden in single mode).
- * @param {string} prefix - DOM id prefix unique to the source
- * @param {boolean} isGroup - group files sort by created_at by default
- * @param {string} extraClass - 'table-b hidden' for the second pane
- * @param {string} pane - 'a'|'b'
- */
+/** Build one pane of the table markup (pane B stays hidden in single mode). */
 function paneHtml(prefix, isGroup, extraClass = '', pane = 'a') {
   return `
     <div class="table-wrap ${extraClass}">
@@ -58,8 +54,6 @@ function paneHtml(prefix, isGroup, extraClass = '', pane = 'a') {
 
 /**
  * Mount the resource table for a DataSource.
- * @param {HTMLElement} container - view-owned host element
- * @param {Object} source - DataSource adapter
  * @returns {function} cleanup
  */
 export function initDataTable(container, source) {
@@ -67,6 +61,8 @@ export function initDataTable(container, source) {
   const topic = TOPIC[source.id] || 'files';
   const isGroup = source.id === 'group';
   const dual = getState().layout === 'dual';
+  // The pager select mirrors the size the request actually carries.
+  const pageSize = getState().filePageSize || DEFAULT_PAGE_SIZE;
 
   container.innerHTML = `
     <div id="${prefix}-breadcrumb" class="breadcrumb"></div>
@@ -81,10 +77,7 @@ export function initDataTable(container, source) {
       <button id="${prefix}-next">${getIcon('CHEVRON_RIGHT', 12)}</button>
       <label class="pager-label">每页
         <select id="${prefix}-page-size">
-          <option value="10">10</option>
-          <option value="24" ${source.id === 'netdisk' ? '' : 'selected'}>24</option>
-          <option value="50" ${source.id === 'netdisk' ? 'selected' : ''}>50</option>
-          <option value="100">100</option>
+          ${PAGE_SIZES.map((v) => `<option value="${v}"${v === pageSize ? ' selected' : ''}>${v}</option>`).join('')}
         </select>
       </label>
     </div>
@@ -92,15 +85,12 @@ export function initDataTable(container, source) {
 
   const page = () => getState()[source.pageKey] || 1;
   const typeFilter = () => (source.typeKey ? getState()[source.typeKey] : '');
-  const queryFor = (st) => (
-    source.id === 'album' ? st.albumQuery
-      : (source.id === 'essence' ? st.essenceQuery : st.searchQuery)
-  );
+  const queryFor = (st) => (source.id === 'album' ? st.albumQuery
+    : (source.id === 'essence' ? st.essenceQuery : st.searchQuery));
 
-  // Load is serialized with tail coalescing: a request arriving while one
-  // is in flight only marks dirty and reruns once after completion
-  // (continuous paging/sorting/typing no longer pile up concurrent
-  // requests).
+  // Load is serialized with tail coalescing: a request arriving while one is
+  // in flight only marks dirty and reruns once after completion, so
+  // continuous paging/sorting/typing never piles up concurrent requests.
   let loadingInFlight = false;
   let loadDirty = false;
   let cancelled = false;
@@ -112,16 +102,18 @@ export function initDataTable(container, source) {
     set('loading', true);
     try {
       await doLoad();
-      // Success clears the inline error row (next paint shows fresh rows).
-      set(`loadError:${topic}`, false);
     } catch (e) {
       console.error('[data-table] load failed:', e);
-      set(`loadError:${topic}`, true);
       renderErrorRow(e);
-      const msg = String(e && e.message || e || '');
-      if (isGroup && (msg.includes('离线') || msg.includes('解散'))) {
-        toast(msg.includes('离线') ? '群归属账号离线，已回退全部群聚合视图' : '该群已解散或不可访问，已回退全部群聚合视图', 'warn');
-        set('currentGroup', '');
+      // 403 语义优先看结构化字段（后端 error_response 的 message /
+      // groups/open-state 的 reason），中文子串仅作最后兜底。
+      const reason = String((e && (e.reason || e.code || e.message)) || e || '');
+      if (isGroup && (reason.includes('离线') || reason.includes('解散'))) {
+        toast(reason.includes('离线') ? '群归属账号离线，已回退全部群聚合视图' : '该群已解散或不可访问，已回退全部群聚合视图', 'warn');
+        // 回退必须同时清掉群与目录上下文（残留的 folder 会继续过滤聚合视图）；
+        // 但已在聚合视图时不能再 set，否则会再次触发 currentGroup 订阅 ->
+        // load() -> 再次失败，形成请求风暴。
+        if (getState().currentGroup) set('currentGroup', '');
         set('folder', '');
         set('folderChain', []);
       } else {
@@ -134,8 +126,7 @@ export function initDataTable(container, source) {
     }
   }
 
-  /** Inline error state: an actionable row replaces stale content so a
-   * failed load never silently keeps rendering outdated data. */
+  /** Inline error state: a failed load must never keep stale rows on screen. */
   function renderErrorRow(e) {
     const paneA = container.querySelector('.file-tbody[data-pane="a"]');
     const paneB = container.querySelector('.file-tbody[data-pane="b"]');
@@ -143,14 +134,10 @@ export function initDataTable(container, source) {
     paneA.innerHTML = '';
     if (paneB) paneB.innerHTML = '';
     const tr = document.createElement('tr');
-    tr.dataset.key = 'load-error';
-    tr.dataset.dir = '1';
+    tr.dataset.key = 'load-error'; tr.dataset.dir = '1';
     tr.innerHTML = `<td colspan="6" class="empty-hint">加载失败：${escapeHtml(String(e && e.message || e || '网络错误'))}
       <button class="load-retry" type="button">重试</button></td>`;
-    tr.querySelector('.load-retry').addEventListener('click', () => {
-      tr.remove();
-      load();
-    });
+    tr.querySelector('.load-retry').addEventListener('click', () => { tr.remove(); load(); });
     paneA.appendChild(tr);
   }
 
@@ -158,58 +145,55 @@ export function initDataTable(container, source) {
     const st = getState();
     // An empty group means the aggregated all-groups view.
     const seq = nextSeq(topic);
-    try {
-      const sort = st.fileSort || { by: 'created_at', dir: 'desc' };
-      const data = await source.list(st, {
-        page: page(),
-        page_size: st.filePageSize || 24,
-        type: typeFilter(),
-        folder: st.folder,
-        q: queryFor(st),
-        status: st.fileStatus,
-        sort_by: sort.by,
-        sort_dir: sort.dir,
-      });
-      if (isStale(topic, seq)) return; // superseded by a newer request
+    // 只有群文件有 created_at 列；其余源（网盘走本地排序）用共享默认键
+    // 会让首屏排序变成空操作，因此它们回退到 modified（与表头一致）。
+    const sort = (!st.fileSort || (st.fileSort.by === 'created_at' && !isGroup))
+      ? { by: isGroup ? 'created_at' : 'modified', dir: st.fileSort?.dir || 'desc' }
+      : st.fileSort;
+    const data = await source.list(st, {
+      page: page(),
+      page_size: st.filePageSize || DEFAULT_PAGE_SIZE,
+      type: typeFilter(),
+      folder: st.folder,
+      q: queryFor(st),
+      status: st.fileStatus,
+      sort_by: sort.by,
+      sort_dir: sort.dir,
+    });
+    if (isStale(topic, seq)) return; // superseded by a newer request
 
-      set(source.itemsKey, data.items);
-      set(source.totalKey, data.total);
-      if (isGroup) {
-        set('folders', data.folders || []);
-        if (data.tags) set('tags', data.tags);
-      }
-      if (source.id === 'album') set('albumTagCloud', data.tags || []);
-      if (source.id === 'essence') set('essenceTagCloud', data.tags || []);
-
-      let rows = data.items;
-      // Netdisk: no server-side filter/sort -> apply locally (N4a).
-      if (!source.serverSort) {
-        rows = applyLocalFilterSort(
-          rows,
-          { type: typeFilter(), sort_by: sort.by, sort_dir: sort.dir },
-          // Netdisk has its own classification map (text/audio/video/image/other)
-          source.id === 'netdisk' ? netdiskTypeMap() : extTypeMap(st.extTypes),
-        );
-      }
-
-      renderBreadcrumb(source, `${prefix}-breadcrumb`);
-      renderTagCloud(data.tags);
-      renderRows(container, source, rows, data.folders || []);
-      updatePagination(container, source, prefix);
-      syncSelectAll(source);
-    } catch (e) {
-      throw e;
+    set(source.itemsKey, data.items);
+    set(source.totalKey, data.total);
+    if (isGroup) {
+      set('folders', data.folders || []);
+      if (data.tags) set('tags', data.tags);
     }
+    if (source.id === 'album') set('albumTagCloud', data.tags || []);
+    if (source.id === 'essence') set('essenceTagCloud', data.tags || []);
+
+    let rows = data.items;
+    // Netdisk: no server-side filter/sort -> apply locally (N4a).
+    if (!source.serverSort) {
+      rows = applyLocalFilterSort(
+        rows,
+        { type: typeFilter(), sort_by: sort.by, sort_dir: sort.dir },
+        // Netdisk has its own classification map (text/audio/video/image/other)
+        source.id === 'netdisk' ? netdiskTypeMap() : extTypeMap(st.extTypes),
+      );
+    }
+
+    renderBreadcrumb(source, `${prefix}-breadcrumb`);
+    renderTagCloud(data.tags);
+    renderRows(container, source, rows, data.folders || []);
+    updatePagination(container, source, prefix);
+    syncSelectAll(source);
   }
 
   load();
 
   const subs = [
     subscribe(`refresh:${topic}`, load),
-    subscribe(source.selectedKey, () => {
-      updateCheckboxes(source);
-      syncSelectAll(source);
-    }),
+    subscribe(source.selectedKey, () => { updateCheckboxes(source); syncSelectAll(source); }),
     subscribe('layout', applyLayoutMode),
   ];
   if (source.typeKey) subs.push(subscribe(source.typeKey, load));
@@ -220,11 +204,17 @@ export function initDataTable(container, source) {
       set('filePage', 1);
       set('folder', '');
       set('folderChain', []);
+      // 切群必须清选区：旧群的选中 id 对应的行已不在列表里，残留会让
+      // 操作条显示"已选 N 项"而命令层按 rows 过滤后什么都选不中。
+      set('fileSelected', new Set());
       load();
     }));
   } else if (source.id === 'netdisk') {
     subs.push(subscribe('netdiskPath', () => {
       set('netdiskPage', 1);
+      // 切目录同样必须清选区：网盘的 rowKey 是 remote_path，旧目录的 key
+      // 已不在列表里，残留会让批量删除把旧目录路径一并提交。
+      set('netdiskSelected', new Set());
       load();
     }));
   } else if (source.id === 'album') {
@@ -246,13 +236,17 @@ export function initDataTable(container, source) {
     });
   });
 
-  // Select-all across both panes (folder rows excluded).
+  // Select-all across both panes: incremental add/delete over the current
+  // page (folder rows have no checkbox), so cross-page picks survive.
   container.querySelectorAll('.file-select-all').forEach((el) => {
     el.addEventListener('change', (e) => {
-      const items = getState()[source.itemsKey] || [];
-      const fileRows = items.filter((f) => !f.is_dir);
-      if (e.target.checked) source.selection.setMany(fileRows.map(source.rowKey));
-      else source.selection.clear();
+      const cur = new Set(getState()[source.selectedKey] || []);
+      for (const f of getState()[source.itemsKey] || []) {
+        if (f.is_dir) continue;
+        const key = source.rowKey(f);
+        if (e.target.checked) cur.add(key); else cur.delete(key);
+      }
+      source.selection.setMany([...cur]);
     });
   });
 
@@ -265,6 +259,9 @@ export function initDataTable(container, source) {
       getSelection: () => Array.from(getState()[source.selectedKey] || []),
       setSelection: (keys) => source.selection.setMany(keys),
       canStart: (ev) => !ev.target.closest('tr[data-dir="1"]'),
+      // 目录行没有复选框（选中态不可见），网盘目录 key 又是 remote_path，
+      // 会被批量删除当目录删掉 -> 与 canStart 用同一套行过滤。
+      rowFilter: (r) => r.dataset.dir !== '1',
     });
   }
 
@@ -274,12 +271,14 @@ export function initDataTable(container, source) {
   });
   container.querySelector(`#${prefix}-next`)?.addEventListener('click', () => {
     const st = getState();
-    const max = Math.ceil((st[source.totalKey] || 0) / (st.filePageSize || 24)) || 1;
+    const max = Math.ceil((st[source.totalKey] || 0) / (st.filePageSize || DEFAULT_PAGE_SIZE)) || 1;
     if (page() < max) { set(source.pageKey, page() + 1); load(); }
   });
   container.querySelector(`#${prefix}-page-size`)?.addEventListener('change', (e) => {
-    set('filePageSize', parseInt(e.target.value, 10));
+    const size = parseInt(e.target.value, 10) || DEFAULT_PAGE_SIZE;
+    set('filePageSize', size);
     set(source.pageKey, 1);
+    e.target.value = String(size); // 回写：显示值必须等于实际请求值
     load();
   });
 
@@ -290,6 +289,9 @@ export function initDataTable(container, source) {
     const paneB = container.querySelector('.table-b');
     if (grid) grid.classList.toggle('single', !dualMode);
     if (paneB) paneB.classList.toggle('hidden', !dualMode);
+    // 行是按 layout 对半拆进两个 pane 的：只切 class 会让 pane B 残留或
+    // 缺失半页行 -> 必须按新分栏重排（load 有尾部合并，不会请求风暴）。
+    load();
   }
 
   return () => { cancelled = true; subs.forEach((u) => u()); detachMarquee(); };

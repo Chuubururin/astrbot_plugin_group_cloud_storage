@@ -13,10 +13,9 @@ from commands.handlers import Services
 from core.api_validate import json_body
 from .compatibility import PLUGIN_NAME, Bound as _Bound, compat_handler
 from .routes import RouteRegistry, validate_routes
-from . import resources as _resources
 from . import config as _config_module
 
-for _modname in ("groups", "resources", "resources_mutation", "tasks", "config", "sync", "albums", "events", "misc", "database", "webapi_ext", "webapi_netdisk", "netdisk_query", "netdisk_mutation", "netdisk_transfer"):
+for _modname in ("groups", "resources", "resources_mutation", "tasks", "config", "sync", "albums", "events", "misc", "database", "webapi_ext", "netdisk_query", "netdisk_mutation", "netdisk_transfer"):
     _mod = importlib.import_module(f".{_modname}", __package__)
     for _name in dir(_mod):
         if _name.startswith("api_"):
@@ -34,9 +33,6 @@ async def api_config_save(s):
         result.setdefault("status", "error")
     return result
 
-def _aggregate_capacity(*args, **kwargs):
-    return _resources._aggregate_capacity(*args, **kwargs)
-GROUP_TOTAL_DEFAULT = _resources.GROUP_TOTAL_DEFAULT
 
 # Plugin runtime context (injected by register_page_apis; hot reload reaches
 # the framework star_manager through it)
@@ -69,10 +65,26 @@ async def api_config_reload(s):
     asyncio.get_running_loop().create_task(_delayed_reload(), name="config-hot-reload")
     return json_response({"status": "ok", "message": "reload scheduled"})
 
+def _route_handler_lookup(s: Services):
+    """Registration-time route handler resolution.
+
+    Undefined handler names resolve to None so RouteRegistry.register raises
+    LookupError while the routes are being wired; wrapping None in _Bound (the
+    previous behaviour) made that check unreachable and deferred the failure to
+    request time, where it turned into an opaque 500.
+    """
+    def lookup(name: str):
+        if name not in globals():
+            return None
+        return _Bound(s, globals()[name])
+
+    return lookup
+
+
 def register_page_apis(context: Context, s: Services) -> None:
     global _CONTEXT
     _CONTEXT = context
     validate_routes()
-    RouteRegistry().register(context, PLUGIN_NAME, lambda name: _Bound(s, globals().get(name)))
+    RouteRegistry().register(context, PLUGIN_NAME, _route_handler_lookup(s))
 
 __all__ = ["register_page_apis", "PLUGIN_NAME"]

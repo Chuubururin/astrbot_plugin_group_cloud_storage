@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 // Minimal DOM stub so toast/modal imports resolve in node.
@@ -27,8 +27,12 @@ globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 
-await import(join(root, 'features', 'command-registry.js')).then((m) => m.registerAllCommands());
-const commands = await import(join(root, 'features', 'commands.js'));
+// dynamic import() needs a URL: a bare filesystem path is parsed as a URL and
+// on Windows "C:\..." becomes scheme "c:" -> ERR_UNSUPPORTED_ESM_URL_SCHEME.
+const moduleUrl = (rel) => pathToFileURL(join(root, rel)).href;
+
+await import(moduleUrl('features/command-registry.js')).then((m) => m.registerAllCommands());
+const commands = await import(moduleUrl('features/commands.js'));
 
 test('registry: command definitions registered', () => {
   const all = commands.commands();

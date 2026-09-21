@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import math
+
 from ..units import parse_size
 from .defaults import DEFAULTS, _to_bool
 from .schema import validate_config
@@ -58,7 +60,12 @@ class PluginConfig:
         value = self._data.get(key, default)
         try:
             return cast(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: int(float("inf")) / int(float("1e400")). json.load
+            # accepts Infinity/1e400, and an uncaught OverflowError here would
+            # escape the documented "fall back to the default" contract and
+            # abort assembly (bootstrap reads these properties), so the whole
+            # plugin would fail to load.
             return default
 
     @property
@@ -91,9 +98,13 @@ class PluginConfig:
         if value is not None:
             try:
                 v = float(value)
-                if v > 0:
+                # Finite check, same convention as units.parse_size /
+                # parse_duration ("reject non-finite numbers"): an accepted
+                # inf would reach the rate limiter and make asyncio.sleep(inf)
+                # never return, wedging every QQ API call.
+                if v > 0 and math.isfinite(v):
                     return v
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
         return self.request_interval_ms / 1000.0
 
@@ -162,7 +173,7 @@ class PluginConfig:
             try:
                 n = max(int(legacy), 0)
                 return n * 1024 * 1024 if legacy_unit == "mb" else n
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
         return default_bytes
 

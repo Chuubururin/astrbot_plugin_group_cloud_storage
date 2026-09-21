@@ -184,24 +184,46 @@ class PlatformBotResolver:
                 self._online_account_ids.add(account_id)
                 self._account_bots[account_id] = bot
             else:
-                # Try to get this bot's account_id for the offline record
+                # The first probe timed out. Retry once before declaring the
+                # bot offline: a SUCCESSFUL retry proves the bot is alive, so
+                # it must be treated as alive. (Recording a successful probe
+                # as offline evidence evicted a live account from self.bots,
+                # which hid its groups and misrouted ops to another account.)
                 try:
-                    info = await asyncio.wait_for(
+                    retry_info = await asyncio.wait_for(
                         bot.call_action("get_login_info"), timeout=3.0
                     )
-                    if info and info.get("user_id"):
-                        account_id = str(info["user_id"])
+                except Exception:
+                    retry_info = None
+                if retry_info and retry_info.get("user_id"):
+                    account_id = str(retry_info["user_id"])
+                    alive.append(bot)
+                    alive_accounts.append((account_id, bot))
+                    self._online_account_ids.add(account_id)
+                    self._account_bots[account_id] = bot
+                    logger.debug(
+                        f"[group_cloud_storage] bot alive after retry: "
+                        f"account={account_id}"
+                    )
+                else:
+                    # Both probes failed: attribute the bot from its last-known
+                    # binding so the caller can evict that account's groups.
+                    account_id = next(
+                        (acc for acc, bound in self._account_bots.items() if bound is bot),
+                        None,
+                    )
+                    if account_id:
                         stale_account_ids.append(account_id)
                         self._online_account_ids.discard(account_id)
+                        self._account_bots.pop(account_id, None)
                         logger.info(
                             f"[group_cloud_storage] bot offline detected: "
                             f"account={account_id}"
                         )
-                except Exception:
-                    # account_id could not be fetched for this stale bot
-                    logger.debug(
-                        "[group_cloud_storage] cannot get account_id for stale bot"
-                    )
+                    else:
+                        logger.debug(
+                            "[group_cloud_storage] cannot get account_id for stale bot"
+                        )
         self.bots = alive
         # Also clean up the preferred/last references
         if self.preferred_bot and self.preferred_bot not in self.bots:

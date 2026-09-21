@@ -47,6 +47,38 @@ _PARTS = (
 )
 
 
+def _rebuild_database(db_path: Path) -> None:
+    """Build a fresh, migrated database next to ``db_path`` and swap it in.
+
+    Blocking by design (sqlite3 plus filesystem); the caller runs it in a
+    worker thread. When any step fails the temporary file is removed and the
+    existing database file is left untouched, so a failed rebuild is a no-op.
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{db_path.name}.", suffix=".rebuild", dir=db_path.parent)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        conn = sqlite3.connect(str(tmp))
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            migrate(conn)
+            check = conn.execute("PRAGMA quick_check").fetchone()[0]
+            if check != "ok":
+                raise RuntimeError(f"rebuilt database integrity check failed: {check}")
+            conn.commit()
+        finally:
+            conn.close()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{tmp}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
+        os.replace(tmp, db_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 class SqliteMetaStore:
     """SQLite implementation of MetaStorePort (structurally conformant; does
     not inherit the Protocol base class -- otherwise stub methods would be
@@ -103,14 +135,21 @@ class SqliteMetaStore:
     async def init(self) -> None:
         def _do(conn):
             for attempt in range(3):
-                conn.execute("BEGIN")
+                # IMMEDIATE: the migration is a write transaction, so take the
+                # write lock up front instead of risking a busy-snapshot
+                # failure when a deferred read upgrades to a write.
+                conn.execute("BEGIN IMMEDIATE")
                 try:
-                    migrate(
-                        conn,
-                        on_skip=lambda v, err: logger.warning(
-                            f"[group_cloud_storage] migration {v} statement skipped: {err}"
-                        ),
-                    )
+                    # Strict version chain: a failing migration statement
+                    # aborts the chain, the transaction is rolled back and the
+                    # error propagates, so the schema is never left
+                    # half-migrated and the version marker only advances after
+                    # a fully successful chain. The one best-effort block
+                    # inside migrate() is the post-migration FTS repair, which
+                    # cannot veto the version marker (it would otherwise make
+                    # every later startup retry the same broken repair and
+                    # never initialise the plugin).
+                    migrate(conn)
                     conn.commit()
                     return
                 except sqlite3.OperationalError as e:
@@ -119,10 +158,18 @@ class SqliteMetaStore:
                     # the write lock past busy_timeout; migrate is idempotent.
                     transient = "locked" in str(e) or "busy" in str(e)
                     if not transient or attempt == 2:
+                        logger.error(
+                            f"[group_cloud_storage] schema migration failed and was "
+                            f"rolled back: {e}"
+                        )
                         raise
                     time.sleep(1.5 * (attempt + 1))
-                except Exception:
+                except Exception as e:
                     conn.rollback()
+                    logger.error(
+                        f"[group_cloud_storage] schema migration failed and was "
+                        f"rolled back: {e}"
+                    )
                     raise
 
         await self._conn.exec(_do)
@@ -136,31 +183,17 @@ class SqliteMetaStore:
             await self._reset_and_rebuild_locked()
 
     async def _reset_and_rebuild_locked(self) -> None:
-        await self.close()
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{self._db_path.name}.", suffix=".rebuild", dir=self._db_path.parent)
-        os.close(fd)
-        tmp = Path(tmp_name)
         try:
-            conn = sqlite3.connect(str(tmp))
-            try:
-                conn.execute("BEGIN")
-                migrate(conn)
-                check = conn.execute("PRAGMA quick_check").fetchone()[0]
-                if check != "ok":
-                    raise RuntimeError(f"rebuilt database integrity check failed: {check}")
-                conn.commit()
-            finally:
-                conn.close()
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(f"{tmp}{suffix}")
-                if sidecar.exists():
-                    sidecar.unlink()
-            os.replace(tmp, self._db_path)
-            self._state.conn = ConnectionManager(self._db_path)
+            await self.close()
+            # sqlite3 + filesystem work is blocking; keep it off the event
+            # loop, like ConnectionManager.execute() and IntegrityMixin.
+            await asyncio.to_thread(_rebuild_database, self._db_path)
         finally:
-            if tmp.exists():
-                tmp.unlink()
+            # Rebuild the manager on the failure path too: close() above
+            # retired the old one, so without this every later store call
+            # would raise "connection manager is closed" forever. Same
+            # contract as IntegrityMixin.restore().
+            self._state.conn = ConnectionManager(self._db_path)
 
     async def close(self) -> None:
         await self._conn.close()

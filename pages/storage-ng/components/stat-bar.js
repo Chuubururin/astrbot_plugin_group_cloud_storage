@@ -11,7 +11,7 @@
  * @module components/stat-bar
  */
 
-import { getState, subscribe } from '../store.js';
+import { getState, subscribe, nextSeq, isStale } from '../store.js';
 import { API, apiGet } from '../api.js';
 import { escapeHtml, formatSize } from '../utils/helpers.js';
 
@@ -23,16 +23,19 @@ export function initStatBar(container) {
   container.className = 'stat-bar';
 
   // refresh:files fires frequently (search keystrokes, command completion,
-  // data_changed) -> stat fetches are debounced 400ms with in-flight
-  // coalescing, avoiding one stat request per event.
+  // data_changed) -> stat fetches are debounced 400ms and every response is
+  // sequence-guarded, so a slow older response can neither win over a newer
+  // one nor repaint after a group switch.
   let debounceTimer = null;
 
   async function run() {
     const { currentGroup } = getState();
+    const seq = nextSeq('stat');
     try {
       const data = currentGroup
         ? await apiGet(API.STAT, { group: currentGroup })
         : await apiGet(API.STAT);
+      if (isStale('stat', seq)) return; // superseded by a newer request
       // Operator display (stat `accounts`): every single-file operation runs
       // under exactly one account (the group's owning account), so a single
       // group shows that one QQ. The global view aggregates groups across
@@ -51,7 +54,10 @@ export function initStatBar(container) {
         ${data.used_space != null ? `<span class="stat-item">已用: ${formatSize(data.used_space)}</span>` : ''}
       `;
     } catch (e) {
-      container.innerHTML = '';
+      if (isStale('stat', seq)) return;
+      // 失败必须可见：静默清空会让"统计加载失败"被读成"没有统计数据"。
+      container.innerHTML = '<span class="stat-item status-error">'
+        + `统计加载失败: ${escapeHtml(String(e && e.message || e || '网络错误'))}</span>`;
     }
   }
 

@@ -5,8 +5,12 @@
  * @module components/status-bar
  */
 
-import { subscribe } from '../store.js';
+import { set, subscribe } from '../store.js';
 import { getIcon } from '../icons.js';
+
+// Footer error lifetime. A single local constant: only this module clears
+// the error line (the store has no other writer or clearer for it).
+const ERROR_CLEAR_MS = 8000;
 
 /**
  * Initialize the status bar.
@@ -48,13 +52,19 @@ export function initStatusBar(container) {
         : '';
     }
   });
+  // 全仓只有 main.js 会写 error，此前没有任何清除路径：超时自动清除，
+  // 点击错误行也可立即清除，否则一次旧错误会永久占住状态栏。
+  let errorTimer = null;
   subscribe('error', (err) => {
     const el = container.querySelector('#status-error');
     if (el) {
       el.textContent = err || '';
       el.classList.toggle('hidden', !err);
     }
+    clearTimeout(errorTimer);
+    errorTimer = err ? setTimeout(() => set('error', null), ERROR_CLEAR_MS) : null;
   });
+  container.querySelector('#status-error')?.addEventListener('click', () => set('error', null));
   subscribe('queueStatus', (status) => {
     const el = container.querySelector('#status-queue');
     if (el) {

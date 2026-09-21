@@ -26,7 +26,7 @@ export function initFilesView(container) {
   const toolbar = document.createElement('div');
   toolbar.id = 'files-toolbar';
   container.appendChild(toolbar);
-  initFilesToolbar(toolbar);
+  const toolbarCleanup = initFilesToolbar(toolbar);
 
   // The data table owns the single #tagcloud slot for group files; keeping
   // a second tag-cloud in the view would duplicate it for no benefit.
@@ -41,6 +41,7 @@ export function initFilesView(container) {
   const barCleanup = initActionBar(actionBar, GROUP_SOURCE);
 
   return () => {
+    toolbarCleanup();
     tableCleanup();
     barCleanup();
   };

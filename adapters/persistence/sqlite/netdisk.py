@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from .like import like_contains, like_prefix
 from .state import StorePart
 
 if TYPE_CHECKING:
@@ -47,8 +48,8 @@ class NetdiskMixin(StorePart):
             rows = conn.execute(
                 "SELECT remote_path, name, is_dir, size, type, tags, "
                 "registered_at, indexed_at "
-                "FROM netdisk_meta WHERE remote_path LIKE ?",
-                (dir_prefix + "%",),
+                "FROM netdisk_meta WHERE remote_path LIKE ? ESCAPE '\\'",
+                (like_prefix(dir_prefix),),
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -88,20 +89,26 @@ class NetdiskMixin(StorePart):
 
     async def search_netdisk_meta(self, keyword: str, dir_prefix: str | None = None) -> list[dict]:
         def _do(conn: sqlite3.Connection):
+            # like_contains escapes `%`/`_`/`\` and the queries declare
+            # ESCAPE '\': an unescaped keyword silently widened the match
+            # (`a_b` hit any `a?b`, `%` hit the whole table).
+            pattern = like_contains(keyword)
             if dir_prefix:
                 rows = conn.execute(
                     "SELECT remote_path, name, is_dir, size, type, tags, "
                     "registered_at, indexed_at "
-                    "FROM netdisk_meta WHERE (name LIKE ? OR tags LIKE ?) "
-                    "AND remote_path LIKE ?",
-                    (f"%{keyword}%", f"%{keyword}%", dir_prefix + "%"),
+                    "FROM netdisk_meta WHERE (name LIKE ? ESCAPE '\\' "
+                    "OR tags LIKE ? ESCAPE '\\') "
+                    "AND remote_path LIKE ? ESCAPE '\\'",
+                    (pattern, pattern, like_prefix(dir_prefix)),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT remote_path, name, is_dir, size, type, tags, "
                     "registered_at, indexed_at "
-                    "FROM netdisk_meta WHERE name LIKE ? OR tags LIKE ?",
-                    (f"%{keyword}%", f"%{keyword}%"),
+                    "FROM netdisk_meta WHERE name LIKE ? ESCAPE '\\' "
+                    "OR tags LIKE ? ESCAPE '\\'",
+                    (pattern, pattern),
                 ).fetchall()
             return [dict(r) for r in rows]
 

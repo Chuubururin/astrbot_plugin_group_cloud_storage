@@ -76,9 +76,11 @@ class TaskControlService:
     async def list_tasks(
         self, state: str | None = None, kind: str | None = None,
         target: str | None = None, limit: int = 100, offset: int = 0,
+        task_ids: list[str] | None = None,
     ) -> list[dict]:
         return await self.store.ledger_query(
-            state=state, kind=kind, target=target, limit=limit, offset=offset
+            state=state, kind=kind, target=target, limit=limit, offset=offset,
+            task_ids=task_ids,
         )
 
     async def queue_status(self) -> dict:
@@ -128,9 +130,23 @@ class TaskControlService:
             return {"ok": False, "task_id": task_id, "reason": "task not found"}
         state = row["state"]
         if state in ("pending", "paused"):
-            hit = self.queue.interrupt_task(task_id)
-            return {"ok": hit, "task_id": task_id, "action": "discard",
-                    "note": "未执行，撤销即丢弃"}
+            if self.queue.interrupt_task(task_id):
+                return {"ok": True, "task_id": task_id, "action": "discard",
+                        "note": "未执行，撤销即丢弃"}
+            # Not in the live queue: a restart-reconciled row (ledger_reconcile
+            # sets the breakpoint kinds back to pending) or a stale placeholder.
+            # Nothing resubmits those, so the interrupt lands nowhere -- the old
+            # reply claimed a discard while the row stayed pending forever.
+            # Converge it to a terminal state, like the running/retry zombies
+            # below (Bug-13 reasoning, same class of stale row).
+            await self.store.ledger_upsert(
+                task_id, row.get("kind", ""), row.get("target", ""),
+                row.get("payload") or {}, "failed",
+                retries=int(row.get("retries") or 0),
+                error=row.get("error") or "stale pending row (task not in queue)",
+            )
+            return {"ok": True, "task_id": task_id, "action": "discard",
+                    "note": "任务不在队列中（重启残留），已标记为失败"}
         if state in ("failed", "cancelled"):
             return {"ok": True, "task_id": task_id, "action": "discard",
                     "note": "已终态（失败/取消），无需补偿"}

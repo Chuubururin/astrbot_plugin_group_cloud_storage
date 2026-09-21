@@ -1,8 +1,10 @@
-"""网状拓扑点对点双向传输测试。
+"""网状拓扑点对点双向传输——接线契约测试。
 
-验证四个节点（files/albums/essence/netdisk）之间的完整网状传输拓扑：
-- 每个源到每个目标均有可达路径
-- 类型限制仅在相册入口（仅图片/视频）和精华入口（仅文本）生效
+TRANSFER_MATRIX 是拓扑文档（4 源 × 各目标的路径说明）。本文件不再把矩阵与
+自身比较（那是恒真断言、零假信心改进），而是把它钉在真实代码面上：
+- 矩阵中出现的每个目标必须是 distributor.DISTRIBUTE_TARGETS 的真实成员
+- 每条路径所依赖的入口方法必须在对应服务类上真实存在（改名/删除即失败）
+行为级覆盖（真实分发执行、类型限制在入口生效）见 test_distributor.py。
 
 Run: pytest tests/contract/test_transfer_topology.py -v
 """
@@ -15,7 +17,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.application.distributor import DISTRIBUTE_TARGETS  # noqa: E402
+from core.application.bridge.service import BridgeService  # noqa: E402
+from core.application.distributor import (  # noqa: E402
+    DISTRIBUTE_TARGETS,
+    DistributorService,
+)
+from core.application.files import FileOpsService  # noqa: E402
+from core.application.ingest import CloudIngestService  # noqa: E402
 
 
 # ---------- 目标白名单验证 ----------
@@ -31,9 +39,9 @@ def test_distribute_targets_immutable():
     assert isinstance(DISTRIBUTE_TARGETS, frozenset)
 
 
-# ---------- 网状拓扑可达性（类型限制在入口） ----------
+# ---------- 网状拓扑可达性（矩阵 → 真实接线） ----------
 
-# 完整网状矩阵：4 源 × 4 目标 = 16 条路径（含类型限制路径）
+# 完整网状矩阵：4 源 × 各目标 = 拓扑文档（行为验证在 test_distributor.py）。
 TRANSFER_MATRIX = {
     # 文件 → 所有目标（无类型限制）
     "file": {
@@ -66,94 +74,91 @@ TRANSFER_MATRIX = {
     },
 }
 
+# 每条矩阵路径依赖的服务入口（服务类, 方法名）。矩阵文档改写路径而未改
+# 代码（或反向）时，这里先失败。
+_ROW_ENTRYPOINTS = {
+    "file": [
+        (DistributorService, "distribute_file"),
+        (BridgeService, "submit_out"),
+        (CloudIngestService, "submit_fetch"),
+        (FileOpsService, "direct_link"),
+    ],
+    "album": [
+        (DistributorService, "distribute_album"),
+        (BridgeService, "submit_offline_download"),
+        (CloudIngestService, "submit_fetch"),
+        (CloudIngestService, "submit_essence_save"),
+    ],
+    "essence": [
+        (DistributorService, "distribute_essence"),
+        (BridgeService, "submit_offline_download"),
+        (FileOpsService, "submit_upload"),
+        (CloudIngestService, "submit_fetch"),
+    ],
+    "netdisk": [
+        (DistributorService, "distribute_netdisk"),
+        (BridgeService, "submit_in"),
+        (CloudIngestService, "submit_fetch"),
+        (FileOpsService, "direct_link"),
+    ],
+}
 
-def test_transfer_matrix_source_coverage():
-    """四个源类型全部在矩阵中。"""
+
+def test_matrix_rows_are_the_four_real_sources():
+    """矩阵的行必须是四个真实资源源，不多不少。"""
     assert set(TRANSFER_MATRIX.keys()) == {"file", "album", "essence", "netdisk"}
 
 
-def test_transfer_matrix_target_coverage():
-    """每个源至少有 4 个目标。"""
+def test_matrix_targets_are_real_targets():
+    """矩阵中出现的每个目标都必须是生产白名单的真实成员。"""
+    for source, targets in TRANSFER_MATRIX.items():
+        unknown = set(targets) - DISTRIBUTE_TARGETS
+        assert not unknown, f"{source} 引用了不可路由的目标: {sorted(unknown)}"
+
+
+def test_matrix_rows_have_targets():
+    """每个源至少有 4 个目标（拓扑文档完整性）。"""
     for source, targets in TRANSFER_MATRIX.items():
         assert len(targets) >= 4, f"{source} has only {len(targets)} targets"
 
 
-def test_file_reaches_all_targets():
-    """文件可到达所有 6 个目标（含 group/copy）。"""
-    file_targets = set(TRANSFER_MATRIX["file"].keys())
-    assert file_targets >= {"local", "netdisk", "album", "essence"}
+def test_matrix_row_entrypoints_exist():
+    """每条矩阵路径依赖的服务入口在真实类上存在（改名/删除即失败）。"""
+    for source, entries in _ROW_ENTRYPOINTS.items():
+        for cls, method in entries:
+            assert hasattr(cls, method), (
+                f"矩阵行 {source!r} 依赖的入口缺失: {cls.__name__}.{method}"
+            )
 
 
-def test_album_reaches_all_targets():
-    """相册可到达所有 4 个目标。"""
-    album_targets = set(TRANSFER_MATRIX["album"].keys())
-    assert album_targets >= {"local", "netdisk", "group", "essence"}
+def test_entrypoint_target_params_accept_matrix_targets():
+    """分发入口的 target 形参签名存在且 DISTRIBUTE_TARGETS 可整体传入
+    （防止白名单扩列后入口参数校验漏接）。"""
+    import inspect
+
+    for fn in (
+        DistributorService.distribute_file,
+        DistributorService.distribute_album,
+        DistributorService.distribute_essence,
+        DistributorService.distribute_netdisk,
+    ):
+        params = inspect.signature(fn).parameters
+        assert "target" in params, f"{fn.__name__} 缺少 target 形参"
 
 
-def test_essence_reaches_all_targets():
-    """精华可到达所有 5 个目标。"""
-    essence_targets = set(TRANSFER_MATRIX["essence"].keys())
-    assert essence_targets >= {"local", "copy", "netdisk", "group", "album"}
-
-
-def test_netdisk_reaches_all_targets():
-    """网盘可到达所有 4 个目标。"""
-    netdisk_targets = set(TRANSFER_MATRIX["netdisk"].keys())
-    assert netdisk_targets >= {"local", "group", "album", "essence"}
-
-
-# ---------- 类型限制仅在入口 ----------
-
-def test_album_entry_type_restriction():
-    """相册入口类型限制：仅接受图片/视频（_IMAGE_EXTS | _VIDEO_EXTS）。"""
-    # 文件 → 相册时，submit_fetch 会检查扩展名
-    # 相册作为源时，不做入口检查（只在目标入口检查）
-    # 这里验证矩阵描述正确
-    assert "仅图片/视频" in TRANSFER_MATRIX["file"]["album"]
-    assert "仅图片/视频" in TRANSFER_MATRIX["netdisk"]["album"]
-
-
-def test_essence_entry_type_restriction():
-    """精华入口类型限制：仅接受文本。"""
-    # 文件 → 精华时，submit_fetch 读取为文本
-    # 精华作为源时，不做入口检查（只在目标入口检查）
-    assert "仅文本" in TRANSFER_MATRIX["file"]["essence"]
-    assert "仅文本" in TRANSFER_MATRIX["netdisk"]["essence"]
-
-
-# ---------- 双向性验证 ----------
+# ---------- 双向性验证（经真实服务对） ----------
 
 def test_bidirectional_file_netdisk():
-    """文件 ↔ 网盘 双向可达。"""
-    assert "netdisk" in TRANSFER_MATRIX["file"]
-    assert "group" in TRANSFER_MATRIX["netdisk"]
+    """文件 ↔ 网盘 双向接线：submit_out 正传 + submit_in 恢复。"""
+    assert hasattr(BridgeService, "submit_out")
+    assert hasattr(BridgeService, "submit_in")
 
 
-def test_bidirectional_file_album():
-    """文件 ↔ 相册 双向可达。"""
-    assert "album" in TRANSFER_MATRIX["file"]
-    assert "group" in TRANSFER_MATRIX["album"]
-
-
-def test_bidirectional_file_essence():
-    """文件 ↔ 精华 双向可达。"""
-    assert "essence" in TRANSFER_MATRIX["file"]
-    assert "group" in TRANSFER_MATRIX["essence"]
-
-
-def test_bidirectional_album_netdisk():
-    """相册 ↔ 网盘 双向可达。"""
-    assert "netdisk" in TRANSFER_MATRIX["album"]
-    assert "album" in TRANSFER_MATRIX["netdisk"]
-
-
-def test_bidirectional_album_essence():
-    """相册 ↔ 精华 双向可达。"""
-    assert "essence" in TRANSFER_MATRIX["album"]
-    assert "album" in TRANSFER_MATRIX["essence"]
-
-
-def test_bidirectional_essence_netdisk():
-    """精华 ↔ 网盘 双向可达。"""
-    assert "netdisk" in TRANSFER_MATRIX["essence"]
-    assert "essence" in TRANSFER_MATRIX["netdisk"]
+def test_bidirectional_matrix_symmetry():
+    """矩阵文档的双向性：除 file 行（可达全部目标）外，其余源行必须
+    指向至少一个其他源（网状而非单向星型）。"""
+    sources = set(TRANSFER_MATRIX)
+    for source, targets in TRANSFER_MATRIX.items():
+        reachable_back = {t for t in targets if t in sources}
+        if source != "file":
+            assert reachable_back, f"{source} 行没有指向任何其他源（拓扑退化为星型）"

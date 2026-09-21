@@ -2,8 +2,8 @@
 
 Provides constants, parameter reading, serialization, group caching,
 convert_to normalization, registration collection (catalog/handler mapping),
-and _Bound lazy binding. webapi.py and the webapi_ext / webapi_netdisk
-modules depend on this module one-way (no circular imports).
+and _Bound lazy binding. webapi.py and webapi_ext depend on this module
+one-way (no circular imports).
 """
 
 from __future__ import annotations
@@ -160,7 +160,11 @@ async def _managed_groups_cached(s: Services, online_only: bool = False):
         if online_ids:
             groups = [g for g in groups if not g.account_id or g.account_id in online_ids]
         else:
-            # Unknown online set (no account callback wired): hide nothing.
+            # Empty online set (every account offline, or accounts not resolved
+            # yet): a group with a recorded owner has no liveness signal to pass
+            # the wither filter, so only owner-less rows stay visible. Same
+            # wither semantics as the branch above - offline accounts' groups are
+            # hidden from the view, never deleted.
             groups = [g for g in groups if not getattr(g, "account_id", "")]
     _GROUP_LIST_CACHE.update(key=key, at=now, groups=groups)
     return groups

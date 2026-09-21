@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 28
+from core.log import logger
+
+SCHEMA_VERSION = 29
 
 MIGRATIONS: dict[int, list[str]] = {
     # Initial five tables (resources/snapshots/sync_logs/groups/schema_version)
@@ -212,6 +214,22 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
     # Archive map deduplication rebuild
     13: [
+        # Guard: a database interrupted between this step's old, separately
+        # committed DROP and RENAME (the pre-atomicity bug) only has
+        # archive_map_new left. Recreating the source table turns the copy
+        # into a no-op instead of "no such table: archive_map", so the step
+        # -- and the chain behind it -- can complete and the version marker
+        # finally advances past 12 again.
+        """CREATE TABLE IF NOT EXISTS archive_map (
+            resource_id  INTEGER NOT NULL,
+            group_id     TEXT    NOT NULL,
+            task_id      TEXT,
+            remote_path  TEXT    NOT NULL,
+            direction    TEXT    NOT NULL,
+            state        TEXT    NOT NULL,
+            updated_at   TEXT    NOT NULL,
+            PRIMARY KEY (resource_id, group_id, direction)
+        )""",
         """CREATE TABLE IF NOT EXISTS archive_map_new (
             resource_id  INTEGER NOT NULL,
             group_id     TEXT    NOT NULL,
@@ -337,20 +355,86 @@ MIGRATIONS: dict[int, list[str]] = {
     28: [
         "CREATE INDEX IF NOT EXISTS idx_archive_map_task ON archive_map(task_id);",
     ],
+    # One logical file == one live row.
+    #
+    # The row key (resource_id) is derived from the source_ref, and a NapCat
+    # file_id is a *session-scoped handle*: after a restart the same cloud file
+    # lists under a fresh file_id, so the sync inserted a SECOND row for one
+    # logical file (and its composition/volume view went 0/n on the live one).
+    # Identity is (group_id, type, name) -- stable across restarts -- so lift it
+    # into a real column and enforce it.
+    #
+    # PARTIAL index (WHERE status != 'deleted'): exactly one *live* row per
+    # logical file, while historical tombstones stay for audit. A plain unique
+    # index would make the tombstone block the file's return.
+    29: [
+        "ALTER TABLE resources ADD COLUMN logical_key TEXT;",
+        # Backfill. name is NOT NULL in the table DDL, so no COALESCE needed
+        # for the identity itself.
+        "UPDATE resources SET logical_key = "
+        "group_id || ':' || type || ':' || name;",
+        # Existing installs may already hold duplicate live rows (that is the
+        # bug being fixed). Keep the newest by updated_at and tombstone the
+        # rest, otherwise CREATE UNIQUE INDEX below fails and the plugin never
+        # starts. Ties broken by id so the choice is deterministic.
+        "UPDATE resources SET status = 'deleted' WHERE status != 'deleted' "
+        "AND id NOT IN ("
+        "  SELECT MAX(id) FROM ("
+        "    SELECT id, ROW_NUMBER() OVER ("
+        "      PARTITION BY group_id, type, logical_key "
+        "      ORDER BY updated_at DESC, id DESC) AS rn "
+        "    FROM resources WHERE status != 'deleted') "
+        "  WHERE rn = 1);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_res_logical "
+        "ON resources(group_id, type, logical_key) WHERE status != 'deleted';",
+    ],
 }
 
 
-def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
+def split_statements(script: str) -> list[str]:
+    """Split a migration script into individual statements.
+
+    ``executescript()`` implicitly COMMITs any pending transaction, which
+    silently ended the caller's migration transaction (and turned v13's DROP
+    + RENAME pair into two independent commits). Statements are therefore
+    handed to ``execute()`` one by one so every DDL/DML statement joins the
+    transaction the caller opened and can be rolled back as a unit.
+
+    The split is driven by ``sqlite3.complete_statement()`` so trigger bodies
+    (``CREATE TRIGGER ... BEGIN ... END;``), string literals containing
+    semicolons and ``--`` comments are never split mid-statement.
+    """
+    statements: list[str] = []
+    buf = ""
+    for char in script:
+        buf += char
+        # A ';' inside a string literal or a trigger body does not close the
+        # statement: complete_statement() only accepts a real terminator.
+        if char == ";" and sqlite3.complete_statement(buf):
+            if buf.strip():
+                statements.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        statements.append(buf.strip())
+    return statements
+
+
+def migrate(conn: sqlite3.Connection) -> int:
     """Run incremental migrations, return current schema version.
 
-    Statements are executed one by one: a database written by a diverged
-    build may carry the same version marker with different table shapes, and
-    one incompatible statement (e.g. an index over a column this lineage
-    never had) must not abort the chain before the schema extensions this
-    runtime depends on (v27 ``groups.removed``) get applied.
+    Runs inside the transaction the caller opened: statements go through
+    ``execute()`` (never ``executescript()``, which commits implicitly), so a
+    failure aborts the whole chain atomically instead of leaving a
+    half-migrated schema behind. The version marker is written last, once
+    every statement succeeded, and only advances contiguously -- a failed
+    step is retried on the next startup instead of being masked by a later
+    step that happens to succeed.
 
-    On partial failure the recorded version is the last fully-applied step
-    (not SCHEMA_VERSION), so failed statements are retried on next startup.
+    A failing version statement is never swallowed: the error propagates so
+    the caller can roll back and report it. The single tolerant block is the
+    post-migration FTS repair below, which is best-effort by design: it
+    repairs an already-versioned schema, so its failure must not veto the
+    version chain (see the comment there).
     """
     has_sv = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
@@ -365,15 +449,20 @@ def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
     last_ok = cur
     for v in sorted(MIGRATIONS):
         if v > cur and v <= SCHEMA_VERSION:
-            step_ok = True
             for sql in MIGRATIONS[v]:
-                try:
-                    conn.executescript(sql)
-                except sqlite3.Error as e:
-                    step_ok = False
-                    if on_skip is not None:
-                        on_skip(v, e)
-            if step_ok:
+                # execute(), never executescript(): the latter implicitly
+                # COMMITs, which would split the caller's migration
+                # transaction and make a failure impossible to roll back.
+                # The chain is strict: a failing statement propagates, the
+                # caller rolls back, and the version marker stays where it
+                # was so the failed step is retried on the next startup.
+                for statement in split_statements(sql):
+                    conn.execute(statement)
+            # Only advance on a CONTIGUOUS success. A later version whose own
+            # statements happen to succeed must not mask an earlier failure
+            # (which would make the version marker skip a failed step and
+            # never retry it on the next startup).
+            if last_ok == v - 1:
                 last_ok = v
 
     # Post-migration backfill of the ext column.
@@ -394,6 +483,14 @@ def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
 
     # Repair databases whose migration marker advanced while the extended FTS
     # projection was only partially created (seen in upgraded installations).
+    #
+    # BEST-EFFORT, and deliberately outside the version chain's failure
+    # contract: the chain above may be fully applied, so letting a failed
+    # repair raise would roll the whole transaction back and leave the version
+    # marker unadvanced -- every later startup then retried the same broken
+    # repair and store.init() could never succeed, i.e. the plugin never
+    # started. The SAVEPOINT confines a failure to this block, so the version
+    # marker below is still written and search degrades to the LIKE fallback.
     fts_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(resources_fts)")
     }
@@ -402,16 +499,29 @@ def migrate(conn: sqlite3.Connection, on_skip=None) -> int:
         "mime", "uploader", "hash", "groupid",
     }
     if fts_columns and not required_fts_columns.issubset(fts_columns):
-        conn.execute("DROP TRIGGER IF EXISTS resources_fts_ai")
-        conn.execute("DROP TRIGGER IF EXISTS resources_fts_ad")
-        conn.execute("DROP TRIGGER IF EXISTS resources_fts_au")
-        conn.execute("DROP TABLE IF EXISTS resources_fts")
-        for sql in MIGRATIONS[17]:
+        conn.execute("SAVEPOINT fts_repair")
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS resources_fts_ai")
+            conn.execute("DROP TRIGGER IF EXISTS resources_fts_ad")
+            conn.execute("DROP TRIGGER IF EXISTS resources_fts_au")
+            conn.execute("DROP TABLE IF EXISTS resources_fts")
+            for sql in MIGRATIONS[17]:
+                for statement in split_statements(sql):
+                    conn.execute(statement)
+        except sqlite3.Error as e:
             try:
-                conn.executescript(sql)
-            except sqlite3.Error as e:
-                if on_skip is not None:
-                    on_skip(17, e)
+                conn.execute("ROLLBACK TO fts_repair")
+                conn.execute("RELEASE fts_repair")
+            except sqlite3.Error:
+                # A fatal error (e.g. a full disk) may already have aborted the
+                # caller's transaction; there is then nothing left to undo.
+                pass
+            logger.warning(
+                f"[group_cloud_storage] FTS projection repair failed and was "
+                f"skipped (search falls back to LIKE): {e}"
+            )
+        else:
+            conn.execute("RELEASE fts_repair")
 
     # Unique constraint for schema_version
     conn.execute(

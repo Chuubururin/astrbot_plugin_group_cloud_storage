@@ -118,7 +118,12 @@ class DownloadMixin:
             yield
 
     async def download_info(
-        self, group_id: str, id: int, *, allow_incomplete: bool = False
+        self,
+        group_id: str,
+        id: int,
+        *,
+        allow_incomplete: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """Return (download target, file name).
 
@@ -130,6 +135,12 @@ class DownloadMixin:
         allow_incomplete: when some volume refs are missing (part deleted on
         the cloud / backfill pending), reassemble the available parts instead
         of failing; the total sha256 check is skipped for a partial result.
+
+        headers: optional out-param for the caller's response headers. A
+        truncated reassembly populates it with an explicit incomplete marker
+        (X-Cloud-Volume-Incomplete / X-Cloud-Volume-Missing); without it the
+        truncation stayed silent -- only Content-Disposition was ever set, so
+        the caller was never actually told the body was partial.
         """
         detail = await self.store.get_resource_detail(group_id, id)
         if not detail:
@@ -175,6 +186,15 @@ class DownloadMixin:
             raise ValueError(
                 f"volume refs not ready (缺失分卷 {missing}，仍在上传/回填中或已被删除)"
             )
+        if missing:
+            # Degraded result (allow_incomplete): mark it explicitly so the
+            # caller can forward the header instead of silently serving a
+            # truncated body.
+            if headers is not None:
+                headers["X-Cloud-Volume-Incomplete"] = "1"
+                headers["X-Cloud-Volume-Missing"] = ",".join(
+                    str(s) for s in missing
+                )
         if not ready:
             raise ValueError("no downloadable volumes")
         kind = (detail.get("meta") or {}).get("kind") or "bytes"
@@ -225,7 +245,11 @@ class DownloadMixin:
                         of.write(data)
             meta_total = (detail.get("meta") or {}).get("total_sha256")
             if meta_total and not missing:
-                if hashlib.sha256(out.read_bytes()).hexdigest() != meta_total:
+                # Stream the hash in 1MiB chunks off the event loop —
+                # read_bytes() would load the whole reassembled file into RSS.
+                from core.application.common import sha256_file
+
+                if await asyncio.to_thread(sha256_file, out) != meta_total:
                     raise ValueError("total sha256 mismatch")
             # Legacy whole-zip volumes -> extract to restore after verification
             # (reversible). Extraction runs under a byte/entry budget
@@ -352,11 +376,17 @@ class DownloadMixin:
                         )
                         fid, busid = fresh or (v.source_ref, v.busid or 0)
                         url = await self.api.get_group_file_url(vg, fid, busid, v.part_name)
-                    data = await self._fetch_bytes(url)
-                    if v.sha256 and hashlib.sha256(data).hexdigest() != v.sha256:
-                        raise ValueError(f"volume {v.seq} sha256 mismatch")
+                    # Stream each segment straight to disk: a 599s segment can
+                    # be hundreds of MB and _fetch_bytes would hold it (and a
+                    # join() copy) in RAM.
                     seg = seg_dir / v.part_name
-                    seg.write_bytes(data)
+                    await self._download_to_file(url, seg)
+                    if v.sha256:
+                        from core.application.common import sha256_file
+
+                        sha = await asyncio.to_thread(sha256_file, seg)
+                        if sha != v.sha256:
+                            raise ValueError(f"volume {v.seq} sha256 mismatch")
                     lf.write(f"file '{seg.as_posix()}'\n")
 
             def _concat():
@@ -463,3 +493,54 @@ class DownloadMixin:
                         chunks.append(chunk)
                     return b"".join(chunks)
         raise ValueError("_fetch_bytes: unreachable redirect loop exit")
+
+    async def _download_to_file(self, url: str, dest: Path) -> int:
+        """Streaming variant of _fetch_bytes for callers that only need the
+        bytes on disk (multi-GB originals / video segments): the whole body
+        never sits in memory (and b"".join would double-buffer it). Same
+        per-hop SSRF validation as _fetch_bytes."""
+        import asyncio
+
+        import httpx
+        from urllib.parse import urljoin
+
+        total = 0
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=120.0) as client:
+                for _hop in range(self._MAX_REDIRECT_HOPS + 1):
+                    pinned_url, original_host = await asyncio.to_thread(
+                        self._resolve_url, url
+                    )
+                    headers = {}
+                    if original_host:
+                        headers["Host"] = original_host
+                    async with client.stream(
+                        "GET", pinned_url, headers=headers
+                    ) as resp:
+                        if resp.is_redirect and resp.has_redirect_location:
+                            if _hop == self._MAX_REDIRECT_HOPS:
+                                raise ValueError(
+                                    f"_download_to_file: redirects exceeded "
+                                    f"({self._MAX_REDIRECT_HOPS})"
+                                )
+                            url = urljoin(url, resp.headers["location"])
+                            continue
+                        resp.raise_for_status()
+                        with tmp.open("wb") as fh:
+                            async for chunk in resp.aiter_bytes(chunk_size=1 << 16):
+                                total += len(chunk)
+                                if total > self._MAX_FETCH_BYTES:
+                                    raise ValueError(
+                                        f"_download_to_file: response exceeds "
+                                        f"{self._MAX_FETCH_BYTES} bytes"
+                                    )
+                                fh.write(chunk)
+                        break
+            # Atomic publish: a partial download must never look like a
+            # complete file to a concurrent reader of dest.
+            tmp.replace(dest)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+        return total

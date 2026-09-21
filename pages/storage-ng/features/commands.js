@@ -134,8 +134,13 @@ export async function runCommand(id, ctx, hooks = {}) {
       || (result !== undefined && result.cancelled === true);
     if (!cancelled) {
       if (cmd.refresh) {
-        const topics = Array.isArray(cmd.refresh) ? cmd.refresh : [cmd.refresh];
-        for (const t of topics) refresh(t);
+        // refresh is a topic, a topic list, or a resolver(ctx) -> topic(s);
+        // the resolver form serves commands shared by several domains (the
+        // tags command must reload albums in the album tab, files in the
+        // files tab) without a second command id per tab.
+        const spec = typeof cmd.refresh === 'function' ? cmd.refresh(ctx) : cmd.refresh;
+        const topics = Array.isArray(spec) ? spec : [spec];
+        for (const t of topics) if (t) refresh(t);
       }
       if (!cmd.keepSelection && ctx.source?.selection) ctx.source.selection.clear();
     }

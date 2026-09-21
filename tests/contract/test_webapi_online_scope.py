@@ -17,8 +17,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from webapi import webapi_base as _wb  # noqa: E402
 from webapi.resources import api_files, api_stat  # noqa: E402
+from core.application.catalog.resource_query import ResourceQueryService  # noqa: E402
+from core.domain.enums import ResourceType  # noqa: E402
+from core.domain.resource import Resource  # noqa: E402
 from core.domain.sync import GroupInfo, Page  # noqa: E402
 
 
@@ -163,13 +167,34 @@ async def test_files_explicit_group_keeps_single_scope(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_files_unknown_online_set_keeps_owned_groups(monkeypatch):
-    """在线集合未知（回调未接线）→ 仅保留无账号归属的群（不误隐藏 owned 群）。"""
+async def test_files_all_accounts_offline_returns_no_rows(monkeypatch, tmp_path):
+    """在线集合为空（全部账号离线/未解析）→ 有归属账号的群没有存活信号可依，
+    被凋零过滤（仅保留无账号归属的群）；数据不删除，重连后恢复。
+
+    存活集合为空 → groups=[] 是空集语义（“匹配任何群”都不成立）→ 必须返回
+    空行集，而不是被当成“不过滤”把全量列表泄漏出去（H8）。
+
+    这里走真实 store 查询路径并断言返回的行集合：旧用例只断言
+    rq.groups == []，即只断言了 bug 的输入（无论 store 怎么解释空列表都
+    成立），永不可能失败。"""
     _patch_request(monkeypatch, {})
-    svc = _make_services(_groups(), online_ids=set())
-    await api_files(svc)
-    rq = svc.query.seen[0]
-    assert rq.groups == []
+    store = SqliteMetaStore(tmp_path / "meta.db")
+    await store.init()
+    try:
+        await store.upsert_resources([
+            Resource(
+                group_id=g, type=ResourceType.FILE, name=f"{g}.zip",
+                source_ref=f"ref_{g}", size=10, created_at=1700000000,
+            )
+            for g in ("g1", "g2", "g3")
+        ])
+        svc = _make_services(_groups(), online_ids=set())
+        svc.query = ResourceQueryService(store)  # 真实 store 查询路径
+        result = await api_files(svc)
+        assert result["items"] == []
+        assert result["total"] == 0
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

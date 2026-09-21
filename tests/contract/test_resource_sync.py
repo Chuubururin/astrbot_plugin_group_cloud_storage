@@ -31,7 +31,7 @@ async def store(tmp_path):
 
 @pytest.fixture
 async def sync_env(store):
-    api = FakeOneBotApi(build_tree(file_total=300, folder_total=5, files_per_folder=20))
+    api = FakeOneBotApi(build_tree(folder_total=5, files_per_folder=20))
     svc = ResourceSyncService(api, store)
     return store, api, svc
 
@@ -89,7 +89,7 @@ async def test_ac9_partial_failure_no_orphan_cleanup(tmp_path):
         size=1, uploader_id="10001", created_at=1,
     )
     await store.upsert_resources([old])
-    tree = build_tree(file_total=40, folder_total=2, files_per_folder=10)
+    tree = build_tree(folder_total=2, files_per_folder=10)
     api = FakeOneBotApi(tree, fail_folders={"folder_1"})
     svc = ResourceSyncService(api, store)
     result = await svc.run_full_sync("g1", asyncio.Lock())
@@ -123,3 +123,23 @@ async def test_snapshot_written_on_full_sync(sync_env):
     # 通过 stats/detail 间接验证快照写入（快照表查询由 store 断言）
     stats = await store.stats("g1")
     assert stats.file_count == 100
+
+
+@pytest.mark.asyncio
+async def test_traverse_nested_folder_parent(store):
+    """深度>=2 的目录行 parent_id 必须指向其真实父目录（曾是高一级）。"""
+    file_b = dict(
+        file_id="f1", name="x.pdf", size=8, busid=102,
+        uploader_id="10001", uploader_name="Alice", upload_time=1700000000,
+    )
+    tree = {
+        None: ([], [dict(folder_id="fa", name="A")]),
+        "fa": ([], [dict(folder_id="fb", name="B")]),
+        "fb": ([file_b], []),
+    }
+    svc = ResourceSyncService(FakeOneBotApi(tree), store)
+    result = await svc.run_full_sync("g1", asyncio.Lock())
+    assert result.status == SyncStatus.OK
+    rows = {r["folder_id"]: r["parent_id"] for r in await store.list_folders_detail("g1")}
+    assert rows["fa"] == ""
+    assert rows["fb"] == "fa"
