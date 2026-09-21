@@ -93,8 +93,9 @@ class LifecycleManager:
                 # with _inited already True a raised init() would make every
                 # later call take the idempotent short-circuit while bot
                 # resolution / periodic scan / bridge recovery never started.
-                # Same fail-open stance as the empty-token branch inside
-                # dlserver.start() (warn loudly, keep the plugin alive).
+                # Every post-init step is therefore isolated on its own (log
+                # loudly, keep the plugin alive) — same fail-open stance as the
+                # empty-token branch inside dlserver.start().
                 try:
                     await self.dlserver.start()
                 except Exception as e:
@@ -102,23 +103,65 @@ class LifecycleManager:
                         f"[group_cloud_storage] download server start failed "
                         f"(plugin continues without it): {e}"
                     )
-                await self.resolve_platform_bot()
-                await self.maybe_submit_scan()
-                self._known_accounts = {
-                    str(a) for a in self._resolver.get_online_account_ids()
-                }
-                if (
-                    self._periodic_resolve_task is None
-                    or self._periodic_resolve_task.done()
-                ):
-                    self._periodic_resolve_task = self._create_runtime_task(
-                        self._periodic_resolve_and_scan(),
-                        name="periodic-bot-resolve",
+                try:
+                    await self.resolve_platform_bot()
+                except Exception as e:
+                    logger.warning(
+                        f"[group_cloud_storage] platform bot resolve failed "
+                        f"(plugin continues without it): {e}"
+                    )
+                try:
+                    await self.maybe_submit_scan()
+                except Exception as e:
+                    logger.warning(
+                        f"[group_cloud_storage] initial scan submit failed "
+                        f"(plugin continues without it): {e}"
+                    )
+                try:
+                    self._known_accounts = {
+                        str(a) for a in self._resolver.get_online_account_ids()
+                    }
+                except Exception as e:
+                    logger.warning(
+                        f"[group_cloud_storage] online account snapshot failed "
+                        f"(plugin continues without it): {e}"
+                    )
+                try:
+                    if (
+                        self._periodic_resolve_task is None
+                        or self._periodic_resolve_task.done()
+                    ):
+                        self._periodic_resolve_task = self._create_runtime_task(
+                            self._periodic_resolve_and_scan(),
+                            name="periodic-bot-resolve",
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[group_cloud_storage] periodic resolve task start failed "
+                        f"(plugin continues without it): {e}"
                     )
                 if self.bridge is not None:
-                    self._create_runtime_task(
-                        self.bridge.recover(), name="bridge-recover"
-                    )
+                    # Advisory read-only check that openlist_dst_dir sits under
+                    # a real mount.  OpenList cannot create mount points, so a
+                    # misconfigured root turns every bridge_out into a retriable
+                    # IO failure that never heals (W-1).  Loud log, never fatal
+                    # - same fail-open stance as dlserver.start() above.
+                    try:
+                        await self.bridge.preflight_dst()
+                    except Exception as e:
+                        logger.warning(
+                            f"[group_cloud_storage] bridge preflight raised "
+                            f"(plugin continues): {e}"
+                        )
+                    try:
+                        self._create_runtime_task(
+                            self.bridge.recover(), name="bridge-recover"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[group_cloud_storage] bridge recovery start failed "
+                            f"(plugin continues without it): {e}"
+                        )
                 logger.info("[group_cloud_storage] runtime initialized")
 
     async def resolve_platform_bot(self) -> None:
