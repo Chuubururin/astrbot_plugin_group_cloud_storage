@@ -5,10 +5,33 @@
  * long text reassembled from shards reports any missing parts so the
  * user knows the rebuild is incomplete. Sandbox-safe overlay.
  *
+ * The overlay reuses .modal-overlay, so the global shortcut handler
+ * (keyboard.js) defers Escape to it: without a listener of its own,
+ * Escape over the viewer was a silent no-op.
+ *
  * @module components/text-viewer
  */
 
 let overlay = null;
+let lastFocused = null;
+
+/** Close the viewer: hide, unbind Escape, restore the opener's focus. */
+function close() {
+  if (!overlay || overlay.classList.contains('hidden')) return;
+  overlay.classList.add('hidden');
+  document.removeEventListener('keydown', onKeydown);
+  if (lastFocused && typeof lastFocused.focus === 'function') {
+    try { lastFocused.focus(); } catch (e) { /* opener detached */ }
+  }
+  lastFocused = null;
+}
+
+/** Escape closes the viewer (the overlay owns the key while open). */
+function onKeydown(e) {
+  if (e.key !== 'Escape') return;
+  e.preventDefault();
+  close();
+}
 
 function ensure() {
   if (overlay) return;
@@ -24,7 +47,6 @@ function ensure() {
     </div>
   `;
   document.body.appendChild(overlay);
-  const close = () => overlay.classList.add('hidden');
   overlay.querySelector('.modal-ok').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 }
@@ -43,5 +65,11 @@ export function showTextViewer(name, data) {
     ? `\n\n[缺少分片: ${missing.join(', ')}，全文可能不完整]`
     : '';
   pre.textContent = (data.text || '(空)') + note;
+  lastFocused = document.activeElement;
   overlay.classList.remove('hidden');
+  // Bound only while open: a lingering listener would swallow Escape on
+  // every later screen.
+  document.removeEventListener('keydown', onKeydown);
+  document.addEventListener('keydown', onKeydown);
+  overlay.querySelector('.modal-ok')?.focus();
 }

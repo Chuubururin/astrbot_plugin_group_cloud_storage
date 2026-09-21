@@ -9,13 +9,20 @@
 import { getState, refresh } from '../store.js';
 import { API, apiPost } from '../api.js';
 import { copyToClipboard } from '../utils/helpers.js';
+import { rowGroupFor } from '../utils/group.js';
 import { showRaw } from '../components/context-menu.js';
 import { promptEx, confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 
 /** Build and show the folder-row context menu (group files source only). */
 export function showGroupFolderCtx(x, y, item) {
-  const groupId = getState().currentGroup || '';
+  // The ".." row is navigation, not a folder. file-rows.js already keeps it
+  // out of this branch, but the guard is repeated here because folder-delete
+  // is destructive and a stray caller must not be able to reach it.
+  if (item && (item.is_up || String(item.id || '') === '..')) return;
+  // Row-first: the aggregated view has no currentGroup, but every folder
+  // row carries its own group_id, so the row is authoritative.
+  const groupId = rowGroupFor(getState(), item, 'group');
   const folderId = String(item.id || '');
   showRaw(x, y, [
     { id: 'rename', label: '重命名', icon: 'EDIT' },
@@ -40,8 +47,8 @@ export function showGroupFolderCtx(x, y, item) {
         toast('文件夹已删除', 'success');
         refresh('files');
       } else if (id === 'copy-path') {
-        await copyToClipboard(item.name || '');
-        toast('名称已复制', 'success');
+        const ok = await copyToClipboard(item.name || '');
+        toast(ok ? '名称已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
       }
     } catch (e) {
       toast(`操作失败: ${e.message || e}`, 'error');

@@ -64,12 +64,19 @@ class IntegrityMixin(StorePart):
 async def check_integrity(db_path: str | Path) -> dict:
     """Check SQLite database integrity.
 
+    ``PRAGMA integrity_check`` scans the whole database (seconds on a large
+    file), so the blocking work runs in a worker thread: the event loop keeps
+    serving requests while the check is in flight, like backup()/restore().
+
     Returns:
         {"ok": bool, "errors": list[str], "warnings": list[str]}
     """
+    return await asyncio.to_thread(_check_integrity_sync, Path(db_path))
+
+
+def _check_integrity_sync(db_path: Path) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
-    db_path = Path(db_path)
 
     if not db_path.exists():
         return {"ok": False, "errors": ["database file not found"], "warnings": []}

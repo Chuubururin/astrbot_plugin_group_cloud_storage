@@ -18,8 +18,8 @@ class IngestContext:
     tmp_dir: Path
     transfer: Any = None
     converter: Any = None
-    essence_chunk_chars: int = 4500
-    video_segment_seconds: int = 600
+    essence_chunk_chars: int = 4000
+    video_segment_seconds: int = 599
     fetch_max_bytes: int = 2 * 1024**3
     fetch_timeout: float = 180.0
     sync_locks: dict[str, asyncio.Lock] = field(default_factory=dict)

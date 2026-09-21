@@ -133,6 +133,17 @@ class FoldersMixin(StorePart):
                 )
             )
 
+        # A non-NULL but malformed meta makes json_extract raise "malformed
+        # JSON". The old text guard (meta NOT LIKE ...) was tolerant of that;
+        # this DELETE runs on every album/essence ingest, so one bad row used to
+        # abort the whole _reconcile (commit + upsert_resources never ran).
+        # NOT json_valid(meta) keeps such rows in scope: they cannot prove they
+        # are a self-built text_split row, so they reconcile away like before.
+        _NOT_TEXT_SPLIT = (
+            "(meta IS NULL OR NOT json_valid(meta) "
+            "OR COALESCE(json_extract(meta, '$.kind'), '') != 'text_split')"
+        )
+
         def _reconcile(conn: sqlite3.Connection):
             for t in ("album", "essence"):
                 refs = [
@@ -143,13 +154,13 @@ class FoldersMixin(StorePart):
                     conn.execute(
                         f"DELETE FROM resources WHERE group_id=? AND type=? "
                         f"AND source_ref NOT IN ({marks}) "
-                        f'AND (meta IS NULL OR meta NOT LIKE \'%"kind": "text_split"%\')',
+                        f"AND {_NOT_TEXT_SPLIT}",
                         [group_id, t, *refs],
                     )
                 else:
                     conn.execute(
-                        "DELETE FROM resources WHERE group_id=? AND type=? "
-                        'AND (meta IS NULL OR meta NOT LIKE \'%"kind": "text_split"%\')',
+                        f"DELETE FROM resources WHERE group_id=? AND type=? "
+                        f"AND {_NOT_TEXT_SPLIT}",
                         (group_id, t),
                     )
             conn.commit()

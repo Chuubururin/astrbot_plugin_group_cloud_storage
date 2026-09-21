@@ -107,3 +107,25 @@ async def test_json_body_list_rejected(monkeypatch):
 async def test_json_body_parse_error_falls_back_to_empty(monkeypatch):
     monkeypatch.setattr(av, "request", _FakeRequest(RuntimeError("bad json")))
     assert await json_body() == {}
+
+
+# ---------- M24: cast 溢出必须归入 400 契约 ----------
+
+def test_pick_int_cast_overflow_is_validation_error():
+    """JSON 合法大数（1e400 → float('inf')）不得以 OverflowError 穿透。
+
+    实测路径：webapi/netdisk_query.py 的 page/page_size 直接 cast=int；
+    溢出穿透后 _Bound 只能落到 except Exception → 500 + traceback。
+    """
+    import json
+
+    body = json.loads('{"page": 1e400}')
+    assert body["page"] == float("inf")  # 前提：json 解析本身合法
+    with pytest.raises(ApiValidationError) as e:
+        pick(body, "page", cast=int, default=1)
+    assert "page" in str(e.value) and "int" in str(e.value)
+
+
+def test_pick_int_cast_infinity_literal():
+    with pytest.raises(ApiValidationError):
+        pick({"page_size": float("inf")}, "page_size", cast=int, default=50)

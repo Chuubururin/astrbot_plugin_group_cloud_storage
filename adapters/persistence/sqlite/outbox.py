@@ -29,6 +29,7 @@ INSERT INTO op_ledger
     created_at, updated_at)
    VALUES (?,?,?,?,?,?,?,?,?)
    ON CONFLICT(task_id) DO UPDATE SET
+     payload=excluded.payload,
      state=excluded.state,
      retries=excluded.retries,
      error=CASE WHEN excluded.error IS NOT NULL THEN excluded.error
@@ -42,6 +43,15 @@ INSERT INTO op_ledger
       OR (op_ledger.state != 'cancelled'
           AND (excluded.state = 'done' OR excluded.state = 'failed'))
 """
+#
+# payload IS refreshed on conflict, deliberately. It used to be INSERT-only,
+# which meant every payload key a handler added while running was silently
+# dropped: the ledger kept the snapshot taken before the handler started.
+# Two live defects followed -- essence_save's sent_parts ledger was lost so a
+# crash re-sent every part and orphaned the already-sent messages, and
+# upload's staged parent_resource_id was lost so a retry created a second
+# volume parent and orphaned the first. It also starved the breakpoint resume
+# path (webapi/tasks.py), which re-submits the op from row["payload"].
 
 
 def _now_ts() -> str:
@@ -163,21 +173,23 @@ class OutboxMixin(StorePart):
         self, task_id: str, action: str, before: dict | None, after: dict | None
     ) -> None:
         def _do(conn: sqlite3.Connection):
-            row = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) + 1 AS s FROM op_ops WHERE task_id=?",
-                (task_id,),
-            ).fetchone()
-            seq = row["s"] if row else 1
+            # seq is computed inside the INSERT statement: a separate
+            # "SELECT MAX(seq)+1" followed by an INSERT let two writers read
+            # the same MAX and both insert it (op_ops only has the plain
+            # idx_ops_task index, no unique constraint), silently producing
+            # duplicate sequence numbers in the operation log. One statement
+            # makes read+write a single atomic step.
             conn.execute(
                 """INSERT INTO op_ops (task_id, seq, action, before, after, created_at)
-                   VALUES (?,?,?,?,?,?)""",
+                   SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?
+                   FROM op_ops WHERE task_id=?""",
                 (
                     task_id,
-                    seq,
                     action,
                     json.dumps(before or {}, ensure_ascii=False),
                     json.dumps(after or {}, ensure_ascii=False),
                     _now_ts(),
+                    task_id,
                 ),
             )
             conn.commit()

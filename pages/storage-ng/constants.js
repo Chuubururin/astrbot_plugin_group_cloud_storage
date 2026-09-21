@@ -9,14 +9,16 @@
  */
 
 // ---- Hard limits (platform constraints) ----
-export const VOLUME_BYTES = 95 * 1024 * 1024;   // files above this split into volumes (95MB)
-export const CHUNK_SIZE = 4500;                 // text chunk budget incl. reassembly marker
-export const VIDEO_SEGMENT = 600;               // album video segment ceiling in seconds
-export const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024;  // 2GB client upload cap
-export const MAX_BATCH_ITEMS = 20;              // per-request batch operation cap
+export const VOLUME_BYTES = 95 * 1024 * 1024;   // > this -> volume split (config volume_threshold '95MB')
+export const QQ_TEXT_LIMIT = 4500;              // QQ single-message hard ceiling (not a split threshold)
+export const ESSENCE_CHUNK_CHARS = 4000;        // essence split threshold (config essence_chunk_size)
+export const VIDEO_SEGMENT_SECONDS = 599;       // album video: >= this must be split (config video_segment_seconds)
+export const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024;  // 2GB client upload cap (config fetch_max_size)
+export const MAX_BATCH_ITEMS = 200;             // backend cap for files/batch-{delete,move,tags}
+export const MAX_LINKS_ITEMS = 20;              // backend cap for files/links
 
 // ---- Pagination ----
-export const DEFAULT_PAGE_SIZE = 20;
+export const DEFAULT_PAGE_SIZE = 10;            // matches config page_size default; page may override
 export const MAX_PAGE_SIZE = 100;
 
 // ---- Timeouts and pacing ----
@@ -64,6 +66,17 @@ export const BRIDGE_STATES = {
   RUNNING: 'running',
   DONE: 'done',
   FAILED: 'failed',
+  // Returned by the single-task query when the task id is unknown
+  // (bridge/task) and written to archive_map by the inbound recovery path.
+  UNKNOWN: 'unknown',
+};
+
+/** OpenList bridge capability states (bridge/status.capability). */
+export const BRIDGE_CAPABILITIES = {
+  DISABLED: 'disabled',
+  UNKNOWN: 'UNKNOWN',
+  OK: 'OK',
+  BROKEN: 'BROKEN',
 };
 
 /** SSE event kinds that identify the producing subsystem. */

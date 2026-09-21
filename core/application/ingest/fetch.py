@@ -5,10 +5,33 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.log import logger
+
+from .video import album_has_media, remote_has_file
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".wmv"}
+# Downstream contracts enforce a 1..80 name/title (submit_essence_save raises,
+# album uploads reject); clamp where the name is derived from the URL path.
+_NAME_MAX = 80
+# to_essence reads the whole downloaded document into memory as one string,
+# while the download itself may be up to fetch_max_bytes (2GB by default).
+# 32MiB ~= 8M chars ~= 2000 parts at the 4000-char chunk limit.
+_ESSENCE_TEXT_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _clamp_name(name: str) -> str:
+    """Clamp a name to the 1..80 downstream contract, keeping the extension so
+    media-type detection still works. A long URL path segment used to fail the
+    whole import *after* the download finished (and then retried 3 times)."""
+    if 0 < len(name) <= _NAME_MAX:
+        return name
+    stem, dot, suffix = name.rpartition(".")
+    if dot and 0 < len(suffix) <= 16:
+        keep = max(1, _NAME_MAX - len(suffix) - 1)
+        return f"{stem[:keep]}.{suffix}"
+    return name[:_NAME_MAX] or "fetched"
 
 
 class FetchMixin:
@@ -70,7 +93,9 @@ class FetchMixin:
 
     async def _do_fetch(self, op) -> None:
         url = op.payload["url"]
-        name = op.payload.get("name") or Path(urlsplit(url).path).name or "fetched"
+        name = _clamp_name(
+            op.payload.get("name") or Path(urlsplit(url).path).name or "fetched"
+        )
         to_album = bool(op.payload.get("to_album"))
         to_essence = bool(op.payload.get("to_essence"))
         convert_to = str(op.payload.get("convert_to") or "")
@@ -116,8 +141,36 @@ class FetchMixin:
 
             if to_essence:
                 await self.queue.pause_check(op)
+                # Replay guard: a replay derives a brand-new
+                # essence_save task (new task_id), so without this the
+                # group got the document twice, and the first batch's
+                # message_ids lived only in the derived task's payload.
+                if bool(getattr(op, "replayed", False)):
+                    logger.info(
+                        f"[ingest] fetch replay: essence task for {name} "
+                        f"already submitted ({op.target}), skipping"
+                    )
+                    return
                 # URL document read: text is sharded into essence messages.
-                text = staged.read_text(encoding="utf-8", errors="replace")
+                # Bounded (the download may be GBs) and off the event loop:
+                # the previous plain read_text() loaded the whole body into
+                # RAM and blocked the loop while doing it.
+                if staged.stat().st_size > _ESSENCE_TEXT_MAX_BYTES:
+                    # Static condition: the same downloaded file is always too
+                    # big. A plain ValueError is classified as retriable by the
+                    # queue, which re-downloaded the whole 32MiB+ document and
+                    # failed identically 4 times (2/4/8s backoff). LOCAL_ERROR
+                    # ends it on the first attempt -- the same fix as the
+                    # sibling gates in video.py and album.py.
+                    raise OneBotApiError(
+                        OneBotErrorKind.LOCAL_ERROR,
+                        "fetch",
+                        "essence text source exceeds "
+                        f"{_ESSENCE_TEXT_MAX_BYTES} bytes",
+                    )
+                text = await asyncio.to_thread(
+                    staged.read_text, encoding="utf-8", errors="replace"
+                )
                 task_id = await self.submit_essence_save(op.target, name, text)
                 logger.info(f"[ingest] url doc -> essence '{name}' in {op.target} ({task_id})")
                 return
@@ -145,9 +198,19 @@ class FetchMixin:
                             renamed.unlink()
                         staged.replace(renamed)
                         upload_path = renamed
-                    await self.api.upload_image_to_qun_album(
-                        op.target, album_id, album_name, upload_path.as_posix()
-                    )
+                    # Replay guard: same family as album.py's BUG-13
+                    # skip -- a replay must not list the image twice.
+                    if bool(getattr(op, "replayed", False)) and await album_has_media(
+                        self.api, op.target, album_id, upload_path.name
+                    ):
+                        logger.info(
+                            f"[ingest] fetch replay: {upload_path.name} already in "
+                            f"'{album_name}' ({op.target}), skipping re-upload"
+                        )
+                    else:
+                        await self.api.upload_image_to_qun_album(
+                            op.target, album_id, album_name, upload_path.as_posix()
+                        )
                     # Refresh must not fail the op after the irreversible
                     # upload (BUG-13: replay would re-upload the media)
                     await self._refresh_album_essence(op.target)
@@ -159,19 +222,47 @@ class FetchMixin:
                         f"fetch_video_{uuid.uuid4().hex[:10]}{ext}"
                     )
                     staged.replace(video_path)
-                    task_id = await self.submit_video_album(
-                        op.target, video_path.as_posix(), name, album_name
-                    )
-                    logger.info(
-                        f"[ingest] video -> album '{album_name}' in {op.target} ({task_id})"
-                    )
+                    # Replay guard: a replay must not derive a second
+                    # video_album task (it would shard the same source
+                    # twice). The source is re-downloaded on every replay
+                    # (the finally below drops *staged*), so the only
+                    # work skipped here is the derived submit.
+                    if bool(getattr(op, "replayed", False)):
+                        # The staged copy was moved out of *staged* (which
+                        # the finally below only removes under its old name),
+                        # and no derived task will ever consume it: drop it
+                        # here or it leaks in tmp_dir.
+                        video_path.unlink(missing_ok=True)
+                        logger.info(
+                            f"[ingest] fetch replay: video_album task for {name} "
+                            f"already submitted ({op.target}), skipping"
+                        )
+                    else:
+                        task_id = await self.submit_video_album(
+                            op.target, video_path.as_posix(), name, album_name
+                        )
+                        logger.info(
+                            f"[ingest] video -> album '{album_name}' in {op.target} ({task_id})"
+                        )
                 else:
                     raise ValueError(
                         "album target only accepts images/videos (jpg/png/gif/webp/bmp/mp4/mkv/...)"
                     )
             else:
                 await self.queue.pause_check(op)
-                await self.api.upload_group_file(op.target, staged.as_posix(), name)
+                # Replay guard: the group-file upload is not idempotent;
+                # a replay that re-uploads leaves two copies under one
+                # name (same family as the video direct-upload guard).
+                already = bool(
+                    getattr(op, "replayed", False)
+                ) and await remote_has_file(self.api, op.target, name)
+                if already:
+                    logger.info(
+                        f"[ingest] fetch replay: {name} already in "
+                        f"{op.target}, skipping re-upload"
+                    )
+                else:
+                    await self.api.upload_group_file(op.target, staged.as_posix(), name)
                 lock = self._sync_locks.setdefault(op.target, asyncio.Lock())
                 result = await self.sync.run_full_sync(op.target, lock)
                 if not result.ok:

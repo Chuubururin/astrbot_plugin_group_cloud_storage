@@ -121,18 +121,38 @@ class ScanMixin:
             # Album/essence collection persisted as resources (full cadence,
             # every group)
             if include_capacity:
+                album_ok = essence_ok = False
                 try:
                     await self.queue.acquire()
                     albums_raw = await self._with_timeout(api.get_qun_album_list(gid))
                     album_c = len(albums_raw)
+                    album_ok = True
                     await self.queue.acquire()
                     essences_raw = await self._with_timeout(api.get_essence_msg_list(gid))
                     essence_c = len(essences_raw)
+                    essence_ok = True
                     await self.store.upsert_album_essence(gid, albums_raw, essences_raw)
                 except Exception as e:
                     logger.debug(
                         f"[group-scan] album/essence unavailable for {gid}: {e}"
                     )
+                if prev:
+                    # A failed collection leaves the counter at its 0
+                    # initialiser, and upsert_groups overwrites album_count /
+                    # essence_count unconditionally -> one transient API error
+                    # would wipe the stored count. Same guard the capacity
+                    # block above already has.
+                    if not album_ok:
+                        album_c = prev.album_count
+                    if not essence_ok:
+                        essence_c = prev.essence_count
+            elif prev:
+                # include_capacity=False: no album/essence collection runs at
+                # all, so the counters stay at the 0 initialiser -- and
+                # upsert_groups writes them unconditionally. Keep the stored
+                # values instead of zeroing them.
+                album_c = prev.album_count
+                essence_c = prev.essence_count
             if role == "owned":
                 owned += 1
             # Persist while scanning: lists are visible immediately during the
@@ -295,6 +315,10 @@ class ScanMixin:
             # New group or unknown capacity -> judge + collect capacity;
             # known group -> name/timestamp only
             need = prev is None or prev.total_space <= 0 or not prev.last_scan_at
+            # include_capacity=False (caller only wants the group list / role
+            # resolution) used to fall through to a full capacity + album/
+            # essence collection: the parameter was declared and never read.
+            collect = need and include_capacity
             role = prev.role if prev else "unknown"
             album_c = essence_c = 0
             cap_used = cap_total = cap_count = cap_limit = 0
@@ -312,41 +336,63 @@ class ScanMixin:
                         logger.warning(f"[group-scan] role judge failed for {gid}: {e}")
                         role = prev.role if prev else "unknown"
                         failed += 1
-                try:
-                    await self.queue.acquire(mult=2.0)
-                    _cap = await self._with_timeout(
-                        self._capacity_of(gid, api)
-                    )
-                    if _cap is not None:
-                        cap_used, cap_total, cap_count, cap_limit = _cap
-                        cap_ok = True
-                except Exception as e:
-                    logger.debug(f"[group-scan] fs_info unavailable for {gid}: {e}")
-                if not cap_ok and prev:
+                if include_capacity:
+                    try:
+                        await self.queue.acquire(mult=2.0)
+                        _cap = await self._with_timeout(
+                            self._capacity_of(gid, api)
+                        )
+                        if _cap is not None:
+                            cap_used, cap_total, cap_count, cap_limit = _cap
+                            cap_ok = True
+                    except Exception as e:
+                        logger.debug(f"[group-scan] fs_info unavailable for {gid}: {e}")
+                    if not cap_ok and prev:
+                        cap_used = prev.used_space
+                        cap_total = prev.total_space
+                        cap_count = prev.file_count
+                        cap_limit = prev.limit_count
+                    # Resource stats: album/essence (collected only for new or
+                    # unknown groups, persisted as resources)
+                    album_ok = essence_ok = False
+                    try:
+                        await self.queue.acquire(mult=2.0)
+                        albums_raw = await self._with_timeout(api.get_qun_album_list(gid))
+                        album_c = len(albums_raw)
+                        album_ok = True
+                        await self.queue.acquire(mult=2.0)
+                        essences_raw = await self._with_timeout(api.get_essence_msg_list(gid))
+                        essence_c = len(essences_raw)
+                        essence_ok = True
+                        await self.store.upsert_album_essence(gid, albums_raw, essences_raw)
+                    except Exception as e:
+                        logger.debug(
+                            f"[group-scan] album/essence unavailable for {gid}: {e}"
+                        )
+                    if prev:
+                        # Same guard as capacity: never overwrite a stored
+                        # album/essence count with the 0 initialiser after a
+                        # failed fetch (upsert_groups is unconditional).
+                        if not album_ok:
+                            album_c = prev.album_count
+                        if not essence_ok:
+                            essence_c = prev.essence_count
+                elif prev:
+                    # include_capacity=False: the caller only wants
+                    # role resolution / the group list -- never
+                    # overwrite the stored capacity with zeros.
                     cap_used = prev.used_space
                     cap_total = prev.total_space
                     cap_count = prev.file_count
                     cap_limit = prev.limit_count
-                # Resource stats: album/essence (collected only for new or
-                # unknown groups, persisted as resources)
-                try:
-                    await self.queue.acquire(mult=2.0)
-                    albums_raw = await self._with_timeout(api.get_qun_album_list(gid))
-                    album_c = len(albums_raw)
-                    await self.queue.acquire(mult=2.0)
-                    essences_raw = await self._with_timeout(api.get_essence_msg_list(gid))
-                    essence_c = len(essences_raw)
-                    await self.store.upsert_album_essence(gid, albums_raw, essences_raw)
-                except Exception as e:
-                    logger.debug(
-                        f"[group-scan] album/essence unavailable for {gid}: {e}"
-                    )
             else:
                 # Known groups skip the cloud capacity fetch; keep prev values
                 cap_used = prev.used_space
                 cap_total = prev.total_space
                 cap_count = prev.file_count
                 cap_limit = prev.limit_count
+            album_out = album_c if collect else (prev.album_count if prev else 0)
+            essence_out = essence_c if collect else (prev.essence_count if prev else 0)
             if role == "owned":
                 owned += 1
             # Persist while scanning: lists are visible immediately during
@@ -362,8 +408,8 @@ class ScanMixin:
                         total_space=cap_total,
                         file_count=cap_count,
                         limit_count=cap_limit,
-                        album_count=album_c if need else prev.album_count,
-                        essence_count=essence_c if need else prev.essence_count,
+                        album_count=album_out,
+                        essence_count=essence_out,
                         account_id=me,
                     )
                 ]
@@ -376,8 +422,8 @@ class ScanMixin:
                         group_id=gid,
                         account_id=me,
                         file_count=cap_count,
-                        album_count=album_c if need else prev.album_count,
-                        essence_count=essence_c if need else prev.essence_count,
+                        album_count=album_out,
+                        essence_count=essence_out,
                         is_new=prev is None,
                         role_determined=role != "unknown",
                     )
@@ -406,6 +452,34 @@ class ScanMixin:
                     }
                 )
                 last_pub = time.monotonic()
+        # L5: converge groups that were NOT listed this round. A group the bot
+        # was kicked from (or left) never appears in list_groups() again, so the
+        # prev-guards above (elif prev: / album_out) kept its stale
+        # role/capacity/album counters forever, and managed stayed 1 so the
+        # startup/periodic sweeps kept scheduling its file_scan chain.
+        #
+        # Only an unfiltered listing is authoritative: with group_filter set
+        # (per-bot membership assignment or an explicit group_ids request) an
+        # absent group may simply belong to another account, so convergence is
+        # skipped then. The stored account_id must match this account for the
+        # same reason -- another account's group is not ours to unmanage. Groups
+        # that WERE listed are never touched here, even when a field came back
+        # empty (the guards above already preserve their prev values).
+        if group_filter is None and me:
+            listed = {str(g.get("group_id") or "") for g in groups}
+            gone = [
+                gid
+                for gid, prev_g in known.items()
+                if gid not in listed
+                and getattr(prev_g, "managed", 1)
+                and str(getattr(prev_g, "account_id", "") or "") == me
+            ]
+            if gone:
+                await self.store.set_groups_managed(gone, 0)
+                logger.info(
+                    f"[group-scan] incremental: {len(gone)} group(s) no longer "
+                    f"listed -> managed=0 (kicked/left)"
+                )
         self.last_result = ScanResult(total=group_total, owned=owned, scanned_at=now, failed=failed)
         logger.info(
             f"[group-scan] incremental done: total={group_total} "

@@ -1,55 +1,29 @@
 """Page backend APIs — distribution/convert domain.
 
-The four distribution endpoints (files/albums/essence/netdisk distribute);
-imports the shared infrastructure from webapi_base.
+Hosts the four distribution handlers (files/albums/essence/netdisk
+distribute). Route registration is NOT done here: webapi/routes.py is the
+single route catalog, wired by webapi.register_page_apis.
 """
 
 from __future__ import annotations
 
 from .webapi_base import (
-    PLUGIN_NAME,
-    _Bound,
     _group_open_error,
     _normalize_convert_to,
     _param,
 )
-from astrbot.api.star import Context
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 from core.api_validate import json_body
 from commands.handlers import Services
 
 
-__all__ = ["register_ext_apis"]
-
-
-def register_ext_apis(context: Context, s: Services) -> None:
-    """Register distribution/convert endpoints (catalog collection is wrapped
-    centrally by webapi.register_page_apis)."""
-    context.register_web_api(
-        f"/{PLUGIN_NAME}/files/distribute",
-        _Bound(s, api_files_distribute),
-        ["POST"],
-        "文件下载分发（local/netdisk/album/essence）",
-    )
-    context.register_web_api(
-        f"/{PLUGIN_NAME}/albums/distribute",
-        _Bound(s, api_albums_distribute),
-        ["POST"],
-        "相册媒体下载分发（local/netdisk/group/essence）",
-    )
-    context.register_web_api(
-        f"/{PLUGIN_NAME}/essence/distribute",
-        _Bound(s, api_essence_distribute),
-        ["POST"],
-        "精华全文下载分发（local/copy/netdisk/group/album）",
-    )
-    context.register_web_api(
-        f"/{PLUGIN_NAME}/netdisk/distribute",
-        _Bound(s, api_netdisk_distribute),
-        ["POST"],
-        "网盘文件下载分发（local/group/album/essence）",
-    )
+__all__ = [
+    "api_files_distribute",
+    "api_albums_distribute",
+    "api_essence_distribute",
+    "api_netdisk_distribute",
+]
 
 
 async def api_files_distribute(s: Services) -> dict:
@@ -100,6 +74,11 @@ async def api_albums_distribute(s: Services) -> dict:
 async def api_essence_distribute(s: Services) -> dict:
     """Distribute essence full text for download (target=local|copy|netdisk|group)."""
     group = await _param("group", "")
+    # Same open gate as the files/albums/netdisk distribute handlers: an
+    # offline owning account or a dissolved group must not be able to submit a
+    # transfer task (gate fails closed; wither semantics keep the data).
+    if err := await _group_open_error(s, group):
+        return err
     payload = await json_body()
     rid = int(payload.get("id") or 0)
     target = str(payload.get("target") or "")

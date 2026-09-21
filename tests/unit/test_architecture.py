@@ -439,4 +439,5 @@ class TestSchemaVersion:
         importlib.reload(_m)
         # 钉死当前版本：升级 schema 时必须同步更新此断言，
         # 防止版本号被误降级或迁移链断裂也静默通过。
-        assert _m.SCHEMA_VERSION == 28
+        # 29: logical_key 列 + 部分唯一索引 idx_res_logical（一个逻辑文件一行）。
+        assert _m.SCHEMA_VERSION == 29

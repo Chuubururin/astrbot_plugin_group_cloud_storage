@@ -81,6 +81,23 @@ test('structure: no module imports removed legacy paths', () => {
   }
 });
 
+test('structure: command-defs modules follow the register*Commands naming convention', () => {
+  // command-defs.js registers the FILE domain only; the aggregate name belongs
+  // to command-registry.js. Mixing them up made the file-domain export claim
+  // the aggregate name (2026-09-21).
+  const defs = readFileSync(path.join(root, 'features', 'command-defs.js'), 'utf-8');
+  assert.ok(defs.includes('export function registerFilesCommands()'),
+    'command-defs.js must export registerFilesCommands (file domain)');
+  assert.ok(!defs.includes('export function registerAllCommands()'),
+    'command-defs.js must not claim the aggregate registerAllCommands');
+
+  const registry = readFileSync(path.join(root, 'features', 'command-registry.js'), 'utf-8');
+  assert.ok(registry.includes('export function registerAllCommands()'),
+    'command-registry.js owns the aggregate registerAllCommands');
+  assert.ok(registry.includes("from './command-defs.js'"),
+    'command-registry.js must import the file domain from command-defs.js');
+});
+
 test('structure: every JS module stays within the 300-line budget', () => {
   const files = walk(root).concat(
     readdirSync(path.join(root, 'testing')).filter((f) => f.endsWith('.js'))

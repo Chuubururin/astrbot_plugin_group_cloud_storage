@@ -323,6 +323,9 @@ async def api_netdisk_rename_batch(s: Services) -> dict:
     results = []
     errors = []
     for item in renames:
+        if not isinstance(item, dict):
+            errors.append(f"Invalid item: {item}")
+            continue
         path = item.get("path", "")
         name = item.get("name", "")
         if not path or not name:

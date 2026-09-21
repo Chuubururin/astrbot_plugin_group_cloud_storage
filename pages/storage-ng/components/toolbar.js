@@ -13,7 +13,7 @@
  * @module components/toolbar
  */
 
-import { getState, set, refresh } from '../store.js';
+import { getState, set, subscribe, refresh } from '../store.js';
 import { API } from '../api.js';
 import { getIcon } from '../icons.js';
 import { debounce } from '../utils/helpers.js';
@@ -71,8 +71,14 @@ const STATUS_CHIPS = [
   { value: 'none', label: '未下载' },
 ];
 
-/** Bind a chip row to a store key; the pick callback fires on change. */
-function bindChips(container, scopeId, chips, key, onPick) {
+/** Bind a chip row to a store key; the pick callback fires on change.
+ *
+ * `pageKey` is reset *before* set(key, val) on purpose: set() synchronously
+ * notifies the table's filter subscription, whose load reads the page
+ * number before its first await — resetting the page afterwards would never
+ * re-trigger a load, leaving "old page + new filter" with a pager showing
+ * page 1. */
+function bindChips(container, scopeId, chips, key, pageKey, onPick) {
   const wrap = container.querySelector(scopeId);
   if (!wrap) return;
   wrap.innerHTML = chips.map((c) =>
@@ -81,16 +87,18 @@ function bindChips(container, scopeId, chips, key, onPick) {
   wrap.addEventListener('click', (e) => {
     const btn = e.target.closest('.type-chip');
     if (!btn) return;
+    if (pageKey) set(pageKey, 1);
     set(key, btn.dataset.val);
     wrap.querySelectorAll('.type-chip').forEach((b) => b.classList.toggle('active', b === btn));
-    onPick(btn.dataset.val);
+    if (onPick) onPick(btn.dataset.val);
   });
 }
 
 /** Files toolbar. Upload entry is merged (local/URL/netdisk/album/essence/
  * browser-text upload all go through the upload modal); refresh has two
  * levels (all list / current group list); "new folder" is root-path only,
- * disabled inside folders (backend flat single-level semantics). */
+ * disabled inside folders (backend flat single-level semantics).
+ * @returns {function} unsubscribe for the folder subscription */
 export function initFilesToolbar(container) {
   container.className = 'toolbar';
   const canNewFolder = !getState().folder;
@@ -114,13 +122,10 @@ export function initFilesToolbar(container) {
     <input id="file-input" type="file" multiple style="display:none" />
   `;
 
-  bindChips(container, '#type-chips', TYPE_CHIPS, 'fileType', () => {
-    set('filePage', 1);
-  });
-  bindChips(container, '#status-chips', STATUS_CHIPS, 'fileStatus', () => {
-    set('filePage', 1);
-    refresh('files');
-  });
+  // 文件类型 chip 有 table 订阅（data-table 的 typeKey），页码重置必须
+  // 先于筛选变更；状态 chip 无订阅，显式 refresh 走同一条路径。
+  bindChips(container, '#type-chips', TYPE_CHIPS, 'fileType', 'filePage');
+  bindChips(container, '#status-chips', STATUS_CHIPS, 'fileStatus', 'filePage', () => refresh('files'));
 
   container.querySelector('#search-input')?.addEventListener('input', debounce(() => {
     set('searchQuery', container.querySelector('#search-input').value);
@@ -141,6 +146,13 @@ export function initFilesToolbar(container) {
       handleFileUpload(e.target.files);
       e.target.value = '';
     }
+  });
+
+  // 新建文件夹仅根路径可用：folder 会在进入/退出目录、切群回退时变化，
+  // 禁用态必须跟着重算（否则按钮停留在挂载时的状态）。返回清理函数。
+  const newFolderBtn = container.querySelector('#btn-new-folder');
+  return subscribe('folder', () => {
+    if (newFolderBtn) newFolderBtn.disabled = Boolean(getState().folder);
   });
 }
 
@@ -201,9 +213,8 @@ export function initNetdiskToolbar(container) {
 
   // Netdisk filters by extension locally (N4a); its chip state is isolated
   // from the files tab so switching tabs never leaks a filter (module rule).
-  bindChips(container, '#netdisk-type-chips', NETDISK_CHIPS, 'netdiskType', () => {
-    set('netdiskPage', 1);
-  });
+  // Page reset must precede the filter change (see bindChips).
+  bindChips(container, '#netdisk-type-chips', NETDISK_CHIPS, 'netdiskType', 'netdiskPage');
 
   container.querySelector('#btn-netdisk-refresh')?.addEventListener('click', () => refresh('netdisk'));
   // Netdisk upload matrix (five sources): local relay / URL link /

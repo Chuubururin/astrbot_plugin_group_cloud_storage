@@ -11,15 +11,7 @@
 import { getState, subscribe, set } from '../store.js';
 import { getIcon } from '../icons.js';
 import { escapeHtml, formatTimeFull } from '../utils/helpers.js';
-
-const STATE_CLASS = {
-  queued: 'st-pending',
-  started: 'st-running',
-  progress: 'st-running',
-  retry: 'st-running',
-  done: 'st-done',
-  failed: 'st-failed',
-};
+import { STATE_CLASS } from '../views/task-labels.js';
 
 /** Initialize the task panel (singleton appended to body). */
 export function initTaskPanel() {
@@ -64,7 +56,9 @@ function renderTasks(panel) {
   const tasks = getState().taskLog || [];
   if (count) count.textContent = tasks.length ? `${tasks.length} 条` : '';
 
-  // In-place update by log id : remove stale, update or append.
+  // In-place update by log id: drop stale rows, then place every row at its
+  // model index. pushTaskLog unshifts (newest first), so appending new rows
+  // would send each fresh event to the bottom of the scrollable list.
   const existing = new Map();
   for (const el of Array.from(list.children)) {
     if (el.dataset && el.dataset.key != null) existing.set(el.dataset.key, el);
@@ -73,11 +67,15 @@ function renderTasks(panel) {
   for (const [key, el] of existing) {
     if (!wantSet.has(key)) el.remove();
   }
-  for (const t of tasks) {
-    let el = existing.get(t.log_id);
-    if (el) updateRow(el, t);
-    else list.appendChild(buildRow(t));
-  }
+  tasks.forEach((t, i) => {
+    const el = existing.get(t.log_id);
+    if (el) {
+      updateRow(el, t);
+      if (list.children[i] !== el) list.insertBefore(el, list.children[i] || null);
+    } else {
+      list.insertBefore(buildRow(t), list.children[i] || null);
+    }
+  });
 }
 
 function buildRow(t) {

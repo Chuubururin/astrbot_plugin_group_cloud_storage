@@ -14,6 +14,7 @@
 
 import { API, apiGet as _apiGet, apiPost as _apiPost, download as sdkDownload } from '../api.js';
 import { copyToClipboard, runEachWithFailures } from '../utils/helpers.js';
+import { MAX_LINKS_ITEMS } from '../constants.js';
 import { rowGroup } from '../utils/group.js';
 import { showFormModal } from '../components/modal.js';
 import { targetOptions as _targetOptions } from './download-targets.js';
@@ -36,11 +37,19 @@ export async function promptDownloadTarget(allowed) {
 
 /**
  * Download-service address modal (HTTP/SFTP/SMB lines + copy HTTP on OK).
- * @param {Object} d - files/address response ({http_url, sftp?, note?})
+ *
+ * The address endpoint fails closed while download_server_enabled is false
+ * (the request itself 400s), so a response without `http_url` is a broken
+ * one: copying an empty clipboard and reporting success would be a lie.
+ * @param {Object} d - files/address response ({http_url, sftp?, smb?})
+ * @returns {Promise<boolean>} true = HTTP address copied; false = no usable
+ *   address, or the user dismissed the dialog
  */
 export async function showDownloadAddress(d) {
+  const httpUrl = (d && d.http_url) || '';
+  if (!httpUrl) return false;
   const lines = [
-    `HTTP：${d.http_url || '-'}`,
+    `HTTP：${httpUrl}`,
     d.sftp
       ? `SFTP：sftp://${d.sftp.user}:${d.sftp.password}@${d.sftp.host}:${d.sftp.port}${d.sftp.path}`
       : 'SFTP：未开启',
@@ -53,8 +62,9 @@ export async function showDownloadAddress(d) {
     { name: 'addr', label: '地址', type: 'textarea', rows: 5, value: lines },
   ], { okText: '复制 HTTP 地址' });
   if (res) {
-    await copyToClipboard(d.http_url || '');
-    return true;
+    // Report the real clipboard outcome: a false "已复制" here would hide a
+    // failed copy behind a success toast (and a success caller return).
+    return copyToClipboard(httpUrl);
   }
   return false;
 }
@@ -106,14 +116,21 @@ export async function downloadItems(ctx, target, opts = {}) {
     }
 
     case 'link': {
-      if (rows.length > 20) return { ok: false, done: 0, failed: ['直链单次最多 20 项'] };
+      if (rows.length > MAX_LINKS_ITEMS) {
+        return { ok: false, done: 0, failed: [`直链单次最多 ${MAX_LINKS_ITEMS} 项`] };
+      }
       const items = rows.map((f) => ({ id: Number(f.id), group: rowGroup(state, f) }));
       const data = await apiPost(API.FILES.LINKS, { items });
       const links = (data && data.links) || [];
       const errors = (data && data.errors) || [];
-      const text = links.map((l) => (l && l.url) || l).join('\n');
+      // Only entries carrying a url are usable; a link without one would be
+      // pasted as "[object Object]" — count it as a failure instead.
+      const urls = links.map((l) => (l && l.url) || '').filter(Boolean);
+      const text = urls.join('\n');
       if (text) await copy(text);
-      return { ok: links.length > 0, done: links.length, failed: errors, copied: text || null };
+      const missing = links.length - urls.length;
+      const failed = [...errors.map(String), ...(missing ? [`${missing} 项未返回直链`] : [])];
+      return { ok: urls.length > 0, done: urls.length, failed, copied: text || null };
     }
 
     case 'address': {
@@ -121,6 +138,12 @@ export async function downloadItems(ctx, target, opts = {}) {
       const d = await apiGet(API.FILES.ADDRESS, {
         group: rowGroup(state, rows[0]), id: rows[0].id,
       });
+      if (!d || !d.http_url) {
+        return {
+          ok: false, done: 0,
+          failed: ['未获取到可用地址（请确认已开启下载服务）'],
+        };
+      }
       return { ok: true, done: 1, failed: [], address: d };
     }
 

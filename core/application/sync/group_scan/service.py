@@ -48,6 +48,10 @@ class GroupScanService(ScanMixin, CapacityMixin):
     async def run_batch_ops(self, op) -> None:
         """Batch group ops: rename / join option / remark, real per-group
         API calls plus local backfill."""
+        # Idempotent by construction: every action is a "set to value"
+        # API (set_group_name / set_group_add_option / set_group_remark),
+        # so replaying lands on the same state. No replay guard needed
+        # (see R-2 audit).
         action = op.payload.get("action")
         value = op.payload.get("value")
         group_ids = list(op.payload.get("group_ids") or [])

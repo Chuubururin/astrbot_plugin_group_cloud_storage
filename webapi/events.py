@@ -12,6 +12,31 @@ from commands.handlers import Services
 from .webapi_base import SSE_HEARTBEAT_SEC
 
 
+def _asgi_receive():
+    """The ASGI ``receive`` callable of the live request, or None.
+
+    ``astrbot.api.web.request`` is a PluginRequestProxy: it exposes no
+    ``receive`` of its own and forwards unknown attributes to the host's
+    PluginRequest, whose ``_request`` is the Starlette request that owns the
+    ASGI callable (``Request.receive``). Probing only ``request.receive``
+    therefore always returned None and the documented disconnect detection
+    never ran; the probe has to walk that one level down. Every step is
+    optional - an unreachable callable degrades to heartbeat-only detection
+    instead of breaking the stream.
+    """
+    try:
+        for owner in (request, getattr(request, "_request", None)):
+            if owner is None:
+                continue
+            receive = getattr(owner, "receive", None)
+            if callable(receive):
+                return receive
+    except Exception as e:
+        logger.warning(f"[webapi] SSE: ASGI receive unreachable ({e}); "
+                       "disconnect falls back to server cancellation")
+    return None
+
+
 async def api_queue_events(s: Services):
     """SSE: OpQueue event stream (queued / started / retried / done / failed).
 
@@ -19,7 +44,8 @@ async def api_queue_events(s: Services):
     - Heartbeat every SSE_HEARTBEAT_SEC so clients and intermediaries can
       detect a dead stream instead of idling silently.
     - Disconnect detection: watch the ASGI ``http.disconnect`` message while
-      waiting for events. A vanished client (tab closed, proxy reaped the
+      waiting for events (``_asgi_receive`` locates the callable through the
+      host request proxy). A vanished client (tab closed, proxy reaped the
       connection, laptop sleep) must release its listener queue promptly —
       otherwise leaked listeners accumulate on every page load and the
       browser's per-host connection budget stays occupied, which is what
@@ -35,17 +61,12 @@ async def api_queue_events(s: Services):
     and every connection died right after its first heartbeat (live
     2026-09-12: the catch-all masked it as a heartbeat and the browser's
     EventSource auto-reconnect hid the dead stream entirely). The ASGI
-    ``receive`` callable is therefore captured here, inside the handler
-    context, and passed into the generator as a plain value; if the proxy
-    refuses, the stream degrades to heartbeat-only disconnect detection
-    (server task cancellation still releases the listener on disconnect).
+    ``receive`` callable is therefore resolved here, inside the handler
+    context, and passed into the generator as a plain value. When the probe
+    finds no callable the stream keeps the heartbeat and relies on Starlette's
+    own ``http.disconnect`` listener, which cancels the response task.
     """
-    try:
-        receive = getattr(request, "receive", None) if request is not None else None
-    except Exception as e:
-        logger.warning(f"[webapi] SSE: request proxy unavailable ({e}); "
-                       "disconnect falls back to server cancellation")
-        receive = None
+    receive = _asgi_receive()
 
     async def events():
         agen = s.queue.subscribe()
@@ -76,11 +97,23 @@ async def api_queue_events(s: Services):
                     if msg and msg.get("type") == "http.disconnect":
                         logger.debug("[webapi] SSE client disconnected; releasing listener")
                         return
-                    if msg and msg.get("type") == "http.request" and msg.get("more_body"):
+                    if msg and msg.get("type") == "http.request":
                         # Body bytes are irrelevant for this endpoint; keep
-                        # watching for the eventual disconnect message.
+                        # watching for the eventual disconnect message. EVERY
+                        # http.request must re-arm, including the final one
+                        # (more_body=False): uvicorn's h11 impl answers the
+                        # first receive() of a body-less GET with exactly
+                        # {"type": "http.request", "body": b"", "more_body":
+                        # False}, so gating the re-arm on more_body treated it
+                        # as terminal, stopped calling receive() and made the
+                        # disconnect detection below dead code on the real
+                        # path (only a first message that already was
+                        # http.disconnect still worked).
                         recv_task = asyncio.ensure_future(receive())
                     else:
+                        # Neither a request message nor a disconnect: nothing
+                        # else is expected here, stop watching instead of
+                        # spinning on a receive() that keeps returning it.
                         recv_task = None
                 if get_task in done:
                     try:

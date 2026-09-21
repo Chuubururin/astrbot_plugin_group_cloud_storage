@@ -1,6 +1,8 @@
 """Resource mutation and delivery handlers."""
 from __future__ import annotations
+
 import json
+import re
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 try:
@@ -293,7 +295,9 @@ async def api_file_download(s: Services) -> dict | object:
         return error_response("id required", status_code=400)
     # Degraded download: volume resources with missing parts can still be
     # downloaded incompletely (the caller is informed via the header)
-    allow_incomplete = (await _param("allow_incomplete", "0")) in ("1", "true", "yes")
+    allow_incomplete = (
+        await _param("allow_incomplete", "0")
+    ).strip().lower() in ("1", "true", "yes", "on")
     import httpx
     from fastapi.responses import StreamingResponse
 
@@ -318,7 +322,13 @@ async def api_file_download(s: Services) -> dict | object:
     from urllib.parse import quote as _quote
 
     safe_name = (name or "download").replace('"', "_")
-    ascii_file = "download"
+    # RFC6266 fallback: `filename=` must be ASCII-only, but it must still be a
+    # *usable* name. Hard-coding "download" (the old behaviour) dropped both
+    # the real stem and the extension, so any client that does not understand
+    # `filename*=` saved an extension-less "download" (Issue #8). Derive it
+    # from the real name: non-ASCII -> "_", keep the extension.
+    ascii_file = re.sub(r"[^\x20-\x7e]", "_", safe_name).replace("\\", "_")
+    ascii_file = ascii_file.replace("/", "_").strip() or "download"
     disp = (
         f"attachment; filename=\"{ascii_file}\"; filename*=UTF-8''{_quote(safe_name)}"
     )
@@ -331,7 +341,7 @@ async def api_file_download(s: Services) -> dict | object:
         return FileResponse(
             target,
             media_type="application/octet-stream",
-            filename="download",
+            filename=ascii_file,
             headers={"Content-Disposition": disp},
         )
 
@@ -471,6 +481,12 @@ async def _managed_items(s: Services, items: list, failed: list):
     silent-skip semantics).
     """
     for it in items:
+        # Non-object elements (int/None/nested list) make pick()'s `key not in
+        # data` raise TypeError out of its contract; report them as per-item
+        # failures instead of letting them escape as a 500.
+        if not isinstance(it, dict):
+            failed.append(f"items[] must be an object, got {type(it).__name__}")
+            continue
         try:
             fid = pick(it, "id", cast=int, required=True)
             gid = pick(it, "group", required=True, empty_allowed=False)

@@ -13,13 +13,13 @@
  */
 
 import { getState, set, subscribe, refresh } from '../store.js';
-import { API, apiGet } from '../api.js';
 import { getIcon } from '../icons.js';
 import { attachMarquee } from '../features/marquee-select.js';
 import {
   groupSlice, loadGroups, rerenderGroups, updateGroupCheckboxes, loadAccounts,
-  syncModuleFocusToGroup,
+  syncModuleFocusToGroup, filterByAccount,
 } from '../features/group-data.js';
+import { checkGroupOpenable, clearGroupFocus } from '../features/group-open-state.js';
 import {
   handleBatchOps, handleRemove, handleRestore, handleToggleRemoved, handleMenuAction,
 } from '../features/group-actions.js';
@@ -85,6 +85,16 @@ export function initGroupsView(container) {
   /** @type {Set<string>} selected group ids of this view session */
   const selectedGroups = new Set();
 
+  /**
+   * Drop the view-session selection. Paging / scope changes replace the
+   * visible rows, and a retained selection would let batch actions hit
+   * groups that are no longer on screen.
+   */
+  const resetSelection = () => {
+    selectedGroups.clear();
+    updateGroupCheckboxes(selectedGroups);
+  };
+
   loadGroups(selectedGroups);
   loadAccounts();
 
@@ -133,27 +143,34 @@ export function initGroupsView(container) {
     });
   });
 
-  // Pagination.
+  // Pagination. Paging replaces the visible rows, so the selection resets.
   container.querySelector('#g-prev')?.addEventListener('click', () => {
     if (getState().groupPage > 1) {
       set('groupPage', getState().groupPage - 1);
+      resetSelection();
       rerenderGroups(selectedGroups);
     }
   });
   container.querySelector('#g-next')?.addEventListener('click', () => {
     set('groupPage', getState().groupPage + 1);
+    resetSelection();
     rerenderGroups(selectedGroups);
   });
   container.querySelector('#group-page-size')?.addEventListener('change', (e) => {
     set('groupPageSize', parseInt(e.target.value, 10));
     set('groupPage', 1);
+    resetSelection();
     rerenderGroups(selectedGroups);
   });
 
-  // Account filter (client-side over the full list).
+  // Account filter (client-side over the full list). Switching accounts
+  // hides the previous scope's rows, so both the group context and the
+  // selection must follow the new filter instead of lingering.
   container.querySelector('#account-filter')?.addEventListener('change', (e) => {
     set('accountFilter', e.target.value);
     set('groupPage', 1);
+    clearOutOfScopeFocus(e.target.value);
+    resetSelection();
     rerenderGroups(selectedGroups);
   });
 
@@ -161,16 +178,14 @@ export function initGroupsView(container) {
   container.querySelector('#file-group-select')?.addEventListener('change', async (e) => {
     const gid = e.target.value;
     if (gid) {
-      try {
-        const st = await apiGet(API.GROUPS.OPEN_STATE, { group: gid });
-        if (st && st.reason) {
-          toast(st.reason, 'warn');
-          e.target.value = getState().currentGroup || '';
-          return;
-        }
-      } catch (err) {
-        toast('群状态校验失败: ' + (err.message || '网络错误'), 'error');
-        e.target.value = getState().currentGroup || '';
+      // Doc: managed + owning account online + group alive. The gate is a
+      // 200 body reason (not a 403); a refusal falls back to the aggregate
+      // view rather than keeping the previous group context.
+      const gate = await checkGroupOpenable(gid);
+      if (!gate.ok) {
+        clearGroupFocus();
+        e.target.value = '';
+        toast(gate.label, 'warn');
         return;
       }
     }
@@ -225,6 +240,21 @@ export function initGroupsView(container) {
     detachMarquee();
     selectedGroups.clear();
   };
+}
+
+/**
+ * Drop every group focus the new account filter no longer lists. The
+ * selects rebuild their options from the filtered list, so a focus left
+ * behind would silently fall back to the first option while the modules
+ * kept filtering by the hidden group.
+ * @param {string} accountFilter - '' = all online accounts
+ */
+function clearOutOfScopeFocus(accountFilter) {
+  const visible = filterByAccount(getState().groups || [], accountFilter);
+  const reachable = (gid) => !gid || visible.some((g) => g.group_id === gid);
+  for (const key of ['currentGroup', 'albumGroup', 'essenceGroup']) {
+    if (!reachable(getState()[key])) set(key, '');
+  }
 }
 
 /** One pane's table markup (name/role/space/album/essence/scan columns). */

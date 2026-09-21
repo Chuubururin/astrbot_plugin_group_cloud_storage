@@ -77,7 +77,9 @@ def validate_config(data: dict) -> list[tuple[str, str]]:
                 warnings.append(
                     ("volume_threshold_mb", f"阈值过小（{vtb_int}MB），已回退为默认 95MB")
                 )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: int(float("inf")) — validate_config must warn, not
+            # raise (it is called unconditionally before assembly).
             warnings.append(
                 ("volume_threshold_mb", f"期望 int，实际 {type(vtb).__name__}，已回退为默认 95MB")
             )

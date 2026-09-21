@@ -87,6 +87,42 @@ export function handleToggleRemoved(selectedGroups) {
   refresh('groups');
 }
 
+/**
+ * Move the selected ids one step inside a visible order (block move: the
+ * whole selection shifts by one position, keeping its relative order).
+ * @param {string[]} order - id order, permuted in place
+ * @param {string[]} ids - selected ids, pre-sorted in the move direction
+ * @param {number} step - -1 (up) or 1 (down)
+ * @returns {boolean} whether any exchange actually happened
+ */
+function swapNeighbours(order, ids, step) {
+  let moved = false;
+  for (const gid of ids) {
+    const i = order.indexOf(gid);
+    const j = i + step;
+    if (i < 0 || j < 0 || j >= order.length) continue;
+    [order[i], order[j]] = [order[j], order[i]];
+    moved = true;
+  }
+  return moved;
+}
+
+/**
+ * Write a permuted visible order back into the full order's own slots, so
+ * the posted sequence still covers the whole table: groups hidden by the
+ * account filter keep their position (groups/order is whole-table).
+ * @param {string[]} full - full id order
+ * @param {string[]} viewOrder - permuted visible id order (same ids)
+ * @returns {string[]}
+ */
+function mergeVisibleOrder(full, viewOrder) {
+  const ordered = full.slice();
+  const visible = new Set(viewOrder);
+  let slot = 0;
+  full.forEach((gid, i) => { if (visible.has(gid)) ordered[i] = viewOrder[slot++]; });
+  return ordered;
+}
+
 /** Menu actions: incremental sync, label sorting/autofill/clear, ordering. */
 export async function handleMenuAction(act, selectedGroups) {
   switch (act) {
@@ -115,30 +151,32 @@ export async function handleMenuAction(act, selectedGroups) {
     case 'up':
     case 'down': {
       if (selectedGroups.size === 0) { toast('请先选择群', 'warn'); return; }
-      // 后端 groups/order 的契约是整表位置持久化: {ordered_ids: [...]}。
-      // 上/下移是"选中项与其相邻行交换位置"的视图操作, 在这里换算成
-      // 全序再提交 (参考文件管理器行重排惯例: 前端算好新顺序, 端点只收
-      // 一个完整序列)。
-      const filtered = filterByAccount(getState().groups || [], getState().accountFilter || '');
-      const ordered = sortGroups(filtered, getState().groupSort).map((g) => g.group_id);
+      // groups/order 只持久化受管群的整表顺序；已移除群不在该表内。
+      if (getState().groupsView === 'removed') {
+        toast('已移除群不支持排序', 'warn');
+        return;
+      }
+      // 契约是整表位置持久化 {ordered_ids}: 全序恒取全量 groups,
+      // accountFilter 只决定"相邻"是谁（可见顺序）。
+      const all = getState().groups || [];
+      const full = sortGroups(all, getState().groupSort).map((g) => g.group_id);
+      const viewOrder = sortGroups(filterByAccount(all, getState().accountFilter || ''),
+        getState().groupSort).map((g) => g.group_id);
       const step = act === 'up' ? -1 : 1;
-      // 选择集是点击顺序而非位置顺序; 必须先按当前位置排序再逐个交换
-      // (上移自上而下、下移自下而上, 与多选列表重排的通用做法一致),
-      // 选中块整体挪一格且相对次序不变——否则两个相邻选中项会互相抵消。
+      // 选择集是点击顺序而非位置顺序: 先按可见位置排序再逐个相邻交换
+      // (上移自上而下、下移自下而上), 选中块整体挪一格且相对次序不变。
       const ids = Array.from(selectedGroups)
-        .map((gid) => ({ gid, pos: ordered.indexOf(gid) }))
+        .map((gid) => ({ gid, pos: viewOrder.indexOf(gid) }))
         .filter((e) => e.pos >= 0)
         .sort((a, b) => (step === -1 ? a.pos - b.pos : b.pos - a.pos))
         .map((e) => e.gid);
-      for (const gid of ids) {
-        const i = ordered.indexOf(gid);
-        if (i < 0) continue;
-        const j = i + step;
-        if (j < 0 || j >= ordered.length) continue;
-        [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
+      // 无实际交换时不发请求、不报成功（静默无效的"上移成功"是缺陷）。
+      if (!swapNeighbours(viewOrder, ids, step)) {
+        toast(`${act === 'up' ? '上移' : '下移'}无效: 已到边界或无可见相邻群`, 'warn');
+        return;
       }
       await mutate('移动', API.GROUPS.ORDER,
-        { ordered_ids: ordered },
+        { ordered_ids: mergeVisibleOrder(full, viewOrder) },
         { refresh: 'groups', successText: `${act === 'up' ? '上移' : '下移'}成功` });
       break;
     }

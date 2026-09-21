@@ -26,10 +26,13 @@ import {
  * @param {function} cfg.getSelection - () => string[] current keys
  * @param {function} cfg.setSelection - (keys: string[]) => void commit
  * @param {function} [cfg.canStart] - extra guard (event) => boolean
+ * @param {function} [cfg.rowFilter] - (tr) => boolean; rows that may enter
+ *   the selection (default: every keyed row)
  * @returns {function} detach
  */
 export function attachMarquee(host, cfg) {
   const rowKeyAttr = cfg.rowKeyAttr || 'key';
+  const rowFilter = cfg.rowFilter || (() => true);
   if (!host || host.dataset.marqueeBound) return () => {};
   host.dataset.marqueeBound = '1';
 
@@ -41,8 +44,12 @@ export function attachMarquee(host, cfg) {
   let drag = null;
   let suppressUntil = 0;
 
+  // rowFilter is applied here (not only in canStart) so folder rows can never
+  // be dragged into the selection: they carry no checkbox, so a selected
+  // folder row is invisible in the UI and (netdisk) its remote_path would be
+  // submitted to the recursive delete command.
   const rowsOf = () => Array.from(host.querySelectorAll('tbody tr'))
-    .filter((r) => r.dataset[rowKeyAttr]);
+    .filter((r) => r.dataset[rowKeyAttr] && rowFilter(r));
 
   function highlight(want) {
     for (const r of rowsOf()) {
@@ -115,10 +122,12 @@ export function attachMarquee(host, cfg) {
   }
 
   function onClickCapture(ev) {
-    if (Date.now() < suppressUntil) {
-      ev.stopPropagation();
-      ev.preventDefault();
-    }
+    if (Date.now() >= suppressUntil) return;
+    // 抑制只针对"结束拖选的那次行点击"：表头全选、按钮与表单控件必须
+    // 豁免，否则拖动后的 250ms 内这些控件会被整体吞掉。
+    if (ev.target.closest('input,button,a,select,label,thead')) return;
+    ev.stopPropagation();
+    ev.preventDefault();
   }
 
   host.addEventListener('mousedown', onMouseDown);

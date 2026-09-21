@@ -5,18 +5,13 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+# Single implementation lives in core.application.common (stateless, zero
+# core.* deps); re-exported here so composition keeps its import surface.
+from core.application.common import sha256_file  # noqa: F401
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def sha256_file(path: str | Path) -> str:
-    """Streaming whole-file hash (safe for large files)."""
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def verify_part(data: bytes, expected_sha: str | None) -> bool:

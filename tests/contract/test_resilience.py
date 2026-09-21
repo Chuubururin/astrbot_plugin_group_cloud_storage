@@ -179,3 +179,105 @@ async def test_cancel_sync_writes_cancelled_state(tmp_path):
     assert row is not None
     assert row[0] == SyncStatus.CANCELLED.value
     await store.close()
+
+
+# ---------- 能力污染回归（真机协议措辞，2026-09-16）----------
+#
+# 真机 SnowLuma/NapCat 的措辞（/app/runtime/config-DwoxthVc.js）：
+#   未知 action -> retcode=1404, wording="unknown action"（WS 分发器）
+#   资源级缺失  -> "message not found" / "image not found in cache" /
+#                  "record not found in cache" / "stream not found"
+#   参数级失败  -> retcode=100 (ACTION_FAILED)，如群相册仅收图片
+# 旧的 "not found" / "notfound" / "404" / "unsupported" / "不支持" 提示词会把
+# 资源级错误误判成“该 action 不存在”。_states 永不复位，且 album.py 的
+# _album_upload_ready() 与 bridge/inbound.py 的 URL 上传探测都把缓存到的
+# UNSUPPORTED 当终态，于是**一次资源级失败会永久禁用该能力**。
+
+
+class _ActionFailed(Exception):
+    """仿 aiocqhttp ActionFailed：真机 repr 形如
+    <ActionFailed retcode=100, wording='...'>。"""
+
+    def __init__(self, retcode: int, wording: str = ""):
+        self.retcode = retcode
+        self.wording = wording
+        super().__init__(f"<ActionFailed retcode={retcode}, wording={wording!r}>")
+
+
+_RESOURCE_LEVEL_WORDINGS = [
+    "message not found",
+    "message not found or not a group message",
+    "image not found in cache",
+    "record not found in cache",
+    "stream not found",
+    "download failed: HTTP 404 Not Found",
+    "bad request: unsupported content-type: text/html",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wording", _RESOURCE_LEVEL_WORDINGS)
+async def test_resource_level_error_does_not_poison_capability(wording):
+    """资源级措辞必须归为 REMOTE_ERROR，且不得标记能力（旧实现在此永久污染）。"""
+    impl = await _call_impl(err=RuntimeError(wording))
+    api = NapCatApiAdapter(impl, interval=0)
+    with pytest.raises(OneBotApiError) as ei:
+        await api.list_group_root("g1")
+    assert ei.value.kind == OneBotErrorKind.REMOTE_ERROR
+    assert api.capability("get_group_root_files") == CapabilityState.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_album_upload_survives_resource_level_error():
+    """相册上传遇到“文件不存在”后，能力必须仍可用。
+
+    这是用户可见后果：一旦 upload_image_to_qun_album 被标记 UNSUPPORTED，
+    ingest/album.py 的 _album_upload_ready() 会永久短路，后续**合法图片**
+    上传都会被拒并报“协议端不支持向群相册上传媒体”。
+    """
+    impl = await _call_impl(err=RuntimeError("file not found"))
+    api = NapCatApiAdapter(impl, interval=0)
+    with pytest.raises(OneBotApiError) as ei:
+        await api.upload_image_to_qun_album("g1", "alb1", "相册", "/tmp/x.png")
+    assert ei.value.kind == OneBotErrorKind.REMOTE_ERROR
+    assert api.capability("upload_image_to_qun_album") == CapabilityState.UNKNOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wording", ["unknown action", "不支持的API", "API not found"])
+async def test_action_level_wording_still_marks_unsupported(wording):
+    """action 级措辞（真机 wording="unknown action"）仍须标记 UNSUPPORTED。"""
+    impl = await _call_impl(err=RuntimeError(wording))
+    api = NapCatApiAdapter(impl, interval=0)
+    with pytest.raises(OneBotApiError) as ei:
+        await api.list_group_root("g1")
+    assert ei.value.kind == OneBotErrorKind.UNSUPPORTED
+    assert api.capability("get_group_root_files") == CapabilityState.UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_unknown_action_retcode_marks_unsupported_without_wording():
+    """retcode=1404 但无措辞时靠 retcode 判定（旧的 "404" 子串是巧合命中）。"""
+    impl = await _call_impl(err=_ActionFailed(1404, ""))
+    api = NapCatApiAdapter(impl, interval=0)
+    with pytest.raises(OneBotApiError) as ei:
+        await api.list_group_root("g1")
+    assert ei.value.kind == OneBotErrorKind.UNSUPPORTED
+    assert api.capability("get_group_root_files") == CapabilityState.UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_action_failed_retcode_is_remote_error():
+    """retcode=100 (ACTION_FAILED) 是参数/资源级失败：不得禁用能力。
+
+    真机 2026-09-16 群相册视频上传返回的正是 retcode=100
+    （“群相册上传仅支持 JPEG、PNG、GIF、WebP 或 BMP 图片”）。
+    """
+    impl = await _call_impl(
+        err=_ActionFailed(100, "群相册上传仅支持 JPEG、PNG、GIF、WebP 或 BMP 图片")
+    )
+    api = NapCatApiAdapter(impl, interval=0)
+    with pytest.raises(OneBotApiError) as ei:
+        await api.upload_image_to_qun_album("g1", "alb1", "相册", "/tmp/v.mp4")
+    assert ei.value.kind == OneBotErrorKind.REMOTE_ERROR
+    assert api.capability("upload_image_to_qun_album") == CapabilityState.UNKNOWN

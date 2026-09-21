@@ -67,7 +67,12 @@ async function previewAlbum(row, sourceId) {
     });
     showGallery(row.name, normalizeMedia(data.media), {
       group,
-      albumId: data.album_id || row.album_id || row.id || '',
+      // data.album_id is the server-resolved (and self-healed) QQ album ID.
+      // The gallery's per-media actions (comment / delete / video-preview)
+      // forward album_id straight to the QQ protocol with no numeric-id
+      // resolution, so falling back to the numeric row.id would make every
+      // one of them fail. An unresolved ID hides those actions instead.
+      albumId: String(data.album_id || ''),
       onChanged: () => refresh('albums'),
     });
   } catch (e) {
@@ -122,17 +127,39 @@ export async function openPreview(row, sourceId = 'group') {
     }
     return;
   }
-  if (policy.mode === 'external' && sourceId !== 'netdisk') {
-    try {
-      const d = await apiGet(API.FILES.LINK, { id: row.id, group: rowGroupFor(getState(), row, sourceId) });
-      const url = (d && (d.url || d.link)) || '';
-      if (!url) { toast('直链获取失败', 'error'); return; }
-      const target = policy.template
-        ? policy.template.replace('{src}', encodeURIComponent(url))
-        : url;
-      await openExternal(target);
-      return;
-    } catch (e) { /* fall through to builtin */ }
+  if (policy.mode === 'external') {
+    const url = await externalUrlFor(row, sourceId);
+    if (url === null) return previewFileDetail(row, sourceId); // resolve error -> builtin
+    if (!url) { toast('直链获取失败', 'error'); return; }
+    const target = policy.template
+      ? policy.template.replace('{src}', encodeURIComponent(url))
+      : url;
+    await openExternal(target);
+    return;
   }
   return previewFileDetail(row, sourceId);
+}
+
+/**
+ * Direct-link URL for an "external" preview policy.
+ *
+ * Netdisk rows carry no files/link id, so the bridge direct link is their
+ * only URL source. Previously the whole branch was skipped for netdisk,
+ * silently degrading an "external" policy to a detail modal with no way to
+ * open the file at all.
+ *
+ * @returns {Promise<string|null>} the url, '' when none was returned, or
+ *   null when resolution itself failed (caller falls back to builtin)
+ */
+async function externalUrlFor(row, sourceId) {
+  try {
+    if (sourceId === 'netdisk') {
+      const d = await apiPost(API.BRIDGE.NETDISK_LINK, { path: row.remote_path || row.name });
+      return (d && d.url) || '';
+    }
+    const d = await apiGet(API.FILES.LINK, { id: row.id, group: rowGroupFor(getState(), row, sourceId) });
+    return (d && (d.url || d.link)) || '';
+  } catch (e) {
+    return null;
+  }
 }

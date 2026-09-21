@@ -1,6 +1,9 @@
 """File type dictionary: 13-category classification.
 
-- `classify(name)` -> group name (unknown -> other)
+- `classify(name)` -> group name (unknown -> other); strips trailing
+  transient/volume suffixes (download intermediates, ".001" splits) and
+  retries the table, so external-tool names like "x.rar.netdisk.p.downloading"
+  classify as archive
 - `FILE_TYPE_EXT` -> group -> [extensions] (lowercase, with dot), for SQL
   suffix filters
 - legacy aliases: `program` -> `installer`, `data` -> `other` (normalized by
@@ -14,19 +17,42 @@ category of directory rows and never participates in extension matching).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 FILE_TYPE_EXT: dict[str, list[str]] = {
-    "document": [".doc", ".docx", ".odt", ".rtf", ".wps", ".txt", ".md"],
+    "document": [
+        ".doc", ".docx", ".docm", ".odt", ".rtf", ".wps", ".txt", ".md",
+        ".epub", ".mobi", ".azw3", ".chm", ".caj", ".tex",
+    ],
     "pdf": [".pdf"],
-    "spreadsheet": [".xls", ".xlsx", ".et", ".csv"],
-    "slide": [".ppt", ".pptx", ".dps"],
+    "spreadsheet": [".xls", ".xlsx", ".xlsb", ".xlsm", ".et", ".csv", ".ods", ".numbers"],
+    "slide": [".ppt", ".pptx", ".pptm", ".pps", ".ppsx", ".dps", ".odp", ".key"],
     "online_doc": [],  # no fixed extensions; extensible via the type_ext_overrides config
-    "image": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic"],
-    "video": [".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".wmv"],
-    "audio": [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"],
-    "archive": [".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"],
-    "installer": [".exe", ".msi", ".apk", ".deb", ".rpm", ".dmg", ".appimage"],
+    "image": [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic",
+        ".tif", ".tiff", ".ico", ".avif", ".jfif", ".apng", ".psd", ".ai", ".eps", ".dng",
+    ],
+    "video": [
+        ".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".wmv",
+        ".m4v", ".ts", ".m2ts", ".mts", ".3gp", ".3g2", ".ogv", ".rmvb", ".rm",
+        ".vob", ".mpg", ".mpeg", ".f4v", ".asf", ".divx",
+        ".m3u", ".m3u8",  # playlists (IPTV sources)
+    ],
+    "audio": [
+        ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac",
+        ".ape", ".wma", ".opus", ".mid", ".midi", ".amr",
+        ".aiff", ".aif", ".ac3", ".mka", ".tak", ".m4b",
+    ],
+    "archive": [
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+        ".tgz", ".tbz2", ".txz", ".cab", ".iso", ".jar",
+        ".arj", ".lzh", ".zst", ".lz4", ".lzma",
+    ],
+    "installer": [
+        ".exe", ".msi", ".apk", ".deb", ".rpm", ".dmg", ".appimage",
+        ".appx", ".msix", ".ipa", ".xapk", ".apkm", ".pkg", ".flatpak", ".snap", ".whl",
+    ],
     "flash": [],  # no fixed extensions; extensible via the type_ext_overrides config
     "folder": [],  # category of directory rows; not used for extension matching
     "other": [],
@@ -69,9 +95,31 @@ def normalize_type(ftype: str | None) -> str:
     return TYPE_ALIASES.get(ftype, ftype)
 
 
+# Transient download-intermediate suffixes produced by external tools
+# (e.g. SnowLuma names a partial netdisk download "x.rar.netdisk.p.downloading"),
+# and split-volume numeric suffixes (".001".." / .z01" / ".r00" style). When the
+# last suffix is one of these, classify strips it and retries the table, so
+# "x.rar.netdisk.p.downloading" classifies as archive instead of other. The
+# strip loop is strictly additive: it only runs while the current suffix is NOT
+# already a known type, so every previously classified file keeps its type.
+_TRANSIENT_EXTS: frozenset[str] = frozenset(
+    {".downloading", ".crdownload", ".download", ".partial", ".part",
+     ".tmp", ".temp", ".p", ".netdisk"}
+)
+_VOLUME_EXT_RE = re.compile(r"^\.(?:\d{2,4}|[zrs]\d{1,3})$")
+
+
 def classify(name: str) -> str:
     """Return the type group for a file name (falls back to other)."""
-    ext = Path(name or "").suffix.lower()
+    p = Path(name or "")
+    ext = p.suffix.lower()
+    for _ in range(6):
+        if ext in _EXT_2_TYPE:
+            return _EXT_2_TYPE[ext]
+        if ext not in _TRANSIENT_EXTS and not _VOLUME_EXT_RE.match(ext):
+            break
+        p = p.with_suffix("")
+        ext = p.suffix.lower()
     return _EXT_2_TYPE.get(ext, "other")
 
 
@@ -119,8 +167,15 @@ def preview_policy_for(ftype: str, policy_overrides: dict | None = None) -> dict
         # ("".split(",") == [""]), so the original condition was always True.
         # Now explicitly filter empty strings before checking membership.
         types_str = str(ov.get("types", "") or "")
-        type_list = [t.strip() for t in types_str.split(",") if t.strip()]
-        if type_list and ftype in type_list:
+        # Normalize both sides before matching: the raw ftype never matches a
+        # historical alias, so a documented config like {"types": "document,data"}
+        # could not override the "other" group (data -> other) and
+        # {"types": "program"} could not override "installer". Same convention
+        # as classify_with_overrides / type_exts.
+        type_list = [
+            normalize_type(t.strip()) for t in types_str.split(",") if t.strip()
+        ]
+        if type_list and normalize_type(ftype) in type_list:
             if ov.get("mode"):
                 policy["mode"] = ov["mode"]
             if ov.get("template") is not None:

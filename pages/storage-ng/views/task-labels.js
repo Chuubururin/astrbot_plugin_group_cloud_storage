@@ -7,6 +7,8 @@
  * @module views/task-labels
  */
 
+import { BRIDGE_STATES, BRIDGE_CAPABILITIES } from '../constants.js';
+
 /** Undoable operation kinds (aligned with task_control._REVERSIBLE_KINDS). */
 export const REVERSIBLE_KINDS = new Set(['move_file', 'replace_name', 'tags']);
 
@@ -31,6 +33,12 @@ export const STATE_LABEL = {
   cancelled: '已取消',
 };
 
+/**
+ * State -> badge/row colour class. Covers both vocabularies that reach the
+ * UI: the op_ledger states (pending/running/paused/retry/done/failed/
+ * cancelled) and the SSE event types the task panel logs (queued/started/
+ * progress/resumed) - a missing key renders the row with no state colour.
+ */
 export const STATE_CLASS = {
   pending: 'st-pending',
   running: 'st-running',
@@ -39,6 +47,10 @@ export const STATE_CLASS = {
   done: 'st-done',
   failed: 'st-failed',
   cancelled: 'st-failed',
+  queued: 'st-pending',
+  started: 'st-running',
+  progress: 'st-running',
+  resumed: 'st-running',
 };
 
 export const KIND_LABEL = {
@@ -97,10 +109,26 @@ export const STORE_STATUS_LABELS = {
   none: '未下载',
 };
 
-/** Bridge transfer task states. */
+/**
+ * Bridge transfer task states (archive_map.state). Keys are the machine
+ * values from constants.BRIDGE_STATES - including `unknown`, which the
+ * single-task query returns for an unrecognised task id.
+ */
 export const BRIDGE_STATE_LABELS = {
-  pending: '等待中',
-  running: '进行中',
-  done: '已完成',
-  failed: '失败',
+  [BRIDGE_STATES.PENDING]: '等待中',
+  [BRIDGE_STATES.RUNNING]: '进行中',
+  [BRIDGE_STATES.DONE]: '已完成',
+  [BRIDGE_STATES.FAILED]: '失败',
+  [BRIDGE_STATES.UNKNOWN]: '未知',
+};
+
+/**
+ * OpenList bridge capability states (bridge/status.capability). Callers must
+ * fall back to 未知 rather than printing the raw value.
+ */
+export const BRIDGE_CAPABILITY_LABELS = {
+  [BRIDGE_CAPABILITIES.DISABLED]: '未启用',
+  [BRIDGE_CAPABILITIES.UNKNOWN]: '未知',
+  [BRIDGE_CAPABILITIES.OK]: '正常',
+  [BRIDGE_CAPABILITIES.BROKEN]: '异常',
 };

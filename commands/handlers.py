@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from core.domain.enums import SyncStatus
+from core.domain.enums import PermissionLevel, SyncStatus
 from core.application.policies import PermissionService
 from core.application.catalog import ResourceQueryService, StatsService
 from core.application.sync import ResourceSyncService
@@ -238,6 +238,25 @@ async def handle_csbridge(
     """Bridge task management (status/cancel/retry)."""
     if not services.bridge:
         return _err("Bridge service not configured (openlist_enabled=false).")
+
+    # Authorization (OWASP: deny by default, validate on every request).
+    # The aggregate counters span every group -> GLOBAL_ADMIN only. A
+    # task-scoped action is authorized against the task's OWN group, so a
+    # group admin cannot touch another group's task by guessing a task_id.
+    sender = event.get_sender_id()
+    role = _role(event)
+    actual_group = event.get_group_id()
+    if action == "status" and not task_id:
+        if services.permission.level(sender, role) != PermissionLevel.GLOBAL_ADMIN:
+            return _err("权限不足：仅全局管理员可查看桥接任务总览。")
+    elif action in ("status", "cancel", "retry") and task_id:
+        row = await services.store.get_archive_map_by_task(task_id)
+        if row is None:
+            return _err(f"任务不存在：{task_id}")
+        if not services.permission.can_manage(
+            sender, role, str(row.get("group_id") or ""), actual_group
+        ):
+            return _err("权限不足。")
 
     if action == "status":
         status = await services.bridge.status(task_id if task_id else None)

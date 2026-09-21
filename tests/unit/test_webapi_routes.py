@@ -12,6 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pytest  # noqa: E402
+
 import webapi  # noqa: E402
 
 
@@ -82,7 +84,6 @@ def test_endpoint_count_not_less_than_baseline():
 def test_aggregate_capacity_defaults():
     """2026-09-03 元数据准确性：聚合（已用/总容量/群数）——
     used 缺失→本地索引；cap 缺失→10GB/群兜底。"""
-    import webapi
 
     class _G:
         def __init__(self, gid, used, total):
@@ -91,8 +92,36 @@ def test_aggregate_capacity_defaults():
             self.total_space = total
 
     groups = [_G("a", 0, 0), _G("b", 100, 20 * 1024 ** 3), _G("c", 50, 0)]
-    used, cap, n = webapi._aggregate_capacity(groups, {"a": 77})
+    from webapi.resources import _aggregate_capacity, GROUP_TOTAL_DEFAULT
+    used, cap, n = _aggregate_capacity(groups, {"a": 77})
     assert n == 3
     assert used == 77 + 100 + 50
     assert cap == 10 * 1024 ** 3 + 20 * 1024 ** 3 + 10 * 1024 ** 3
-    assert webapi.GROUP_TOTAL_DEFAULT == 10 * 1024 ** 3
+    assert GROUP_TOTAL_DEFAULT == 10 * 1024 ** 3
+
+
+def test_missing_route_handler_fails_at_registration():
+    """未定义的 handler 名必须在注册期报错，而不是请求期 500。
+
+    反向验证：修复前 register_page_apis 的 lambda 把 None 包进 _Bound，
+    RouteRegistry.register 里的 handler is None 永远为假。
+    """
+    from webapi import webapi as _wp
+    from webapi.routes import RouteRegistry
+
+    reg = RouteRegistry([("bogus", ["GET"], "api_not_defined_xyz", "d", "page")])
+    with pytest.raises(LookupError) as e:
+        reg.register(
+            _FakeContext(), webapi.PLUGIN_NAME, _wp._route_handler_lookup(_FakeServices())
+        )
+    assert "api_not_defined_xyz" in str(e.value)
+
+
+def test_defined_handlers_still_resolve():
+    """正常目录必须全部能解析（不能因为新校验而报错）。"""
+    from webapi import webapi as _wp
+    from webapi.routes import ROUTES
+
+    lookup = _wp._route_handler_lookup(_FakeServices())
+    for _, _, handler_name, _, _ in ROUTES:
+        assert lookup(handler_name) is not None, handler_name

@@ -37,9 +37,15 @@ export function initActionBar(container, source, opts = {}) {
   container.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-act]');
     if (!btn || btn.disabled) return;
-    const keys = Array.from(getState()[source.selectedKey] || []);
+    // 契约: keys 必须由 rows 派生（同集同序），而不是选区全集——选区可能
+    // 残留翻页/跨目录的 key 与目录行 key。command-defs*.js 用 ctx.keys[0]
+    // 取单目标 id、用 ctx.rows[0] 取所属群，二者必须指向同一行；网盘的
+    // 批量命令（netdiskRemovePaths / rename-batch / move-copy）直接消费
+    // ctx.keys，因此 keys 里绝不能出现当前列表之外的路径。
+    const selected = getState()[source.selectedKey] || new Set();
     const rows = (getState()[source.itemsKey] || [])
-      .filter((f) => !f.is_dir && keys.includes(source.rowKey(f)));
+      .filter((f) => !f.is_dir && selected.has(source.rowKey(f)));
+    const keys = rows.map((f) => source.rowKey(f));
     runCommand(btn.dataset.act, { source, keys, rows, rowAware: true }, {
       onBusy: (id) => markBusy(id),
       onDone: () => unmarkBusy(btn.dataset.act),

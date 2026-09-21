@@ -51,7 +51,17 @@ class ConnectionManager:
         with self._lock:
             if self._created < self._pool_size:
                 self._created += 1
-                return self._connect()
+                # Reserve before connecting (the lock is held across the
+                # blocking connect) but give the slot back when _connect()
+                # fails: a permanent reservation leaked one unit of pool
+                # capacity per failure, so after pool_size failures no new
+                # connection could ever be created and every call blocked
+                # for 30s before raising TimeoutError.
+                try:
+                    return self._connect()
+                except BaseException:
+                    self._created -= 1
+                    raise
         # BUG-11 fix: timeout prevents permanent hang when pool is exhausted
         # (e.g. all connections stuck in long-running FTS queries).
         try:

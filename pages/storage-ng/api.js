@@ -149,19 +149,32 @@ export const API = {
 };
 
 /**
+ * Race one bridge call against the shared API timeout, clearing the timer on
+ * every exit path. A plain Promise.race leaves the losing timer armed for the
+ * full 30s on every single request: harmless inside the page, but it also keeps
+ * a Node process alive long after the assertions finished (the unit suite spent
+ * ~30s per file on nothing but pending timers).
+ * @param {Promise<any>} p - the bridge call
+ * @param {string} verb - 'apiGet' | 'apiPost' (timeout message prefix)
+ * @param {string} path - API path (timeout message)
+ * @returns {Promise<any>}
+ */
+function withTimeout(p, verb, path) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${verb} timeout: ${path}`)), API_TIMEOUT);
+  });
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer));
+}
+
+/**
  * GET request with timeout protection.
  * @param {string} path - API path (key of API)
  * @param {Record<string, string>} [params] - query parameters
  * @returns {Promise<any>} decoded JSON body
  */
 export async function apiGet(path, params) {
-  const p = sdk().apiGet(path, params);
-  return Promise.race([
-    p,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`apiGet timeout: ${path}`)), API_TIMEOUT)
-    ),
-  ]);
+  return withTimeout(sdk().apiGet(path, params), 'apiGet', path);
 }
 
 /**
@@ -171,13 +184,7 @@ export async function apiGet(path, params) {
  * @returns {Promise<any>}
  */
 export async function apiPost(path, body) {
-  const p = sdk().apiPost(path, body || {});
-  return Promise.race([
-    p,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`apiPost timeout: ${path}`)), API_TIMEOUT)
-    ),
-  ]);
+  return withTimeout(sdk().apiPost(path, body || {}), 'apiPost', path);
 }
 
 /**
@@ -219,7 +226,7 @@ export function subscribeSSE(handler, onError) {
   if (!bridge || typeof bridge.subscribeSSE !== 'function') return () => {};
 
   let cancelled = false;
-  const result = bridge.subscribeSSE('events', {
+  const result = bridge.subscribeSSE(API.EVENTS, {
     onMessage(msg) {
       if (cancelled) return;
       const ev = msg && msg.parsed !== undefined ? msg.parsed : (msg ? msg.raw : msg);

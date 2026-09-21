@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,39 +37,44 @@ def reassemble_volumes(
             f"reassembled size {total_size} exceeds safety limit "
             f"({_MAX_REASSEMBLY_BYTES} bytes)"
         )
-    with dest.open("wb") as of:
-        for p in parts:
-            if p.get("data") is not None:
-                # In-memory data: verify and write directly
-                data = p["data"]
-                if not verify_part(data, p.get("sha256")):
-                    dest.unlink(missing_ok=True)
-                    raise ValueError(
-                        f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
-                    )
-                of.write(data)
-            else:
-                # BUG-7 fix: chunked read-verify-then-write. Reads in 64KB
-                # chunks (memory-bounded) while verifying the full SHA-256
-                # first, then writes the same chunks — keeping verification
-                # atomic (no partial writes on mismatch).
-                part_path = Path(p["path"])
-                sha = hashlib.sha256()
-                chunks_buf: list[bytes] = []
-                with part_path.open("rb") as pf:
-                    while chunk := pf.read(1 << 16):
-                        sha.update(chunk)
-                        chunks_buf.append(chunk)
-                if p.get("sha256") and sha.hexdigest() != p["sha256"]:
-                    dest.unlink(missing_ok=True)
-                    raise ValueError(
-                        f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
-                    )
-                for chunk in chunks_buf:
-                    of.write(chunk)
-    if not verify_total(dest, total_sha256):
-        dest.unlink(missing_ok=True)
-        raise ValueError("total sha256 mismatch")
+    # Stream into a temp file and publish it with one atomic rename: the
+    # destination only ever appears complete and no partial file survives a
+    # crash/mismatch. Nothing is accumulated in RAM — the previous version kept
+    # every 64KB chunk in a list (chunks_buf), i.e. the whole volume in memory,
+    # which defeated the 4GB ceiling above.
+    tmp = dest.parent / f".{dest.name}.reassembling"
+    try:
+        with tmp.open("wb") as of:
+            for p in parts:
+                if p.get("data") is not None:
+                    # In-memory data: verify and write directly
+                    data = p["data"]
+                    if not verify_part(data, p.get("sha256")):
+                        raise ValueError(
+                            f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
+                        )
+                    of.write(data)
+                else:
+                    # BUG-7 fix: chunked read-verify-and-write. The full
+                    # SHA-256 is accumulated while streaming 64KB chunks into
+                    # the temp file; a mismatch aborts before the rename, so
+                    # the destination is never partially written.
+                    part_path = Path(p["path"])
+                    sha = hashlib.sha256()
+                    with part_path.open("rb") as pf:
+                        while chunk := pf.read(1 << 16):
+                            sha.update(chunk)
+                            of.write(chunk)
+                    if p.get("sha256") and sha.hexdigest() != p["sha256"]:
+                        raise ValueError(
+                            f"part sha256 mismatch: {p.get('part_name', p.get('seq'))}"
+                        )
+        if not verify_total(tmp, total_sha256):
+            raise ValueError("total sha256 mismatch")
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     # Stream hash instead of reading entire file into memory
     sha = hashlib.sha256()
     with dest.open("rb") as f:
@@ -109,8 +115,12 @@ async def reassemble_video(seg_paths: list[str | Path], dest: str | Path) -> str
         if proc.returncode != 0:
             raise ValueError(f"ffmpeg concat failed: {proc.stderr[-300:]}")
 
-    await asyncio.to_thread(_concat)
-    list_file.unlink(missing_ok=True)
+    try:
+        await asyncio.to_thread(_concat)
+    finally:
+        # The concat manifest must not survive a failed concat: the failure
+        # path used to leave <dest>_concat.txt behind in the output dir.
+        list_file.unlink(missing_ok=True)
     return dest.as_posix()
 
 

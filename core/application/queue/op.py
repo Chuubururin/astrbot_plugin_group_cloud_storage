@@ -1,4 +1,4 @@
-"""Op model and queue-level exceptions."""
+"""Op model, queue-level exceptions, and shared queue helpers."""
 
 from __future__ import annotations
 
@@ -20,6 +20,13 @@ class Op:
     pause: bool = False  # cooperative pause (takes effect at handler checkpoints)
     error: str | None = None
     account: str | None = None  # account key (rate-limit/concurrency scope)
+    # Armed by the queue whenever the handler is re-entered from its first
+    # line without the op being a fresh submission: a retry (op.retries was
+    # bumped) or a pause -> resume (retries deliberately stay 0). Handlers
+    # that would duplicate a side effect on re-entry (album media listing,
+    # volume segment upload) dedupe on this instead of on `retries`, which
+    # silently failed for the pause -> resume path.
+    replayed: bool = False
 
 
 class OpCancelError(Exception):
@@ -29,6 +36,22 @@ class OpCancelError(Exception):
 class OpPausedError(Exception):
     """The operation was paused (cooperative: raised by the handler at a
     checkpoint; the worker holds it until resume)."""
+
+
+def cfg_value(config, key: str, default=None):
+    """Read one config value from either a mapping or an object.
+
+    Production injects a PluginConfig (typed properties: request_interval
+    falls back to request_interval_ms), while contract tests pass plain dicts;
+    prefer the typed attribute and fall back to mapping access so both work.
+    """
+    value = getattr(config, key, None)
+    if value is not None:
+        return value
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        value = getter(key, default)
+    return default if value is None else value
 
 
 # Non-interactive bulk operations (mostly local computation; API sub-calls are
@@ -69,4 +92,11 @@ DEFAULT_HIGH_PRIORITY = {
     "create_folder",
 }
 
-__all__ = ["Op", "OpCancelError", "OpPausedError", "BULK_KINDS", "DEFAULT_HIGH_PRIORITY"]
+__all__ = [
+    "Op",
+    "OpCancelError",
+    "OpPausedError",
+    "BULK_KINDS",
+    "DEFAULT_HIGH_PRIORITY",
+    "cfg_value",
+]

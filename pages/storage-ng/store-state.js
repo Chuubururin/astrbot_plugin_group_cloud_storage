@@ -8,9 +8,11 @@
  * @module store-state
  */
 
+import { DEFAULT_PAGE_SIZE } from './constants.js';
+
 export const initialState = {
   // ---- Shell / routing ----
-  currentView: 'files',          // active tab id (8-tab IA)
+  currentView: 'files',          // active tab id (7-tab IA)
   currentGroup: '',              // '' = aggregated view over all groups
   layout: (() => {
     // Single pane is the default; explicit choice persists.
@@ -28,7 +30,7 @@ export const initialState = {
   filePage: 1,                    // group-file page (folder-scoped)
   albumPage: 1,                   // module-isolated album page
   essencePage: 1,                 // module-isolated essence page
-  filePageSize: 24,
+  filePageSize: DEFAULT_PAGE_SIZE,  // config page_size default; main.js overrides with the live value
   fileTotal: 0,
   fileItems: [],
   fileSelected: new Set(),
@@ -71,7 +73,10 @@ export const initialState = {
 
   // ---- Tasks tab  ----
   taskLedger: [],
-  taskStateFilter: '',
+  taskStateFilter: '',           // persisted across tab remounts (select is refilled on mount)
+  taskKindFilter: '',            // backend tasks kind filter ('' = all)
+  taskTargetFilter: '',          // backend tasks target filter ('' = all)
+  taskPage: 1,                   // limit/offset paging (backend has no total count)
 
   // ---- Groups tab  ----
   groups: [],

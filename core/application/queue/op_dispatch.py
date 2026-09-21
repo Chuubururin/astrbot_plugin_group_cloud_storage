@@ -18,7 +18,7 @@ from core.log import logger
 from core.opctx import account_scope
 from .health import HealthCircuitBreaker
 from .capacity import CapacityMixin
-from .op import OpCancelError, OpPausedError
+from .op import OpCancelError, OpPausedError, cfg_value
 
 # Branches publishing their own data_changed (file ops/ingest/scans);
 # every other dispatched kind gets a central announce after _dispatch.
@@ -243,7 +243,7 @@ class OpDispatcher(CapacityMixin):
             return
 
         try:
-            interval = float(self.config.request_interval)
+            interval = float(cfg_value(self.config, "request_interval", 1.0))
         except (TypeError, ValueError):
             interval = 1.0
         # +-20% CSPRNG jitter so accounts do not hit server-side aggregated
@@ -588,22 +588,17 @@ class OpDispatcher(CapacityMixin):
                     )
                     last_pub = now
         finally:
-            # On cancel/error: release any remaining chained-scan entries
+            # Cancel/error path: release the remaining chained-scan entries and
+            # invalidate the group indexes + notify the frontend. Both used to
+            # sit after this block, so a cancelled scan skipped them (stale
+            # index; handle()'s _announce is skipped for file_scan).
             for gid in targets:
                 self._chained_file_scan_groups.discard(str(gid))
-        # Scan complete: invalidate affected group indexes (lazy rebuild) +
-        # dynamic refresh event
-        if self.services.searchkv is not None:
-            for gid in targets:
-                self.services.searchkv.mark_dirty(gid)
-        self.queue.publish(
-            {
-                "type": "data_changed",
-                "kind": "file_scan",
-                "target": "*",
-                "ts": time.time(),
-            }
-        )
+                if self.services.searchkv is not None:
+                    self.services.searchkv.mark_dirty(gid)
+            self.queue.publish(
+                {"type": "data_changed", "kind": "file_scan", "target": "*", "ts": time.time()}
+            )
         logger.info(
             f"[file-scan] done: {total} groups (mode={op.payload.get('mode')}, "
             f"failed={failed})"

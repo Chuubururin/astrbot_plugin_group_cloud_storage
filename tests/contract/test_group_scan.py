@@ -519,3 +519,61 @@ async def test_capacity_of_cloud_first_and_local_fallback(env):
     finally:
         await q.shutdown()
         await store.close()
+
+
+# ---------- M3：相册/精华计数不得被无条件覆盖 ----------
+
+@pytest.mark.asyncio
+async def test_scan_owned_preserves_album_essence_on_failure(env, monkeypatch):
+    """M3：相册/精华采集抛异常时，不得把已存计数写成 0 初始化值。
+
+    修复前：album_c/essence_c 停留在 0，而 upsert_groups 无条件覆盖
+    album_count/essence_count -> 一次瞬时 API 错误就抹掉已存计数。
+    """
+    store, api, svc = env
+    api.albums = {"g1": [{"album_id": "a1"}, {"album_id": "a2"}]}
+    api.essences = {"g1": [{"message_id": 1}]}
+    await svc.scan_owned(include_capacity=True)
+    g1 = next(g for g in await store.list_groups() if g.group_id == "g1")
+    assert g1.album_count == 2
+    assert g1.essence_count == 1
+
+    async def _boom(_gid):
+        raise RuntimeError("album/essence api down")
+
+    monkeypatch.setattr(api, "get_qun_album_list", _boom)
+    monkeypatch.setattr(api, "get_essence_msg_list", _boom)
+    await svc.scan_owned(include_capacity=True)
+    g1 = next(g for g in await store.list_groups() if g.group_id == "g1")
+    assert g1.album_count == 2
+    assert g1.essence_count == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_owned_include_capacity_false_keeps_counts(env):
+    """M3：include_capacity=False 时不做相册/精华采集，也不得清零已存计数。"""
+    store, api, svc = env
+    api.albums = {"g1": [{"album_id": "a1"}, {"album_id": "a2"}]}
+    api.essences = {"g1": [{"message_id": 1}]}
+    await svc.scan_owned(include_capacity=True)
+    before = [c for c in api.calls if c.startswith("get_qun_album_list")]
+    assert before
+
+    await svc.scan_owned(include_capacity=False)
+    after = [c for c in api.calls if c.startswith("get_qun_album_list")]
+    assert len(after) == len(before)  # include_capacity=False 不再采集
+    g1 = next(g for g in await store.list_groups() if g.group_id == "g1")
+    assert g1.album_count == 2
+    assert g1.essence_count == 1
+
+
+@pytest.mark.asyncio
+async def test_incremental_include_capacity_false_skips_collection(env):
+    """低危：scan_owned_incremental 声明的 include_capacity 必须真的生效。"""
+    store, api, svc = env
+    api.albums = {"g1": [{"album_id": "a1"}]}
+    api.essences = {"g1": [{"message_id": 1}]}
+    await svc.scan_owned_incremental(include_capacity=False)
+    assert not [c for c in api.calls if c.startswith("get_qun_album_list")]
+    assert not [c for c in api.calls if c.startswith("get_essence_msg_list")]
+    assert "get_group_file_system_info" not in api.calls

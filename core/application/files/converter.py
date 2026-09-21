@@ -17,6 +17,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.log import logger
 
 # Video container mapping: target extension -> ffmpeg output args (remux prefers stream copy)
@@ -36,6 +37,16 @@ _IMAGE_ENC: dict[str, list[str]] = {
 
 _SUPPORTED_VIDEO = (".mp4", ".mkv", ".webm")
 _SUPPORTED_IMAGE = (".png", ".jpg", ".jpeg", ".webp")
+
+
+class ConversionRejected(OneBotApiError, ValueError):
+    """Deterministic convert_to rejection (empty / unsupported extension).
+
+    Queue semantics: OneBotApiError(LOCAL_ERROR) so OpQueue ends the op on the
+    first attempt instead of replaying the whole fetch/convert 3x (2/4/8s) with
+    an identical failure. Legacy contract: it is also a ValueError, which the
+    web upload route still catches to answer HTTP 400 (webapi/resources.py).
+    """
 
 
 class ConverterService:
@@ -74,10 +85,13 @@ class ConverterService:
         the target extension matches).
         """
         ext = (convert_to or "").lower().lstrip(".")
-        if ext.startswith("."):
-            ext = ext[1:]
         if not ext:
-            raise ValueError("convert_to must be a target extension (e.g. mp4/mkv/webm/png/jpg/webp)")
+            # L4: deterministic -> LOCAL_ERROR (no pointless 3x replay).
+            raise ConversionRejected(
+                OneBotErrorKind.LOCAL_ERROR,
+                "convert",
+                "convert_to must be a target extension (e.g. mp4/mkv/webm/png/jpg/webp)",
+            )
         target = src.with_suffix(f".{ext}")
         if target == src:
             return src
@@ -89,7 +103,12 @@ class ConverterService:
                 return await self._convert_video_reencode(src, target)
         if self.is_image_ext(f".{ext}"):
             return await self._convert_image(src, target)
-        raise ValueError(f"unsupported convert target: {ext} (video: mp4/mkv/webm; image: png/jpg/webp)")
+        # L4: deterministic -> LOCAL_ERROR (no pointless 3x replay).
+        raise ConversionRejected(
+            OneBotErrorKind.LOCAL_ERROR,
+            "convert",
+            f"unsupported convert target: {ext} (video: mp4/mkv/webm; image: png/jpg/webp)",
+        )
 
     # ---------- Video ----------
 

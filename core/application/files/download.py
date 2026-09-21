@@ -118,7 +118,12 @@ class DownloadMixin:
             yield
 
     async def download_info(
-        self, group_id: str, id: int, *, allow_incomplete: bool = False
+        self,
+        group_id: str,
+        id: int,
+        *,
+        allow_incomplete: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """Return (download target, file name).
 
@@ -130,6 +135,12 @@ class DownloadMixin:
         allow_incomplete: when some volume refs are missing (part deleted on
         the cloud / backfill pending), reassemble the available parts instead
         of failing; the total sha256 check is skipped for a partial result.
+
+        headers: optional out-param for the caller's response headers. A
+        truncated reassembly populates it with an explicit incomplete marker
+        (X-Cloud-Volume-Incomplete / X-Cloud-Volume-Missing); without it the
+        truncation stayed silent -- only Content-Disposition was ever set, so
+        the caller was never actually told the body was partial.
         """
         detail = await self.store.get_resource_detail(group_id, id)
         if not detail:
@@ -175,6 +186,15 @@ class DownloadMixin:
             raise ValueError(
                 f"volume refs not ready (缺失分卷 {missing}，仍在上传/回填中或已被删除)"
             )
+        if missing:
+            # Degraded result (allow_incomplete): mark it explicitly so the
+            # caller can forward the header instead of silently serving a
+            # truncated body.
+            if headers is not None:
+                headers["X-Cloud-Volume-Incomplete"] = "1"
+                headers["X-Cloud-Volume-Missing"] = ",".join(
+                    str(s) for s in missing
+                )
         if not ready:
             raise ValueError("no downloadable volumes")
         kind = (detail.get("meta") or {}).get("kind") or "bytes"

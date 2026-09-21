@@ -44,19 +44,26 @@ function makeDistribute(spec) {
           // the full address modal; HTTP-only results copy straight away.
           if (out.sftp || out.smb) {
             const copied = await showDownloadAddress(out);
-            if (copied) toast('HTTP 地址已复制', 'success');
-          } else {
-            await copyToClipboard(out.http_url || '');
-            toast('直链已复制（HTTP）', 'success');
+            toast(copied ? 'HTTP 地址已复制' : '未复制地址（已取消）', copied ? 'success' : 'info');
+            return copied;
           }
+          const url = out.http_url || '';
+          if (!url) { toast('未获取到可用地址', 'warn'); return false; }
+          const ok = await copyToClipboard(url);
+          toast(ok ? '直链已复制（HTTP）' : '复制失败，请手动复制', ok ? 'success' : 'error');
         } else if (out.target === 'copy') {
-          await copyToClipboard(out.text || '');
-          toast('全文已复制', 'success');
+          const text = out.text || '';
+          if (!text) { toast('未获取到可复制的内容', 'warn'); return false; }
+          const ok = await copyToClipboard(text);
+          toast(ok ? '全文已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
         } else {
           toast(`转存到${targetLabel(target).replace(/^转存到/, '')}任务已提交，可在任务页查看进度`, 'success');
         }
       } catch (e) {
+        // The failure must not walk the success branch (refresh + selection
+        // clear): report it and stop, like every other command failure.
         toast(`操作失败: ${e.message || ''}`, 'error');
+        return false;
       }
     },
     refresh: spec.refresh || ['files', 'bridge', 'tasks'],

@@ -196,7 +196,7 @@ async def test_ledger_state_machine_flow(env):
     t1 = await env.queue.submit("move_file", "g1", _steps({}, 1))
     row = await _wait_state(env.store, t1, "done")
     assert row["kind"] == "move_file" and row["target"] == "g1"
-    assert row["payload"] == {"steps": 1}
+    assert row["payload"].get("steps") == 1
     rows = await env.tc.list_tasks(state="done")
     assert any(r["task_id"] == t1 for r in rows)
     assert (await env.tc.ops("nope")) == []

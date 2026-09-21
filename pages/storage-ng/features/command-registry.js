@@ -8,7 +8,7 @@
  * @module features/command-registry
  */
 
-import { registerAllCommands as registerFilesCommands } from './command-defs.js';
+import { registerFilesCommands } from './command-defs.js';
 import { registerAllAlbumCommands } from './command-defs-albums.js';
 import { registerDistributeCommands } from './distribute.js';
 import { registerAllNetdiskCommands } from './command-defs-netdisk.js';

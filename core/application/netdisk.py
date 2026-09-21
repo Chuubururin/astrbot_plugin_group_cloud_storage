@@ -123,6 +123,10 @@ class NetdiskService:
     async def handle_index(self, op) -> None:
         """Recursively register + backfill indexed_at; page by page per
         directory, SSE progress."""
+        # Idempotent by construction: the whole walk is upsert-only
+        # (upsert_netdisk_rows / mark_netdisk_indexed), so a replay
+        # re-writes the same rows. No replay guard needed (see R-2
+        # audit).
         root = _dir_prefix(op.payload["path"])
         pending = [root]
         seen = 0

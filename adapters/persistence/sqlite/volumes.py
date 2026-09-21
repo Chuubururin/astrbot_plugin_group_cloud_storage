@@ -5,6 +5,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 from .state import StorePart
+from .status_policy import volume_status_sql
 
 from core.domain.sync import VolumeInfo
 
@@ -27,13 +28,19 @@ class VolumesMixin(StorePart):
             if not items:
                 return
             try:
-                conn.executemany(
-                    """INSERT INTO volumes
+                # H3: insert_volumes re-enters with status="pending" on every
+                # pipeline (re)entry, so a plain excluded.status demoted a
+                # finished part back to pending -- the resume skip then never
+                # matched and pause->resume re-uploaded EVERY part. The CASE is
+                # generated from VOLUME_UPSERT_TRANSITIONS (status_policy), the
+                # same table merge_volume_status() reads.
+                conn.executemany(f"""INSERT INTO volumes
                          (parent_resource_id, seq, part_name, source_ref,
                           busid, size, sha256, status, upload_time, group_id)
                        VALUES (?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(parent_resource_id, seq) DO UPDATE SET
-                         part_name=excluded.part_name, status=excluded.status,
+                         part_name=excluded.part_name,
+                         status={volume_status_sql()},
                          size=excluded.size, sha256=excluded.sha256,
                          group_id=COALESCE(excluded.group_id, group_id)
                     """,
@@ -91,7 +98,7 @@ class VolumesMixin(StorePart):
                 """UPDATE volumes SET source_ref=?, busid=?
                    WHERE part_name=?
                      AND (source_ref IS NULL OR source_ref='')
-                     AND parent_resource_id LIKE ?
+                     AND parent_resource_id LIKE ? ESCAPE '\\'
                 """,
                 (source_ref, busid, part_name, f"{group_id}:file:%"),
             )
@@ -125,7 +132,7 @@ class VolumesMixin(StorePart):
         def _do(conn: sqlite3.Connection):
             row = conn.execute(
                 "SELECT 1 FROM volumes WHERE parent_resource_id LIKE ? "
-                "AND part_name LIKE ? ESCAPE '\\' LIMIT 1",
+                "ESCAPE '\\' AND part_name LIKE ? ESCAPE '\\' LIMIT 1",
                 (f"{group_id}:file:%", part_name_glob),
             ).fetchone()
             return row is not None

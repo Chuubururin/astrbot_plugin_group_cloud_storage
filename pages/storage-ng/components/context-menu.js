@@ -14,6 +14,7 @@
 import { getIcon } from '../icons.js';
 import { commands, canRunRowAware } from '../features/commands.js';
 import { getState } from '../store.js';
+import { escapeHtml } from '../utils/helpers.js';
 
 /** @type {HTMLElement|null} */
 let menuEl = null;
@@ -77,13 +78,15 @@ export function showRaw(x, y, items, onAction) {
       mi.danger ? 'danger' : '',
     ].filter(Boolean).join(' ');
     const icon = mi.icon ? `<span class="ctx-icon">${getIcon(mi.icon, 13)}</span>` : '';
+    // label/title/id 全部转义：属性上下文里未转义的引号可以直接闭合属性
+    // 注入事件处理器（当前调用方都是静态串，但这是唯一的注入面）。
     const attrs = [
-      `data-cmd="${mi.id}"`,
+      `data-cmd="${escapeHtml(mi.id)}"`,
       'role="menuitem"',
       mi.disabled ? 'data-disabled tabindex="-1"' : 'tabindex="-1"',
-      mi.title ? `title="${mi.title}"` : '',
+      mi.title ? `title="${escapeHtml(mi.title)}"` : '',
     ].filter(Boolean).join(' ');
-    return `<button class="${cls}" ${attrs}>${icon}<span class="ctx-label">${mi.label}</span></button>`;
+    return `<button class="${cls}" ${attrs}>${icon}<span class="ctx-label">${escapeHtml(mi.label)}</span></button>`;
   }).join('');
 
   bindClicks(el, onAction);

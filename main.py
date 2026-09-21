@@ -33,6 +33,21 @@ from core.runtime.adapter import RuntimeAdapter  # noqa: E402
 from core.runtime.commands import strip_command_params  # noqa: E402
 from core.runtime.events import handle_aiocqhttp_event  # noqa: E402
 
+def _parse_cssave_args(rest: str) -> tuple[str, str, str]:
+    """Parse /cssave arguments: [group_id] <title> <text>.
+
+    docs/接口契约.md allows spaces inside the body, so the body is the whole
+    remainder of the line. The previous fixed-width token slice dropped
+    everything after the second space whenever no group id was given.
+    """
+    head, _, tail = rest.partition(" ")
+    group_id = head if head.isdigit() and len(head) >= 5 else ""
+    if group_id:
+        rest = tail
+    title, _, text = rest.partition(" ")
+    return group_id, title, text
+
+
 class Main(RuntimeAdapter, Star):
     """Group cloud storage manager.
 
@@ -134,14 +149,7 @@ class Main(RuntimeAdapter, Star):
         rest = strip_command_params(
             getattr(event, "message_str", "") or ""
         )
-        group_id, title, text = "", "", ""
-        tokens = rest.split(" ", 2)
-        if tokens and tokens[0].isdigit() and len(tokens[0]) >= 5:
-            group_id = tokens.pop(0)
-        if tokens:
-            title = tokens.pop(0)
-        if tokens:
-            text = tokens[0]
+        group_id, title, text = _parse_cssave_args(rest)
         async with self._bot_scope(event):
             yield event.plain_result(
                 await handle_cssave(event, self.services, group_id, title, text)

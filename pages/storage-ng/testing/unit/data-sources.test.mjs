@@ -48,12 +48,17 @@ test('sourceFor: view maps to adapter (FE-18)', () => {
 });
 
 test('capability matrix: albums carry album ops, essence carries distribute (W3-A)', () => {
-  // 2026-09-05：相册行动作改为 创建相册/查看媒体/相册详情（原 album-distribute
-  // 语义错位——相册行不是媒体，恒取首个媒体下载，已从动作栏移除）
   assert.ok(ALBUM_SOURCE.capabilities.includes('album-create'));
   assert.ok(ALBUM_SOURCE.capabilities.includes('album-gallery'));
   assert.ok(ALBUM_SOURCE.capabilities.includes('album-detail'));
-  assert.ok(!ALBUM_SOURCE.capabilities.includes('album-distribute'));
+  // 2026-09-16（F35）：album-distribute 必须留在能力表内。
+  // 2026-09-05 曾以「相册行不是媒体，恒取首个媒体下载」为由移除，但那是
+  // 旧实现的语义错位；现行 features/distribute.js:97-111 的 album-distribute
+  // 已改为 album_id 键控（row.album_id / meta.album_id），targets 为
+  // local/netdisk/group/essence，与后端 albums/distribute 白名单一致，
+  // 见 docs/前端架构.md:59「下载 … 动作栏『转存』(album-distribute)」。
+  // capabilities 是动作栏/行右键的渲染白名单，缺失会让整列相册转存不可达。
+  assert.ok(ALBUM_SOURCE.capabilities.includes('album-distribute'));
   assert.ok(ESSENCE_SOURCE.capabilities.includes('essence-distribute'));
   assert.ok(!ALBUM_SOURCE.capabilities.includes('files-distribute'));
   assert.ok(!ESSENCE_SOURCE.capabilities.includes('netdisk-distribute'));

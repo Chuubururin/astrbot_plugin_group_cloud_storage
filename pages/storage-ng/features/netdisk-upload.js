@@ -6,7 +6,8 @@
  *
  *   local file -> group files (prepare/upload, recommended group)
  *              -> wait terminal state via the task ledger ('tasks')
- *              -> locate the resource by name (exact match)
+ *              -> locate the uploaded resource (task ledger id first,
+ *                 then exact-name lookup excluding pre-existing ids)
  *              -> bridge/transfer to the netdisk root
  *
  * The group-file intermediate copy is KEPT (never auto-deleted; every UI
@@ -17,10 +18,14 @@
  */
 
 import { getState, refresh } from '../store.js';
-import { API } from '../api.js';
-import { uploadOnce } from './upload.js';
+import { API, apiGet, apiPost, upload as bridgeUpload } from '../api.js';
+import { convertTargetName, uploadOnce } from './upload.js';
 import { confirmEx, showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
+import {
+  convertAllowed, convertOptionsFor, kindsOf, mediaKind,
+} from './ingest-options.js';
+import { MAX_PAGE_SIZE } from '../constants.js';
 
 const POLL_MS = 1500;               // task-ledger poll interval
 const BASE_TIMEOUT_MS = 240000;     // relay timeout floor (4 min)
@@ -41,38 +46,42 @@ function relayTimeoutMs(files) {
  * so waiting on it would stall the relay for the full timeout. */
 const TERMINAL_STATES = new Set(['done', 'failed', 'cancelled']);
 
-/** UI entry: confirm the relay semantics, pick files, run the relay. */
+/** UI entry: confirm the relay semantics, pick files, choose the format
+ * (asked AFTER the files are known), run the relay. */
 export async function handleNetdiskUploadLocal() {
   const ok = await confirmEx('本地上传到网盘',
     '流程：本地文件 → 上传到群文件（推荐群）→ 自动转存网盘根目录。' +
     '群文件中间副本将保留（可自行删除）。确定继续？',
     { okText: '选择文件' });
   if (!ok) return;
-  const conv = await showFormModal('格式转换', [
-    { name: 'convert_to', label: '目标格式', type: 'select', value: '', options: [
-      { value: '', label: '保持原格式' },
-      { value: 'mp4', label: '转为 MP4（视频）' },
-      { value: 'mkv', label: '转为 MKV（视频）' },
-      { value: 'webm', label: '转为 WebM（视频）' },
-      { value: 'png', label: '转为 PNG（图片）' },
-      { value: 'jpg', label: '转为 JPG（图片）' },
-      { value: 'webp', label: '转为 WebP（图片）' },
-    ] },
-  ]);
-  if (!conv) return;
   const input = document.createElement('input');
   input.type = 'file';
   input.multiple = true;
   input.onchange = async () => {
     const files = Array.from(input.files || []);
     if (!files.length) return;
+    // 格式转换必须在拿到文件之后再问：先问再选文件时用户无从得知媒体类型，
+    // 选了与类型不符的目标只会被静默丢弃（既不提示也不改名）。
+    const options = convertOptionsFor(kindsOf(files));
+    let convertTo = '';
+    if (options.length) {
+      const conv = await showFormModal('格式转换', [
+        { name: 'convert_to', label: '目标格式（仅对类型匹配的文件生效）', type: 'select', value: '', options },
+      ]);
+      if (!conv) return;
+      convertTo = conv.convert_to || '';
+      if (convertTo) {
+        const mismatch = files.filter((f) => !convertAllowed(mediaKind(f.name), convertTo)).length;
+        if (mismatch) toast(`${mismatch} 个文件的类型与所选格式不符，将保持原格式`, 'warn');
+      }
+    }
     try {
+      // 传输层统一走 api.js：那里的 API_TIMEOUT 竞速包络是唯一的超时保护，
+      // 直连 window.AstrBotPluginPage 会让 waitTasksDone 每轮都裸奔。
       const st = await uploadFilesToNetdisk(files, {
-        apiPost: (p, b) => window.AstrBotPluginPage.apiPost(p, b),
-        apiGet: (p, q) => window.AstrBotPluginPage.apiGet(p, q),
-        upload: (p, f) => window.AstrBotPluginPage.upload(p, f, undefined),
+        apiPost, apiGet, upload: bridgeUpload,
         group: getState().currentGroup || '',
-      }, { convertTo: conv.convert_to || '' });
+      }, { convertTo });
       report(st);
       refresh('netdisk');
       refresh('bridge');
@@ -89,6 +98,7 @@ export async function handleNetdiskUploadLocal() {
  * Two-step relay core (unit-testable).
  * @param {File[]} files
  * @param {{apiPost: Function, apiGet: Function, upload: Function, group: string}} deps
+ * @param {{convertTo?: string}} [options]
  * @returns {Promise<{total: number, uploaded: number, transferred: number, failed: string[]}>}
  */
 export async function uploadFilesToNetdisk(files, deps, options = {}) {
@@ -106,33 +116,35 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
   }
   if (!group) throw new Error('无可用目标群（请先在群组 Tab 加载并选择群）');
 
+  // Ids already present before the relay: a same-named file that existed
+  // beforehand must never be mistaken for the fresh upload. null = the
+  // listing was truncated, so which same-named id is new cannot be known.
+  const preexisting = await snapshotIds(deps, group);
+
   // 1) Upload jobs (two-phase); track names + task ids for the wait step.
   const jobs = [];
   const failed = [];
   for (const f of files) {
+    const convertOk = convertAllowed(mediaKind(f.name), convertTo);
+    const outName = convertTargetName(f.name, convertOk ? convertTo : '');
     try {
-      const isVideo = /\.(mp4|mkv|avi|mov|flv|webm|wmv)$/i.test(f.name);
-      const isImage = /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name);
-      const convertOk = (isVideo && ['mp4', 'mkv', 'webm'].includes(convertTo))
-        || (isImage && ['png', 'jpg', 'jpeg', 'webp'].includes(convertTo));
-      const outName = convertOk ? `${f.name.replace(/\.[^.]+$/, '')}.${convertTo}` : f.name;
       const r = await uploadOnce(group, { file: f, name: outName }, {
         convert_to: convertOk ? convertTo : undefined,
       }, deps);
-      if (!r.ok) throw new Error('prepare 未返回 token');
+      if (!r.ok) throw new Error(r.error || '上传提交失败');
       jobs.push({ name: outName, taskId: r.result?.task_id || '' });
     } catch (e) {
-      // 统一用提交后的名称（与等待步骤的去重判断一致，避免同一文件
-      // 在失败清单里出现两次不同名字的条目）。
-      failed.push(`${outNameFor(f.name, convertTo)}（上传提交失败）`);
+      failed.push(`${outName}（上传提交失败: ${(e && e.message) || e}）`);
     }
   }
 
   // 2) Wait for terminal states on the task ledger; timeouts surface as failures.
+  const rids = new Map();
   const done = await waitTasksDone(
     jobs.map((j) => j.taskId).filter(Boolean),
     { ...deps, group },
     relayTimeoutMs(files),
+    rids,
   );
   for (const j of jobs) {
     if (!j.taskId || done.get(j.taskId) !== 'done') {
@@ -140,12 +152,14 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
     }
   }
 
-  // 3) Locate successful uploads by exact name, then bridge them out.
+  // 3) Locate each successful upload, then bridge it out.
   const okJobs = jobs.filter((j) => done.get(j.taskId) === 'done');
   const transferred = [];
+  const claimed = new Set(preexisting || []);
   for (const j of okJobs) {
-    const rid = await locateById(deps, group, j.name);
+    const rid = rids.get(j.taskId) || await locateByName(deps, group, j.name, preexisting, claimed);
     if (!rid) { failed.push(`${j.name}（转存前定位失败）`); continue; }
+    claimed.add(rid);
     try {
       await deps.apiPost(API.BRIDGE.TRANSFER, { resource_ids: [rid], group });
       transferred.push(j.name);
@@ -157,15 +171,33 @@ export async function uploadFilesToNetdisk(files, deps, options = {}) {
   return { total, uploaded: jobs.length, transferred: transferred.length, failed };
 }
 
+/** Ids present in the group before the relay. A full page means the listing
+ * was truncated, so the snapshot comes back as null (= unknown) rather than
+ * as an incomplete set that would let an older same-named file pass for the
+ * fresh upload (same rule as utils/recover.js netdiskRows). A failed snapshot
+ * keeps the legacy empty set: it only weakens the same-name disambiguation. */
+async function snapshotIds(deps, group) {
+  try {
+    const r = await deps.apiGet(API.FILES.LIST, { group, page: 1, page_size: MAX_PAGE_SIZE });
+    const items = (r.items || []).filter((it) => !it.is_dir);
+    if (items.length >= MAX_PAGE_SIZE) return null; // truncated: unknown
+    return new Set(items.map((it) => Number(it.id)));
+  } catch (e) {
+    return new Set();
+  }
+}
+
 /**
  * Poll the task ledger until every task reaches a terminal state or the
  * deadline passes. Returns a map task_id -> terminal state.
  * @param {string[]} taskIds
  * @param {Object} deps - {apiPost, group}
  * @param {number} [timeoutMs]
+ * @param {Map<string, number>} [ridSink] - filled with task_id -> resource_id
+ *   when the ledger carries one (pins the exact resource, no name lookup)
  * @returns {Promise<Map<string, string>>}
  */
-export async function waitTasksDone(taskIds, deps, timeoutMs) {
+export async function waitTasksDone(taskIds, deps, timeoutMs, ridSink) {
   const result = new Map();
   const pending = new Set(taskIds);
   const deadline = Date.now() + (timeoutMs || BASE_TIMEOUT_MS);
@@ -179,6 +211,8 @@ export async function waitTasksDone(taskIds, deps, timeoutMs) {
       for (const t of r?.tasks || []) {
         if (pending.has(t.task_id) && TERMINAL_STATES.has(t.state)) {
           result.set(t.task_id, t.state);
+          const rid = ledgerResourceId(t);
+          if (ridSink && rid) ridSink.set(t.task_id, rid);
           pending.delete(t.task_id);
         }
       }
@@ -188,12 +222,43 @@ export async function waitTasksDone(taskIds, deps, timeoutMs) {
   return result;
 }
 
-/** Exact-name lookup: newest uploads sort first (created_at desc default). */
-async function locateById(deps, group, name) {
+/** Numeric resource id carried by a ledger row (absent for upload tasks,
+ * which key by staged path); 0 when unusable. */
+function ledgerResourceId(t) {
+  const raw = t?.resource_id ?? t?.payload?.resource_id;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Exact-name lookup among the group's files. Uploads of the same batch may
+ * share a name (and the group may already hold one), so matches are ordered:
+ * a new id that nothing has claimed yet wins; a listing that only offers an
+ * already-known id still resolves (single-candidate fallback).
+ * @param {Object} deps
+ * @param {string} group
+ * @param {string} name
+ * @param {Set<number>|null} preexisting - null = unknown (truncated snapshot)
+ * @param {Set<number>} claimed
+ * @returns {Promise<number>} resource id, 0 when not found
+ */
+async function locateByName(deps, group, name, preexisting, claimed) {
   try {
-    const r = await deps.apiGet(API.FILES.LIST, { group, q: name, page: 1, page_size: 20 });
-    const hit = (r.items || []).find((it) => it.name === name && !it.is_dir);
-    return hit ? Number(hit.id) : 0;
+    const r = await deps.apiGet(API.FILES.LIST, {
+      group, q: name, page: 1, page_size: MAX_PAGE_SIZE,
+    });
+    const hits = (r.items || []).filter((it) => it.name === name && !it.is_dir);
+    if (!hits.length) return 0;
+    const free = hits.filter((it) => !claimed.has(Number(it.id)));
+    if (preexisting) {
+      // Ids known to predate the relay can never be the fresh upload: prefer
+      // a candidate outside that set (the documented contract).
+      const fresh = free.filter((it) => !preexisting.has(Number(it.id)));
+      return Number((fresh[0] || free[0] || hits[0]).id);
+    }
+    // Truncated snapshot: which same-named resource is new is unknown, so
+    // guessing among several candidates could transfer the old file.
+    return free.length === 1 ? Number(free[0].id) : 0;
   } catch (e) {
     return 0;
   }
@@ -201,15 +266,6 @@ async function locateById(deps, group, name) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Output name after optional conversion (same rule as the submit loop). */
-function outNameFor(name, convertTo) {
-  const isVideo = /\.(mp4|mkv|avi|mov|flv|webm|wmv)$/i.test(name);
-  const isImage = /\.(png|jpe?g|webp|bmp|gif)$/i.test(name);
-  const convertOk = (isVideo && ['mp4', 'mkv', 'webm'].includes(convertTo))
-    || (isImage && ['png', 'jpg', 'jpeg', 'webp'].includes(convertTo));
-  return convertOk ? `${name.replace(/\.[^.]+$/, '')}.${convertTo}` : name;
 }
 
 function report(st) {

@@ -54,9 +54,17 @@ export async function netdiskRename(path, name) {
  */
 export async function netdiskRemovePaths(paths) {
   return runEachWithFailures(paths, async (p) => {
-    const clean = p.replace(/\/+$/, '') || '/';
+    const clean = String(p || '').replace(/\/+$/, '') || '/';
+    const name = clean.split('/').pop();
+    // 空名会让 OpenList 删除父目录（正是本函数上方注释警告的情形），后端
+    // 对 names:[''] 与 dir:'/' 零校验；'.'/'..' 同理指向父目录（`..` 伪行
+    // 曾带着右键菜单走到这里）。与 groupByDir 同款守卫：直接计入 failed，
+    // 不发请求。
+    if (!name || name === '.' || name === '..' || clean === '/') {
+      throw new Error('无法解析条目名，已跳过（避免误删父目录）');
+    }
     const dir = clean.replace(/\/[^/]+$/, '') || '/';
-    await apiPost(API.BRIDGE.REMOVE, { dir, names: [clean.split('/').pop()] });
+    await apiPost(API.BRIDGE.REMOVE, { dir, names: [name] });
   });
 }
 

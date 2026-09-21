@@ -32,9 +32,8 @@ const TASK_LOG_TYPES = new Set([
 ]);
 
 /** Queue-state transitions that must repaint the tasks ledger immediately:
- * without this the row keeps the pre-click state (e.g. "排队中" after a
- * pause) until an unrelated reload happens. Retry included: the row must
- * show 重试中 for its pause/interrupt buttons to be discoverable. */
+ * otherwise the row keeps the pre-click state ("排队中" after a pause) until an
+ * unrelated reload; retry included so 重试中 rows expose pause/interrupt. */
 const LEDGER_SYNC_TYPES = new Set([
   EVENT_TYPES.PAUSED, EVENT_TYPES.RESUMED, EVENT_TYPES.CANCELLED,
   EVENT_TYPES.RETRY,
@@ -53,9 +52,8 @@ function refreshAllTopics() {
 }
 
 // ---------- data_changed topic refresh coalescing ----------
-// Batch task completion pushes consecutive data_changed events: refreshes
-// for the same topic within a 150ms window coalesce into one refresh,
-// avoiding a request storm of concurrent full refetches across topics.
+// Batch completions push consecutive data_changed events: same-topic refreshes
+// within 150ms coalesce into one request instead of a concurrent refetch storm.
 const _pendingDataRefresh = new Map();
 
 function debouncedTopicRefresh(topics) {
@@ -154,8 +152,8 @@ function initSSE() {
     onReconnected: refreshAllTopics,
   });
   sse.start();
-  window.addEventListener('unload', () => sse.stop());
-  startQueueIndicator(); // 队列深度：SSE 只有单任务进度，全局深度靠轮询
+  const stopQueue = startQueueIndicator(); // 队列深度：SSE 只有单任务进度，全局深度靠轮询
+  window.addEventListener('unload', () => { sse.stop(); stopQueue(); });
 
   // Visibility staleness guard: after a long time in a hidden tab, missed
   // SSE events (or silent connection decay) can leave stale rows; a re-
@@ -199,16 +197,12 @@ import { initKeyboard } from './components/keyboard.js';
 
 // ---------- View loading ----------
 
-// View loading: stale-import guard + retry. After the import resolves,
-// loadView checks the container is still owned by this view via the router
-// generation counter (dataset.routerGen) — a fast tab switch must not let a
-// stale dynamic import write DOM into #content. A failed dynamic import stays
-// cached as a failure for the document's lifetime (a views/*.js fetch broken
-// mid-flight would fail instantly on every retry), so failed attempts are
-// retried with ?retry=N cache-busting specifiers. The dashboard rewrites
-// import specifiers with a regex that only sees string literals — every
-// attempt is therefore a spelled-out literal thunk; a runtime-built specifier
-// would fetch a second, unrewritten module graph with its own store/router.
+// View loading: stale-import guard + retry. After the import resolves, loadView
+// checks the container is still owned by this view (dataset.routerGen) so a fast
+// tab switch cannot let a stale import write DOM. A failed dynamic import is
+// cached for the document's lifetime, so retries use ?retry=N literals — the
+// dashboard rewrites only string-literal specifiers, so every attempt is a
+// spelled-out thunk (a runtime-built specifier would fetch an unrewritten graph).
 async function loadView(attempts, container) {
   const gen = container.dataset.routerGen;
   let mod;
@@ -245,9 +239,8 @@ const VIEW_IMPORTS = {
 
 // ---------- Init ----------
 
-/** E2E mode detection inline (testing/ is not shipped with the plugin —
- * a GitHub install lacks the file, and any top-level import of it would
- * 404 the whole module graph and blank the page). */
+/** E2E mode detection inline: testing/ is not shipped with the plugin, so a
+ * top-level import of it would 404 the whole module graph and blank the page. */
 function isE2EMode() {
   return new URLSearchParams(window.location.search).get('e2e') === '1';
 }
@@ -283,10 +276,17 @@ async function init() {
   for (const value of Object.values(VIEW_IMPORTS)) {
     value[1]().catch(() => { /* loadView retries at click time */ });
   }
-  // classification table preload (drives netdisk local chips).
+  // classification table preload (drives netdisk local chips) + the live
+  // page_size so the config item actually governs the file list page size.
   import('./api.js').then(async ({ apiGet, API }) => {
     try { set('extTypes', await apiGet(API.META_CLASSIFY)); }
     catch (e) { console.warn('[main] classify table unavailable:', e); }
+    try {
+      const c = await apiGet(API.CONFIG_GET);
+      const size = Number((c?.groups || []).flatMap((g) => g.items || [])
+        .find((i) => i.key === 'page_size')?.value);
+      if (Number.isFinite(size) && size > 0) set('filePageSize', size);
+    } catch (e) { console.warn('[main] page_size unavailable:', e); }
   });
 
   initRouter();

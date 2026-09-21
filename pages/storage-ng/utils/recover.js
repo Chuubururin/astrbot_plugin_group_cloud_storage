@@ -17,20 +17,29 @@
 
 import { API, apiGet, apiPost } from '../api.js';
 import { getState, set } from '../store.js';
-import { rowGroup } from './group.js';
+import { rowGroupFor } from './group.js';
 import { toast } from '../components/toast.js';
 
-/** List endpoint per source id ('' = unsupported -> no-op). */
+/** Page size of the netdisk re-list (a full page is treated as truncated). */
+const NETDISK_LIST_PAGE = 500;
+
+/**
+ * List endpoint per source id ('' = unsupported -> no-op).
+ * The group fallback must follow the module domain: album/essence rows
+ * without a group_id have to fall back to albumGroup/essenceGroup, not to
+ * the files tab's currentGroup (a foreign group 404s/403s and the row would
+ * be dropped as "deleted in the cloud").
+ */
 const DETAIL_BY_SOURCE = {
   group: (state, row) =>
-    apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row) }),
+    apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroupFor(state, row, 'group') }),
   album: (state, row) => {
     // albums/detail requires the numeric resource id (it resolves album_id
     // from stored meta and self-heals a stale one); album_id alone 400s.
-    return apiGet(API.ALBUMS.DETAIL, { id: Number(row.id), group: rowGroup(state, row) });
+    return apiGet(API.ALBUMS.DETAIL, { id: Number(row.id), group: rowGroupFor(state, row, 'album') });
   },
   essence: (state, row) =>
-    apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroup(state, row), kind: 'essence' }),
+    apiGet(API.FILES.DETAIL, { id: Number(row.id), group: rowGroupFor(state, row, 'essence'), kind: 'essence' }),
 };
 
 /** Re-list the netdisk directory and return a path->row map.
@@ -38,16 +47,19 @@ const DETAIL_BY_SOURCE = {
  * visible rows, and continuing from the current page would skip them
  * (page numbers beyond the visible slice enumerate entries the table
  * never showed). An empty result is treated as "unknown", not as
- * "everything deleted" — a filter/pagination quirk must not wipe rows. */
+ * "everything deleted" — a filter/pagination quirk must not wipe rows.
+ * A full page is equally inconclusive: rows beyond page 1 are absent from
+ * the map and would be misread as deleted, so they are left untouched. */
 async function netdiskRows() {
   try {
     const data = await apiPost(API.BRIDGE.NETDISK, {
       path: getState().netdiskPath || '/',
       page: 1,
-      page_size: 500,
+      page_size: NETDISK_LIST_PAGE,
     });
     const items = data.items || [];
     if (!items.length) return null;
+    if (items.length >= NETDISK_LIST_PAGE) return null; // truncated: unknown
     return new Map(items.map((f) => [f.remote_path || f.name, f]));
   } catch {
     return null; // re-list failed too: leave rows untouched

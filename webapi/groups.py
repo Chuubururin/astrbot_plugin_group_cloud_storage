@@ -172,6 +172,8 @@ async def api_group_honor(s: Services) -> dict:
 
 async def api_group_system_msg(s: Services) -> dict:
     group = await _param("group", "")
+    if not group:
+        return error_response("group required", status_code=400)
     only_pending = (await _param("only_pending", "false")).lower() in ("1", "true", "yes", "on")
     count = int(await _param("count", "50") or 50)
     if err := await _group_open_error(s, group):
@@ -265,7 +267,14 @@ async def api_groups_batch_update(s: Services) -> dict:
         return error_response("items required", status_code=400)
     applied, queued = 0, 0
     for it in items:
+        if not isinstance(it, dict):
+            return error_response("items[] must be objects", status_code=400)
         gid = str(it.get("group_id") or "")
+        if not gid:
+            # _group_open_error(s, "") short-circuits to None, so a missing
+            # group_id used to be submitted as target="" and could only fail
+            # later, inside the queue worker.
+            return error_response("group_id required for each item", status_code=400)
         if err := await _group_open_error(s, gid):
             return err
         display = it.get("display_name")

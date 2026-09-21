@@ -200,7 +200,14 @@ async def api_config_save(s: Services) -> dict:
         cfg_file = {**_read_plugin_config(), **normalized}
         _write_plugin_config(cfg_file)
     except Exception as e:
-        logger.warning(f"[group_cloud_storage] config persist failed: {e}")
+        # The write IS the save: reporting success after a failed write makes
+        # the page show "saved" while a config/reload (plugin reload) rolls the
+        # in-memory values back to the on-disk ones. Fail loudly and leave both
+        # disk and memory untouched so the response never lies.
+        logger.warning(
+            f"[group_cloud_storage] config persist failed: {e}", exc_info=True
+        )
+        return error_response("配置保存失败：宿主配置文件写入失败", status_code=500)
     for key, val in normalized.items():
         if hasattr(s.config, "set"):
             s.config.set(key, val)

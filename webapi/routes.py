@@ -164,6 +164,9 @@ class RouteRegistry:
         """Register every route, resolving handlers only at registration time."""
         for suffix, methods, handler_name, description, _auth in self.routes:
             handler = handler_lookup(handler_name)
+            # handler_lookup must return None for undefined names (see
+            # webapi._route_handler_lookup): a missing handler has to fail here,
+            # while routes are wired, instead of surfacing as a request-time 500.
             if handler is None:
                 raise LookupError(f"route handler not found: {handler_name}")
             context.register_web_api(

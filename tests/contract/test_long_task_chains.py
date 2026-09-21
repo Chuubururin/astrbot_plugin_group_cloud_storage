@@ -647,9 +647,11 @@ async def test_replace_name_chain_reupload_and_resync(env, monkeypatch):
     assert rec["state"] in ("ok", "done"), rec
     assert "upload_group_file:g1:new.txt" in env.api.calls
     assert "delete_group_file:g1:file_1" in env.api.calls
-    # 新名行 active 且重同步回填了新 source_ref；旧 source_ref 行软删
-    new_row = await env.store.get_resource_any(2)
-    assert new_row and new_row["name"] == "new.txt"
-    assert new_row["source_ref"] == "file_2"
-    assert await env.store.get_resource_any(1) is None
+    # 同一行就地更新：logical_key 随名字改写，重同步把新 file_id 回填回来。
+    # 不再 delete+insert 换 id —— 改名后旧名的回归会命中同一 logical_key，
+    # 若留旧 key 会把改名行覆盖掉（见 test_logical_key_convergence 的改名用例）。
+    row = await env.store.get_resource_any(1)
+    assert row and row["name"] == "new.txt"
+    assert row["source_ref"] == "file_2"
+    assert await env.store.get_resource_any(2) is None
     assert ev.of("data_changed", "replace_name")

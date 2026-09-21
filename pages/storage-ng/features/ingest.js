@@ -6,34 +6,49 @@
  * netdisk -> album, netdisk -> essence) delegate to features/cross-upload.js,
  * which drives the existing distribute endpoints.
  *
+ * Option tables and the platform-limit helpers live in
+ * features/ingest-options.js (pure data, shared with upload.js).
+ *
  * @module features/ingest
  */
 
 import { getState, refresh } from '../store.js';
 import { API, apiPost } from '../api.js';
-import { showFormModal, confirmEx } from '../components/modal.js';
+import { showFormModal } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { mutate } from '../utils/mutate.js';
-import { resolveUploadGroup, uploadOnce } from './upload.js';
+import { convertTargetName, resolveUploadGroup, uploadOnce } from './upload.js';
 import { handleNetdiskUploadLocal } from './netdisk-upload.js';
+import {
+  ALBUM_SOURCE_OPTIONS, ESSENCE_SOURCE_OPTIONS, LOSSY_OPTIONS, UPLOAD_SOURCE_OPTIONS,
+  convertOptionsFor, essenceChunkNotice, mediaKind, nameFromUrl, resolveConvertTo,
+} from './ingest-options.js';
 import {
   pickNetdiskFile, openNetdiskToGroup, openAlbumToGroup, openEssenceToGroup,
 } from './cross-upload.js';
 
 export { handleNetdiskUploadLocal };
 
-const CONVERT_OPTIONS = [
-  { value: '', label: '保持原格式' },
-  { value: 'mp4', label: '转为 MP4' },
-  { value: 'mkv', label: '转为 MKV' },
-  { value: 'webm', label: '转为 WebM' },
-  { value: 'png', label: '转为 PNG' },
-  { value: 'jpg', label: '转为 JPG' },
-  { value: 'webp', label: '转为 WebP' },
-];
-
 /** Options chosen in the album source modal, consumed by the hidden input. */
-let albumUploadOptions = { convertTo: '' };
+// Must match the backend default ("AstrBot云盘"): the album is resolved by
+// exact name, and creating a missing one needs an extension NapCat lacks.
+const DEFAULT_ALBUM_NAME = 'AstrBot云盘';
+let albumUploadOptions = { convertTo: '', lossy: '', albumName: DEFAULT_ALBUM_NAME };
+
+/**
+ * Album conversion target for one media name. A target that does not match
+ * the media type is dropped loudly instead of being forwarded (an illegal
+ * combination is a hard 400 in prepare).
+ * @param {string} name
+ * @returns {string} target extension ('' = keep the original format)
+ */
+function albumConvertTarget(name) {
+  const target = resolveConvertTo(mediaKind(name), albumUploadOptions.convertTo);
+  if (albumUploadOptions.convertTo && !target) {
+    toast(`媒体类型与所选格式「${albumUploadOptions.convertTo}」不符，已保持原格式`, 'warn');
+  }
+  return target;
+}
 
 /**
  * Files-tab upload entry: one of the five owner-mandated sources.
@@ -41,14 +56,7 @@ let albumUploadOptions = { convertTo: '' };
  */
 export async function showUploadSourceModal() {
   const res = await showFormModal('上传到群文件：选择来源', [
-    { name: 'source', label: '来源', type: 'select', value: 'local', options: [
-      { value: 'local', label: '本地文件' },
-      { value: 'url', label: 'URL 链接' },
-      { value: 'text', label: '从浏览器上传文本' },
-      { value: 'netdisk', label: '由网盘上传' },
-      { value: 'album', label: '由相册上传（图片/视频）' },
-      { value: 'essence', label: '由精华上传（文本）' },
-    ] },
+    { name: 'source', label: '来源', type: 'select', value: 'local', options: UPLOAD_SOURCE_OPTIONS },
   ]);
   if (!res?.source) return;
   if (res.source === 'local') {
@@ -71,11 +79,18 @@ export async function openUrlIngest() {
   const res = await showFormModal('URL 导入', [
     { name: 'url', label: 'URL', required: true, placeholder: 'https://...' },
     { name: 'filename', label: '文件名（可选）', placeholder: '自动检测' },
-    { name: 'convert_to', label: '格式转换', type: 'select', value: '', options: CONVERT_OPTIONS },
+    { name: 'convert_to', label: '格式转换（按媒体类型生效）', type: 'select', value: '',
+      options: convertOptionsFor(['video', 'image']) },
   ]);
   if (!res?.url) return;
+  // 媒体类型在下载前只能按 URL 推断：已知类型与目标不符时丢弃，未知类型
+  // 透传（后端按字节重判）。
+  const target = resolveConvertTo(mediaKind(nameFromUrl(res.url, res.filename)), res.convert_to);
+  if (res.convert_to && !target) {
+    toast(`URL 媒体类型与所选格式「${res.convert_to}」不符，已保持原格式`, 'warn');
+  }
   await mutate('URL 导入', API.FETCH, {
-    group, url: res.url, name: res.filename || '', convert_to: res.convert_to || '',
+    group, url: res.url, name: res.filename || '', convert_to: target,
   }, { successText: 'URL 导入任务已提交' });
 }
 
@@ -89,48 +104,51 @@ export async function openTextIngest() {
     { name: 'text', label: '内容', type: 'textarea', rows: 8, required: true, placeholder: '输入文本内容...' },
   ]);
   if (!res?.text) return;
-  // Server-side long-text sharding  is triggered automatically.
+  // Server-side long-text sharding is triggered automatically; the client
+  // announces the split with the configured essence_chunk_size threshold.
+  const chunkNotice = essenceChunkNotice(res.text);
+  if (chunkNotice) toast(chunkNotice, 'info');
   await mutate('保存', API.ESSENCE.SAVE, { group, title: res.title || '', text: res.text });
 }
 
 /**
- * Album upload entry : local media / URL image-video / netdisk media.
+ * Album upload entry : local image / URL image / netdisk image.
  * Lossy re-encode is the user's per-upload choice (checkbox + quality
  * tier, irreversible); optional format conversion remains.
  * @param {HTMLElement} fileInput - hidden <input type=file accept=image/*,video/*>
  */
 export async function showAlbumUploadModal(fileInput) {
   const res = await showFormModal('上传到相册', [
-    { name: 'source', label: '来源', type: 'select', value: 'local', options: [
-      { value: 'local', label: '本地图片（视频上传施工中，暂未实现）' },
-      { value: 'url', label: 'URL 链接（图片；视频施工中）' },
-      { value: 'netdisk', label: '由网盘上传（图片；视频施工中）' },
-    ] },
-    { name: 'album', label: '相册名', value: 'AstrBotCloud', placeholder: '目标相册名' },
-    { name: 'convert_to', label: '格式转换', type: 'select', value: '', options: CONVERT_OPTIONS },
-    { name: 'lossy', label: '有损压缩（重编码，不可逆）', type: 'select', value: '', options: [
-      { value: '', label: '不压缩（原图上传）' },
-      { value: 'high', label: '轻度（画质优先）' },
-      { value: 'medium', label: '均衡' },
-      { value: 'low', label: '强力（体积优先）' },
-    ] },
+    { name: 'source', label: '来源', type: 'select', value: 'local', options: ALBUM_SOURCE_OPTIONS },
+    { name: 'album', label: '相册名', value: DEFAULT_ALBUM_NAME, placeholder: '目标相册名' },
+    // 相册仅落图片（协议端限制）：转换目标按图片类型收窄。
+    { name: 'convert_to', label: '格式转换（图片）', type: 'select', value: '',
+      options: convertOptionsFor(['image']) },
+    { name: 'lossy', label: '有损压缩（重编码，不可逆）', type: 'select', value: '', options: LOSSY_OPTIONS },
   ]);
   if (!res?.source) return; // 模态取消（res=null）：与 showUploadSourceModal 同款守卫
   albumUploadOptions = {
     convertTo: res.convert_to || '',
     lossy: res.lossy || '',
-    albumName: res.album || 'AstrBotCloud',
+    albumName: res.album || DEFAULT_ALBUM_NAME,
   };
 
   if (res.source === 'netdisk') {
     const file = await pickNetdiskFile();
     if (!file) return;
+    if (mediaKind(file.name) !== 'image') {
+      toast('相册仅接受图片：协议端群相册不支持视频', 'warn');
+      return;
+    }
     const group = await resolveUploadGroup(getState().albumGroup, 'album');
     if (!group) { toast('无可用目标群', 'warn'); return; }
     await mutate('转存', API.BRIDGE.NETDISK_DISTRIBUTE, {
       path: file.remote_path || file.name, target: 'album', group,
       name: file.name || '',
-      convert_to: albumUploadOptions.convertTo || '',
+      convert_to: albumConvertTarget(file.name),
+      // 与同文件其他分支同款下发（此前该分支丢弃用户选择的有损压缩）。
+      lossy: Boolean(albumUploadOptions.lossy),
+      lossy_level: albumUploadOptions.lossy || undefined,
     }, { refresh: 'albums', successText: '网盘→相册转存已提交' });
     return;
   }
@@ -138,13 +156,19 @@ export async function showAlbumUploadModal(fileInput) {
   if (res.source === 'url') {
     const group = await resolveUploadGroup(getState().albumGroup, 'album');
     if (!group) { toast('无可用目标群', 'warn'); return; }
-    const url = await showFormModal('URL 上传图片/视频', [
-      { name: 'url', label: '媒体 URL', required: true, placeholder: 'https://...' },
+    const url = await showFormModal('URL 上传图片', [
+      { name: 'url', label: '图片 URL', required: true, placeholder: 'https://...' },
     ]);
     if (!url?.url) return;
+    // 相册只接受图片：视频 URL 会被 fetch 路由到 video_album 任务，再由协议端
+    // 以 retcode=100 拒绝（2026-09-16 真机证据），因此在此直接拦下。
+    if (mediaKind(nameFromUrl(url.url)) === 'video') {
+      toast('相册仅接受图片：协议端群相册不支持视频', 'warn');
+      return;
+    }
     await mutate('相册上传', API.FETCH, {
-      group, url: url.url, to_album: true, album_name: albumUploadOptions.albumName || 'AstrBotCloud',
-      convert_to: res.convert_to || '',
+      group, url: url.url, to_album: true, album_name: albumUploadOptions.albumName || DEFAULT_ALBUM_NAME,
+      convert_to: albumConvertTarget(nameFromUrl(url.url)),
       lossy: Boolean(albumUploadOptions.lossy),
       lossy_level: albumUploadOptions.lossy || undefined,
     }, { refresh: 'albums', successText: '相册上传任务已提交' });
@@ -160,12 +184,7 @@ export async function showAlbumUploadModal(fileInput) {
  */
 export async function showEssenceUploadModal() {
   const res = await showFormModal('文本保存为精华', [
-    { name: 'source', label: '来源', type: 'select', value: 'input', options: [
-      { value: 'input', label: '浏览器输入文本' },
-      { value: 'file', label: '文档（文件）读取' },
-      { value: 'url', label: 'URL 访问读取' },
-      { value: 'netdisk', label: '网盘文档读取' },
-    ] },
+    { name: 'source', label: '来源', type: 'select', value: 'input', options: ESSENCE_SOURCE_OPTIONS },
     { name: 'title', label: '标题（可选）', placeholder: '精华标题（可空）' },
     { name: 'text', label: '文本内容（来源=浏览器输入时必填）', type: 'textarea', rows: 8, placeholder: 'source=浏览器输入时填写' },
     { name: 'url', label: '文档 URL（来源=URL 访问读取时必填）', placeholder: 'https://...' },
@@ -176,6 +195,8 @@ export async function showEssenceUploadModal() {
   try {
     if (res.source === 'input') {
       if (!res.text) { toast('请输入文本内容', 'warn'); return; }
+      const chunkNotice = essenceChunkNotice(res.text);
+      if (chunkNotice) toast(chunkNotice, 'info');
       await apiPost(API.ESSENCE.SAVE, { group, title: res.title || '', text: res.text });
     } else if (res.source === 'file') {
       const fileInput = document.getElementById('essence-file');
@@ -229,46 +250,37 @@ export async function handleEssenceFileUpload(files) {
 }
 
 /**
- * Album media upload : local images/videos via prepare/upload with
- * to_album=true .
+ * Album media upload: local images via prepare/upload with to_album=true.
+ *
+ * Videos are refused locally. NapCat's `upload_image_to_qun_album` is
+ * image-only (retcode=100, "群相册上传仅支持 JPEG、PNG、GIF、WebP 或 BMP
+ * 图片"), verified against the live protocol on 2026-09-16.
  * @param {FileList|File[]} files
  */
 export async function handleAlbumFileUpload(files) {
   const fileArr = Array.from(files);
   if (!fileArr.length) return;
-  // Album video upload: the protocol side does not support it yet (the
-  // framework hook is reserved until then).
-  const isVideoName = (n) => /\.(mp4|mkv|avi|mov|flv|webm|wmv)$/i.test(n);
-  const videos = fileArr.filter((f) => isVideoName(f.name));
-  const images = fileArr.filter((f) => !isVideoName(f.name));
-  if (videos.length > 0) {
-    if (images.length === 0) {
-      toast('相册视频上传施工中，暂未实现（协议端限制；框架已保留）', 'warn');
-      return;
-    }
-    const ok = await confirmEx(
-      '相册视频上传：施工中',
-      `协议端暂不支持向群相册上传视频（框架已保留）。已跳过 ${videos.length} 个视频，` +
-        `仅上传 ${images.length} 张图片。是否继续？`,
-    );
-    if (!ok) return;
+  const images = fileArr.filter((f) => mediaKind(f.name) === 'image');
+  const videos = fileArr.filter((f) => mediaKind(f.name) === 'video').length;
+  const skipped = fileArr.length - images.length;
+  if (skipped) {
+    toast(videos === skipped
+      ? `已跳过 ${videos} 个视频（协议端群相册仅支持图片）`
+      : `已跳过 ${skipped} 个非图片文件（含 ${videos} 个视频）`, 'warn');
   }
+  if (!images.length) return;
   const group = await resolveUploadGroup(getState().albumGroup, 'album');
   if (!group) { toast('无可用目标群（请先在群组 Tab 加载群列表）', 'warn'); return; }
   let ok = 0;
   const failed = [];
   for (const f of images) {
     try {
-      // Client-side media type guess; the backend re-detects from bytes.
-      const isVideo = /\.(mp4|mkv|avi|mov|flv|webm|wmv)$/i.test(f.name);
-      const mode = isVideo ? 'video' : 'image';
-      const convertOk = (isVideo && ['mp4', 'mkv', 'webm'].includes(albumUploadOptions.convertTo))
-        || (!isVideo && ['png', 'jpg', 'jpeg', 'webp'].includes(albumUploadOptions.convertTo));
-      const r = await uploadOnce(group, { file: f }, {
-        mode,
+      const convertTo = albumConvertTarget(f.name);
+      const r = await uploadOnce(group, { file: f, name: convertTargetName(f.name, convertTo) }, {
+        mode: 'image',
         to_album: true,
-        album_name: albumUploadOptions.albumName || 'AstrBotCloud',
-        convert_to: convertOk ? albumUploadOptions.convertTo : undefined,
+        album_name: albumUploadOptions.albumName || DEFAULT_ALBUM_NAME,
+        convert_to: convertTo || undefined,
         lossy: Boolean(albumUploadOptions.lossy),
         lossy_level: albumUploadOptions.lossy || undefined,
       });
