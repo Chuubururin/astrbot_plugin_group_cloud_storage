@@ -97,6 +97,14 @@ class FakeDownloadServer:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
         self.http_port = 6186 if enabled else 0
+        self._proxy_tokens: dict[str, str] = {}  # token -> name
 
     def download_url(self, group_id: str, id: int) -> str:
         return f"http://127.0.0.1:{self.http_port}/dl/{group_id}/{id}"
+
+    def register_proxy(self, url: str, name: str) -> str:
+        import uuid
+
+        t = uuid.uuid4().hex[:10]
+        self._proxy_tokens[t] = name
+        return f"http://127.0.0.1:{self.http_port}/download?proxy={t}&token=fake"

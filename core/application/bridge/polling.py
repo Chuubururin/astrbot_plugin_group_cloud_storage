@@ -76,8 +76,15 @@ class PollingMixin:
         # Step 5: Idempotent mkdir
         await self._client.mkdir(remote_dir)
 
-        # Step 6: File source direct link
-        url = self._dlserver.download_url(gid, rid)
+        # Step 6: File source direct link — wrap through the proxy so
+        # OpenList's downloader receives a Content-Disposition with the real
+        # filename.  The plain /download?group=…&id=… link returns a bare302
+        # to the QQ CDN (no CD header); OpenList falls back to the URL tail
+        # which is a spec segment (/0 /400 /800), storing the file under a
+        # numeric name (Issue #8 / bad-link #18).
+        name = res["name"] or str(rid)
+        raw_url = self._dlserver.download_url(gid, rid)
+        url = self._dlserver.register_proxy(raw_url, name)
 
         # Step 7: Control plane submit + ledger
         try:

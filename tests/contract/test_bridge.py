@@ -154,6 +154,34 @@ async def test_status_single_task_lookup(env):
     }
 
 
+# ---------- Issue #8：bridge_out 经代理注入 Content-Disposition ----------
+
+
+@pytest.mark.asyncio
+async def test_bridge_out_submits_proxied_url_not_raw(env):
+    """bridge_out 必须经 dlserver.register_proxy 包装 URL 后再提交给
+    OpenList，使离线下载器收到带 Content-Disposition 的响应。
+
+    裸 /download?group=…&id=… 链接返回302到QQ CDN（无CD头），OpenList
+    按URL尾段命名→落盘成规格名（/0 /800）。代理链接由 dlserver 流式
+    转发并在响应头注入 filename*=UTF-8''…（Issue #8 / bad-link #18）。
+    """
+    ns = env
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+
+    # 提交的 URL 必须是代理链接（含 proxy= 参数），而非裸 download_url
+    (submitted_urls, _remote_dir) = ns.client.submitted[0]
+    assert len(submitted_urls) == 1
+    submitted_url = submitted_urls[0]
+    assert "proxy=" in submitted_url, (
+        f"bridge_out must submit a proxy URL for Content-Disposition injection, "
+        f"got raw URL: {submitted_url}"
+    )
+    # 代理链接不得是裸 download_url 格式
+    assert "group=" not in submitted_url or "proxy=" in submitted_url
+
+
 # ---------- D1：UUID 文件名 → 完成后控制面改名 ----------
 
 
