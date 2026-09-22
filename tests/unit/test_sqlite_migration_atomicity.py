@@ -337,3 +337,100 @@ async def test_integrity_check_reports_missing_database(tmp_path):
     result = await _integrity.check_integrity(tmp_path / "nope.db")
     assert result["ok"] is False
     assert result["errors"] == ["database file not found"]
+
+
+# ---------- 主张 4：换库（rebuild / restore）前的 quiesce ----------
+
+
+def _slow_probe(events: list[str]):
+    """在途调用桩：停泊 0.5s，让"换库动作"有机会插到它前面。"""
+
+    def _call(conn):
+        events.append("call_start")
+        time.sleep(0.5)
+        events.append("call_end")
+        return conn.execute("SELECT 1").fetchone()[0]
+
+    return _call
+
+
+@pytest.mark.asyncio
+async def test_rebuild_waits_for_in_flight_calls_before_swapping(tmp_path, monkeypatch):
+    """重建必须等在途调用结束。
+
+    ``_rebuild_database`` 末尾的 ``os.replace`` 会 unlink 旧 inode：在途调用
+    手里的句柄指向那个已 unlink 的文件，它之后的写提交到那里 = **静默丢失**
+    （不报错，调用方看到成功）。所以换库动作必须排在 call_end 之后。
+    """
+    db = tmp_path / "meta.db"
+    store = SqliteMetaStore(db)
+    await store.init()
+    await store.upsert_resources([_res(1)])
+
+    events: list[str] = []
+    real = _store_mod._rebuild_database
+
+    def _spy(db_path):
+        events.append("swap")
+        return real(db_path)
+
+    monkeypatch.setattr(_store_mod, "_rebuild_database", _spy)
+
+    inflight = asyncio.create_task(store._conn.execute(_slow_probe(events)))
+    await asyncio.sleep(0.15)  # 让在途调用真的停泊在 fn 里（否则是假绿）
+    assert events == ["call_start"], f"在途调用未停泊：{events}"
+
+    await store.reset_and_rebuild()
+    assert await inflight == 1
+
+    assert events == ["call_start", "call_end", "swap"], (
+        f"重建没有等在途调用结束（事件序 {events}）—— 在途写会静默丢失"
+    )
+    page = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
+    assert page.total == 0
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_waits_for_in_flight_calls_before_overwriting(tmp_path, monkeypatch):
+    """恢复必须等在途调用结束。
+
+    ``restore()`` 用 ``src.backup(dst)`` **原地覆盖活库**；在途调用若在覆盖
+    之后提交，就会把旧世界的一行混进刚恢复好的库里（混合状态）。
+    这里用"新 ConnectionManager 被构造"作为覆盖完成的标记（它在 finally 里，
+    紧跟 _copy 之后）。
+    """
+    db = tmp_path / "meta.db"
+    store = SqliteMetaStore(db)
+    await store.init()
+    await store.upsert_resources([_res(1)])
+
+    src_path = tmp_path / "src.db"
+    src_store = SqliteMetaStore(src_path)
+    await src_store.init()
+    await src_store.upsert_resources([_res(99)])
+    await src_store.close()
+
+    events: list[str] = []
+    mgr_cls = type(store._conn)
+    real_init = mgr_cls.__init__
+
+    def _spy_init(self, db_path, *a, **kw):
+        events.append("swap")
+        return real_init(self, db_path, *a, **kw)
+
+    monkeypatch.setattr(mgr_cls, "__init__", _spy_init)
+
+    inflight = asyncio.create_task(store._conn.execute(_slow_probe(events)))
+    await asyncio.sleep(0.15)
+    assert events == ["call_start"], f"在途调用未停泊：{events}"
+
+    await store.restore(src_path)
+    assert await inflight == 1
+
+    assert events == ["call_start", "call_end", "swap"], (
+        f"restore 没有等在途调用结束（事件序 {events}）—— 在途写会混进恢复后的库"
+    )
+    page = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
+    assert sorted(r.name for r in page.items) == ["f99.zip"]
+    await store.close()

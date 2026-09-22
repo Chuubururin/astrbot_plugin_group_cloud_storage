@@ -100,11 +100,11 @@ async def test_pause_visible_during_retry_backoff():
             failed.set()
             raise RuntimeError("boom")
 
-    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=1.0)
+    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=0.3)
     await q.start()
     tid = await q.submit("test")
     await failed.wait()
-    await asyncio.sleep(0.1)  # worker 进入 backoff sleep（_pending 已回补）
+    await asyncio.sleep(0.05)  # worker 进入 backoff sleep（_pending 已回补）
     assert q.pause_task(tid) == "queued"  # 修复前 "unknown"
     assert q.resume_task(tid) == "resumed"
     await _drain(q, 1)
@@ -129,11 +129,11 @@ async def test_cancel_during_retry_backoff_sticks():
         failed.set()
         raise RuntimeError("boom")
 
-    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=1.0)
+    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=0.3)
     await q.start()
     tid = await q.submit("test")
     await failed.wait()
-    await asyncio.sleep(0.1)  # worker 进入 backoff sleep
+    await asyncio.sleep(0.05)  # worker 进入 backoff sleep
     assert q.cancel_task(tid) is True  # 修复前 False（op 不在任何索引里）
     await _drain(q, 1)
     assert calls["n"] == 1  # 取消后不重跑（修复前会继续重试 2 次）

@@ -122,7 +122,7 @@ async def test_invariant_retry_exhausted_leaves_no_index_entry(kind):
     async def run(op: Op) -> None:
         raise ValueError("always fails")
 
-    q = OpQueue(run, interval=0.0, slots=2, max_retries=1, backoff_base=1.0)
+    q = OpQueue(run, interval=0.0, slots=2, max_retries=1, backoff_base=0.05)
     await q.start()
     tid = await q.submit(kind)
     # 退避窗口内必须仍可被控制（M11：retry 期间不得脱离索引）

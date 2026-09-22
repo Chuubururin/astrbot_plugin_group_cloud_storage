@@ -1,0 +1,24 @@
+# 测试专用依赖。运行时依赖见 requirements.txt（AstrBot 只装那一份）。
+# 安装：pip install -r requirements.txt -r requirements-dev.txt
+#
+# 本文件里每一项的存在理由只有一个：让原本会 pytest.skip（importorskip）
+# 的用例真正跑起来。tests/conftest.py 的 SKIP GUARD 在 REQUIRE_NO_SKIP=1 时
+# 会把任何一条 skip 变成失败，所以从这里删掉一项 = 立刻红灯，而不是静默
+# 缩小覆盖率。
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-timeout==2.4.0  # pytest.ini: timeout = 60（每次测试的墙钟上界）
+# 下面这项是上面「唯一存在理由」的例外：xdist 不解决 skip，
+# 它只让 CI 并行跑（ci.yml 的 -n auto --dist loadfile）。
+pytest-xdist==3.8.0   # ci.yml 并行；串行 49s → 17s（本机 4 核实测）
+paramiko==5.0.0       # tests/unit/test_sftp_vfs_e2e.py、test_transfer.py、
+                      # test_download_server_regressions.py
+pysmb==1.2.15         # tests/unit/test_transfer.py（SMB 传输）
+pillow==12.3.0        # tests/unit/test_distributor_render_bounds.py、
+                      # tests/contract/test_distributor.py
+impacket==0.13.1      # tests/security/test_download_server_smb_auth.py、
+                      # tests/security/test_smb_teardown_contract.py（真实 SMB 服务端）
+#
+# ffmpeg 是二进制而不是 pip 包（tests/unit/test_composition.py、
+# tests/contract/test_converter.py、tests/contract/test_cloud_ingest.py 需要）：
+#   Debian/Ubuntu: sudo apt-get install -y ffmpeg

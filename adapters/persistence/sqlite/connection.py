@@ -28,7 +28,15 @@ class ConnectionManager:
         self._pool: queue.Queue[sqlite3.Connection] = queue.Queue()
         self._created = 0
         self._closed = False
-        self._lock = threading.Lock()  # only guards the _created counter
+        # Guards _created and the in-flight counter below.
+        self._lock = threading.Lock()
+        # Calls that already checked out a connection. close() retires the
+        # pool but does NOT wait for them, so a swap-in-place (rebuild /
+        # restore) must drain() first or a straggling write lands on the old
+        # file and is lost silently.
+        self._inflight = 0
+        self._idle = threading.Event()
+        self._idle.set()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
@@ -73,24 +81,36 @@ class ConnectionManager:
             ) from exc
 
     def _run(self, fn, *args):
-        conn = self._acquire()
+        # Counted before the checkout: a call that is still waiting for a
+        # pooled connection must also block drain(), otherwise it can start
+        # executing after the database file was swapped.
+        with self._lock:
+            self._inflight += 1
+            self._idle.clear()
+        conn = None
         try:
+            conn = self._acquire()
             return fn(conn, *args)
         finally:
-            if conn.in_transaction:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            if self._closed:
-                # close() ran while this call was in flight: retire the
-                # connection instead of pooling it (nothing will drain it).
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            else:
-                self._pool.put(conn)
+            if conn is not None:
+                if conn.in_transaction:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if self._closed:
+                    # close() ran while this call was in flight: retire the
+                    # connection instead of pooling it (nothing will drain it).
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                else:
+                    self._pool.put(conn)
+            with self._lock:
+                self._inflight -= 1
+                if self._inflight == 0:
+                    self._idle.set()
 
     async def execute(self, fn, *args):
         """Run blocking fn(conn, *args) on a pooled connection."""
@@ -98,6 +118,23 @@ class ConnectionManager:
 
     # Backward-compatible alias for execute().
     exec = execute
+
+    async def drain(self, timeout: float = 5.0) -> bool:
+        """Wait (bounded) for in-flight calls to return; True when idle.
+
+        close() only retires the pool. A call that already holds a connection
+        keeps running against the old handle, which matters whenever the
+        database file is swapped underneath it (reset_and_rebuild's
+        os.replace unlinks the old inode; restore() overwrites the live file
+        in place). Call this between close() and the swap.
+
+        Best-effort by design, like OpQueue.shutdown(): a call stuck waiting
+        on a saturated pool can outlive the timeout, so this returns False
+        instead of blocking the caller forever.
+        """
+        if self._inflight == 0:
+            return True
+        return await asyncio.to_thread(self._idle.wait, timeout)
 
     async def close(self) -> None:
         # Drain idle connections; the closed flag goes up first so checkouts

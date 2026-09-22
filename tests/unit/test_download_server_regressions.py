@@ -672,6 +672,143 @@ def test_sftp_open_rematerializes_a_truncated_cache(make_service, loop_thread, t
     assert calls == [("g1", 0)], "L6: 空缓存必须被重新物化，不能当命中"
 
 
+def test_cache_path_never_escapes_the_cache_dir(make_service):
+    """缓存文件名取末段路径分量：含 / 或 .. 的资源名不得把缓存写到 _cache_dir 之外。
+
+    修复前 cache_path 直接拼接 info["name"]，`Path.__truediv__` 会把其中的
+    分隔符当路径处理 ⇒ 缓存文件落在 _cache_dir 之外（可写任意路径）。
+    """
+    svc = make_service(store=_FakeStore(1))
+    hostile = ["../../etc/passwd", "sub/dir/f0.bin", "..", ".", "", "a/../../b"]
+    for name in hostile:
+        p = cache_path(svc, {"group": "g1", "id": 7, "name": name})
+        assert p.parent == svc._cache_dir, f"资源名 {name!r} 逃出了缓存目录: {p}"
+    # 正常名保持原样，不因归一化而改名（缓存命中率不能被这次修复破坏）
+# ---------- M7 follow-up: 并发 open 去重 ----------
+
+
+def _race_materialize(svc, infos: list[dict]):
+    """两个线程在同一道闸门后同时物化（SFTP 就是每连接一个线程）。
+
+    返回 (results, errors)：results 按序号记返回路径，errors 记异常——异常
+    不直接抛出，好让断言先看到"下载了几次"这条根因证据。
+    """
+    results: dict[int, object] = {}
+    errors: dict[int, Exception] = {}
+    barrier = threading.Barrier(len(infos), timeout=10)
+
+    def _worker(rid: int, info: dict) -> None:
+        try:
+            barrier.wait()
+            results[rid] = dio.materialize_to_cache(svc, info)
+        except Exception as e:  # 回传到断言里，别让线程静默死掉
+            errors[rid] = e
+
+    threads = [
+        threading.Thread(target=_worker, args=(rid, info))
+        for rid, info in enumerate(infos)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+        assert not t.is_alive(), "并发物化未在 15s 内返回（疑似死锁）"
+    return results, errors
+
+
+def test_concurrent_opens_download_the_resource_once(
+    make_service, loop_thread, monkeypatch, tmp_path
+):
+    """M7 续：并发打开同一路径只应下载一次。
+
+    SFTP 是每连接一个线程：两个客户端同时 open 同一文件，此前会各自走一遍
+    「取 CDN 链接 → 下载 → 拷贝」——重复传输，并各留一份 recon_* 重组产物。
+    """
+    payload = b"payload-bytes" * 4096
+    src = tmp_path / "recon_concurrent.bin"
+    src.write_bytes(payload)
+    calls: list[tuple] = []
+    copies: list = []
+
+    async def _download_info(group, rid):
+        calls.append((group, rid))
+        return (src.as_posix(), "concurrent.bin")
+
+    svc = make_service(download_info=_download_info)
+    svc._loop = loop_thread
+    real_copy = dio._copy_into_cache
+
+    def _slow_copy(sp, cache):
+        copies.append(cache)
+        time.sleep(0.3)  # 拉宽持锁窗口：另一个 open 必须在这期间到达
+        real_copy(sp, cache)
+
+    monkeypatch.setattr(dio, "_copy_into_cache", _slow_copy)
+    info = {"group": "g1", "id": 0, "name": "f0", "size": len(payload)}
+    results, errors = _race_materialize(svc, [dict(info), dict(info)])
+
+    assert calls == [("g1", 0)], (
+        f"并发 open 重复下载：download_info 被调用 {len(calls)} 次（应为 1 次）"
+    )
+    assert not errors, f"并发 open 抛异常：{errors}"
+    expected = cache_path(svc, info)
+    assert copies == [expected], f"重复拷贝：{copies}"
+    assert results == {0: expected, 1: expected}, results
+    assert expected.read_bytes() == payload
+
+
+def test_the_cache_lock_is_per_path_not_global(
+    make_service, loop_thread, monkeypatch, tmp_path
+):
+    """去重锁必须按缓存路径分片：两个不同资源必须能同时物化。
+
+    一把全局锁同样能"修好"重复下载，却把 SFTP 吞吐压成单路——本用例钉粒度。
+    """
+    payload = b"payload-bytes" * 4096
+    srcs = {}  # rid -> recon 源文件
+    for rid in (0, 1):
+        p = tmp_path / f"recon_{rid}.bin"
+        p.write_bytes(payload)
+        srcs[rid] = p
+
+    async def _download_info(group, rid):
+        return (srcs[rid].as_posix(), f"f{rid}")
+
+    svc = make_service(download_info=_download_info)
+    svc._loop = loop_thread
+    state = {"active": 0, "peak": 0}
+    guard = threading.Lock()
+    real_copy = dio._copy_into_cache
+
+    def _slow_copy(sp, cache):
+        with guard:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            time.sleep(0.3)  # 让两个物化窗口重叠
+            real_copy(sp, cache)
+        finally:
+            with guard:
+                state["active"] -= 1
+
+    monkeypatch.setattr(dio, "_copy_into_cache", _slow_copy)
+    infos = [
+        {"group": "g1", "id": rid, "name": f"f{rid}", "size": len(payload)}
+        for rid in (0, 1)
+    ]
+    results, errors = _race_materialize(svc, infos)
+
+    assert not errors, f"并发物化抛异常：{errors}"
+    assert state["peak"] == 2, (
+        f"不同资源未能并行物化（峰值并发 {state['peak']}）——锁必须按缓存路径"
+        "分片，全局锁会把 SFTP 吞吐压成单路"
+    )
+    assert results == {0: cache_path(svc, infos[0]), 1: cache_path(svc, infos[1])}
+
+
+    assert cache_path(svc, {"group": "g1", "id": 0, "name": "f0"}).name == "g1_0_f0"
+
+
 # ---------- L7: stat() 不再翻遍全群分页 ----------
 
 

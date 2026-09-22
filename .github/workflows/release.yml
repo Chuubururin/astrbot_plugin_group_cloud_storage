@@ -54,16 +54,18 @@ jobs:
         run: pip install "ruff==0.16.6" && ruff check . --output-format=github
 
       - name: Python 单测
+        env:
+          REQUIRE_NO_SKIP: "1"
         run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio paramiko pysmb
-          python -m pytest tests/unit/ -x -q
+          pip install -r requirements.txt -r requirements-dev.txt
+          which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+          python -m pytest tests/ -x -q
 
       - name: 前端单测与契约检查
         run: |
           npm ci --ignore-scripts
           npm run test:unit
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio pytest-timeout
           python tools/check_import_contracts.py
 
   build:
