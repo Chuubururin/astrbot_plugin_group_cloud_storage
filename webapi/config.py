@@ -84,6 +84,37 @@ _CONFIG_GROUPS = [
     "高级选项",
 ]
 
+# Keys whose value a long-lived object snapshots at construction time:
+# writing s.config alone does not reach the running service, so a change only
+# takes effect after a plugin reload. config/get flags these fields and
+# config/save prompts the reload - both must read THIS list. Two hand-synced
+# copies is how a key silently stops being reported, and a silently-ignored
+# key is worse than a wrong one because nothing surfaces it.
+_RELOAD_REQUIRED_KEYS = frozenset({
+    # PermissionService.__init__ -> self._managed / self._admins
+    "managed_groups",
+    "global_admin_qqs",
+    # KeyedLimiter: an account's interval is fixed on its first acquire()
+    "request_interval",
+    # DownloadServerService.__init__ -> self.enabled / host / ports / token /
+    # allow_private; the token also authenticates every http/sftp/smb address
+    "download_server_enabled",
+    "download_server_host",
+    "download_http_port",
+    "download_sftp_port",
+    "download_smb_port",
+    "download_token",
+    "fetch_allow_private_address",
+    # OpenListClient.__init__ -> self._base_url / _token / _timeout / _allow_private
+    "openlist_enabled",
+    "openlist_base_url",
+    "openlist_username",
+    "openlist_password",
+    "openlist_token",
+    "openlist_timeout_sec",
+    "openlist_allow_private_address",
+})
+
 
 async def api_config_get(s: Services) -> dict:
     """Config center data grouped for rendering: _conf_schema groups plus
@@ -102,12 +133,7 @@ async def api_config_get(s: Services) -> dict:
     except Exception:
         schema = {}
     cfg = s.config.raw if hasattr(s.config, "raw") else dict(s.config)
-    reload_required = {
-        "request_interval", "managed_groups", "global_admin_qqs",
-        "download_server_enabled", "download_server_host", "download_http_port", "download_sftp_port",
-        "openlist_enabled", "openlist_base_url", "openlist_username",
-        "openlist_password", "openlist_token",
-    }
+    reload_required = _RELOAD_REQUIRED_KEYS
     groups: dict[str, list] = {g: [] for g in _CONFIG_GROUPS}
     for key, meta in schema.items():
         group = meta.get("group", "其他")
@@ -223,12 +249,5 @@ async def api_config_save(s: Services) -> dict:
         from core.application.files import consts as files_consts
 
         files_consts.configure(s.config)
-    reload_required = sorted(
-        k for k in saved if k in {
-            "request_interval", "managed_groups", "global_admin_qqs",
-            "download_server_enabled", "download_server_host", "download_http_port", "download_sftp_port",
-            "openlist_enabled", "openlist_base_url", "openlist_username",
-            "openlist_password", "openlist_token",
-        }
-    )
+    reload_required = sorted(k for k in saved if k in _RELOAD_REQUIRED_KEYS)
     return json_response({"saved": saved, "reload_required": reload_required})

@@ -192,6 +192,34 @@ class TestApiConfigGet:
         assert "request_interval" in result["reload_required"]
 
     @pytest.mark.asyncio
+    async def test_reload_required_covers_every_ctor_frozen_key(self, monkeypatch):
+        """构造期固化的配置键必须全部被标记。
+
+        这些键在服务 __init__ 里被复制进长生命周期对象，只写 s.config
+        到不了运行中的服务。漏标一个 = 页面提示"已保存"而服务继续用旧值，
+        且没有任何地方报错（静默失效）。
+        """
+        svc = _make_services()
+        result = await _wp.api_config_get(svc)
+        flagged = set(result["reload_required"])
+        expected = {
+            # PermissionService.__init__
+            "managed_groups", "global_admin_qqs",
+            # KeyedLimiter（首次 acquire 固化）
+            "request_interval",
+            # DownloadServerService.__init__
+            "download_server_enabled", "download_server_host",
+            "download_http_port", "download_sftp_port", "download_smb_port",
+            "download_token", "fetch_allow_private_address",
+            # OpenListClient.__init__
+            "openlist_enabled", "openlist_base_url", "openlist_username",
+            "openlist_password", "openlist_token", "openlist_timeout_sec",
+            "openlist_allow_private_address",
+        }
+        missing = sorted(expected - flagged)
+        assert not missing, f"构造期固化但未标记 reload_required: {missing}"
+
+    @pytest.mark.asyncio
     async def test_config_get_groups_preserve_order(self, monkeypatch):
         """分组顺序应与 _CONFIG_GROUPS 定义一致。"""
         svc = _make_services()

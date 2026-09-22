@@ -223,6 +223,43 @@ class TestOpenListClientAuth:
 
         await client.aclose()
 
+    @pytest.mark.asyncio
+    async def test_aclose_skips_logout_without_a_session_and_bounds_it(self):
+        """aclose() 的登出必须满足两点：无会话不得触发登录；有会话必须有界。
+
+        修复前无条件发登出，而 _request_no_retry -> ensure_token() 在没有
+        token 时会**发起一次登录**（客户端默认超时 30s）—— 卸载路径被它拖住。
+        """
+        calls: list[dict] = []
+
+        class _StubClient:
+            async def request(self, method, path, **kw):
+                calls.append({"method": method, "path": path, **kw})
+                return MagicMock(status_code=200, text="")
+
+            async def aclose(self):
+                calls.append({"closed": True})
+
+        # A: 无 token -> 不发登出（跳过 ensure_token，不发起登录）
+        anon = OpenListClient(base_url="https://example.com:5244")
+        anon._validated = True  # 跳过 DNS 半段（本用例不测它）
+        anon._client = _StubClient()
+        await anon.aclose()
+        assert calls == [{"closed": True}], f"无 token 时不应发登出: {calls}"
+
+        # B: 有 token -> 发登出，且带显式有限超时
+        calls.clear()
+        authed = OpenListClient(base_url="https://example.com:5244", token="t")
+        authed._validated = True
+        authed._client = _StubClient()
+        await authed.aclose()
+        logout = [c for c in calls if c.get("path") == "/api/auth/logout"]
+        assert len(logout) == 1, f"有 token 时必须发一次登出: {calls}"
+        assert calls[-1] == {"closed": True}, f"客户端未关闭: {calls}"
+        timeout = logout[0].get("timeout")
+        assert isinstance(timeout, (int, float)), f"登出未带显式超时: {logout[0]}"
+        assert 0 < float(timeout) <= 5.0, f"登出超时过大: {timeout}"
+
 
 class TestOpenListClientSubmit:
     """REQ-08/09: submit offline download with DTO mapping."""

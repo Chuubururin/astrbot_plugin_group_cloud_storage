@@ -54,6 +54,10 @@ class IntegrityMixin(StorePart):
         # restore, then swap in a fresh manager (a closed manager refuses
         # new checkouts) -- on failure too, so the store stays usable.
         await self._conn.close()
+        # Quiesce before overwriting the live file: a call still holding a
+        # connection from the retired pool could commit on top of the
+        # restored database and leave a mixed state.
+        await self._conn.drain()
         try:
             await asyncio.to_thread(_copy)
         finally:

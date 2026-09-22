@@ -185,6 +185,10 @@ class SqliteMetaStore:
     async def _reset_and_rebuild_locked(self) -> None:
         try:
             await self.close()
+            # Quiesce before os.replace: the swap unlinks the inode a call
+            # that is still running holds, so its write would commit there
+            # and vanish without an error.
+            await self._state.conn.drain()
             # sqlite3 + filesystem work is blocking; keep it off the event
             # loop, like ConnectionManager.execute() and IntegrityMixin.
             await asyncio.to_thread(_rebuild_database, self._db_path)

@@ -46,6 +46,10 @@ __all__ = [
     "OpenListClient",
 ]
 
+# aclose() logs out best-effort: bound it explicitly so a hung control plane
+# cannot stall plugin unload for the client's full default timeout (30s).
+_LOGOUT_TIMEOUT = 5.0
+
 
 class OpenListClient:
     """Thin async client for OpenList REST API.
@@ -127,11 +131,17 @@ class OpenListClient:
     async def aclose(self) -> None:
         """Close httpx client and optionally logout."""
         if self._client is not None:
-            # Best-effort logout (don't fail on error)
-            try:
-                await self._request_no_retry("GET", "/api/auth/logout")
-            except Exception:
-                pass
+            # Best-effort logout, and only when a session actually exists:
+            # _request_no_retry -> ensure_token() would otherwise perform a
+            # *login* while we are tearing the client down. Bounded by
+            # _LOGOUT_TIMEOUT so a hung control plane cannot stall unload.
+            if self._token:
+                try:
+                    await self._request_no_retry(
+                        "GET", "/api/auth/logout", timeout=_LOGOUT_TIMEOUT
+                    )
+                except Exception:
+                    pass
             await self._client.aclose()
             self._client = None
 
@@ -211,8 +221,13 @@ class OpenListClient:
         *,
         json: dict | None = None,
         params: dict | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
-        """Single request attempt without retry logic. Returns raw httpx.Response."""
+        """Single request attempt without retry logic. Returns raw httpx.Response.
+
+        ``timeout`` overrides the client default for this one call (None keeps
+        the client default); teardown paths pass a short one.
+        """
         client = await self._ensure_client()
         headers = {}
 
@@ -226,12 +241,18 @@ class OpenListClient:
                 raise
 
         try:
+            # Only add the key when set: httpx treats an explicit
+            # timeout=None as "no timeout at all", not "client default".
+            extra: dict[str, Any] = {}
+            if timeout is not None:
+                extra["timeout"] = timeout
             resp = await client.request(
                 method,
                 path,
                 json=json,
                 params=params,
                 headers=headers,
+                **extra,
             )
         except httpx.TimeoutException as e:
             # httpx exception str is empty; name the kind so callers

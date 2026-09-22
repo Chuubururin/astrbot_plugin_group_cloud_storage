@@ -118,6 +118,10 @@ class DownloadServerService:
         # and other host-generated artifacts served over http/sftp)
         self._staged: dict[str, dict] = {}
         self._row_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+        # One lock per cache path: concurrent SFTP opens of one resource must
+        # not each re-download it (download_server_io.materialize_to_cache)
+        self._cache_locks: dict[str, threading.Lock] = {}
+        self._cache_locks_guard = threading.Lock()
         # Remote-URL proxy registry (bad-link #18: Content-Disposition
         # injection so offline download stores the real filename)
         self._proxy_registry = ProxyRegistry()
@@ -173,7 +177,9 @@ class DownloadServerService:
             try:
                 target = self._smb_dir / safe
                 if Path(p).resolve() != target.resolve():
-                    target.write_bytes(p.read_bytes())
+                    # Streamed copy: read_bytes() held a second full copy of
+                    # the artifact in RAM (staged exports can be large).
+                    shutil.copyfile(p, target)
                 info["smb"] = {"share": self.smb_share(), "path": f"{safe}"}
             except OSError as e:
                 logger.debug(f"[dlserver] staged smb copy failed: {e}")
