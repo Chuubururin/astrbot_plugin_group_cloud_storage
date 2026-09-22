@@ -85,13 +85,13 @@ _ROW_ENTRYPOINTS = {
     ],
     "album": [
         (DistributorService, "distribute_album"),
-        (BridgeService, "submit_offline_download"),
+        (BridgeService, "submit_offline"),
         (CloudIngestService, "submit_fetch"),
         (CloudIngestService, "submit_essence_save"),
     ],
     "essence": [
         (DistributorService, "distribute_essence"),
-        (BridgeService, "submit_offline_download"),
+        (BridgeService, "submit_offline"),
         (FileOpsService, "submit_upload"),
         (CloudIngestService, "submit_fetch"),
     ],

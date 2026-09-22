@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from core.domain.enums import ResourceStatus, ResourceType  # noqa: E402
 from core.domain.resource import Resource  # noqa: E402
+from core.domain.sync import ResourceQuery  # noqa: E402
 
 
 def _res(t, name, tags, source_ref):
@@ -60,9 +61,7 @@ async def test_tag_cloud_deleted_excluded(tmp_path):
         _res(ResourceType.FILE, "b.txt", ["移除"], "f2"),
     ])
     page = await store.query_resources(
-        __import__("core.domain.sync", fromlist=["ResourceQuery"]).ResourceQuery(
-            group_id="g1", page_size=10
-        )
+        ResourceQuery(group_id="g1", page_size=10)
     )
     gone = next(it for it in page.items if it.name == "b.txt")
     await store.update_resource_fields(gone.id, status=ResourceStatus.DELETED.value)

@@ -38,6 +38,11 @@ DEFAULTS: dict = {
     "download_sftp_port": 0,
     "download_smb_port": 0,
     "download_token": "",
+    # Download-server cache housekeeping (see download_cache.sweep_cache):
+    # the mkdtemp root used to grow until the next plugin reload, because
+    # shutdown()'s rmtree was the only cleanup. 0 disables either rule.
+    "download_cache_max_mb": 1024,
+    "download_cache_ttl_hours": 24,
     "op_high_priority_kinds": [],
     "database_admin_token": "",
     # OpenList bridge configuration 

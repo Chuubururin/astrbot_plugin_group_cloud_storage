@@ -75,6 +75,17 @@ class _FakeBridge:
     async def submit_in(self, path, *, group_id):
         return f"in-{path}"
 
+    async def submit_offline(self, url, group_id, filename):
+        """Mirror of BridgeService.submit_offline (the public contract the
+        distributor is allowed to touch)."""
+        remote_dir, _ = self._render_dst(self._dst_dir or "/", group_id, filename)
+        await self.client.mkdir(remote_dir)
+        tasks = await self.client.submit_offline_download([url], remote_dir)
+        return tasks[0].id if tasks else ""
+
+    async def get_raw_url(self, path):
+        return await self.client.get_raw_url(path)
+
 
 class _FakeOpenList:
     def __init__(self):
@@ -204,7 +215,7 @@ async def test_album_to_netdisk(env):
     api.album_media = {"g1:al1": [{"url": "http://cdn/x.jpg", "name": "x.jpg"}]}
     out = await d.distribute_album("g1", "al1", "x.jpg", "netdisk")
     assert out["target"] == "netdisk" and out["task_id"].startswith("off-")
-    client = d._bridge_client(bridge)
+    client = bridge.client
     # 坏链#17：目标目录含群目录段（模板渲染），且提交前幂等建目录
     assert client._offline_paths == ["/smb/g1"]
     assert client._mkdirs == ["/smb/g1"]
@@ -224,7 +235,7 @@ async def test_album_to_netdisk_proxy_carries_name(env):
     out = await d.distribute_album("g1", "al12", "照片.png", "netdisk")
     assert out["target"] == "netdisk"
     # 提交给 OpenList 的 URL 是代理 URL，不是 CDN 原链
-    client = d._bridge_client(bridge)
+    client = bridge.client
     assert dl.proxies, "register_proxy must be called"
     cdn_url, proxied_name = dl.proxies[0]
     assert cdn_url == "http://cdn/photo/800?ek=1"
@@ -240,7 +251,7 @@ async def test_album_to_netdisk_without_proxy_appends_name(env):
     api.album_media = {"g1:al13": [{"url": "http://cdn/photo/800", "name": "照片.png"}]}
     out = await d.distribute_album("g1", "al13", "照片.png", "netdisk")
     assert out["target"] == "netdisk"
-    client = d._bridge_client(bridge)
+    client = bridge.client
     assert client._offline_paths == ["/smb/g1"]
     # 核心断言：提交给 OpenList 的 URL 已追加真实文件名（尾段 "800" 是规格名）
     assert client._offline_urls == [["http://cdn/photo/800/照片.png"]]

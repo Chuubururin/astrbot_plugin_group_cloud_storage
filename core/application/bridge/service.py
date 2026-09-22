@@ -87,8 +87,27 @@ class BridgeService(SubmitMixin, InboundMixin, PollingMixin, RecoveryMixin):
             urls, path, tool=tool, delete_policy=delete_policy
         )
 
+    async def submit_offline(self, url: str, group_id: str, filename: str) -> str:
+        """Offline-download one remote URL into the per-group archive dir.
+
+        Renders ``openlist_dst_dir`` + the {group_id}/{filename} template
+        (same source as bridge_out), mkdirs idempotently, then submits and
+        returns the task id ("" when OpenList reports none). Callers pass a
+        final URL only — naming/proxy concerns of the source URL belong to
+        the caller, the storage-layout contract lives here.
+        """
+        remote_dir, _remote_path = self._render_dst(
+            self._dst_dir or "/", group_id, filename
+        )
+        await self._client.mkdir(remote_dir)
+        tasks = await self._client.submit_offline_download([url], remote_dir)
+        return tasks[0].id if tasks else ""
+
     async def mkdir(self, path: str) -> None:
         await self._client.mkdir(path)
+
+    async def get_raw_url(self, path: str):
+        return await self._client.get_raw_url(path)
 
     async def rename(self, path: str, new_name: str) -> None:
         await self._client.rename(path, new_name)

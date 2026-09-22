@@ -833,3 +833,46 @@ async def test_fts_repair_failure_does_not_veto_version_chain(tmp_path, monkeypa
     conn.execute("CREATE TABLE _post_repair_probe (x INTEGER)")
     conn.commit()
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_account_groups_managed_returns_rowcount(store):
+    """回归：mark_account_groups_managed 曾漏 return 恒返回 None，
+    导致离线检测的 `if n:` 永不命中、_hidden_accounts 不登记、恢复逻辑失效。"""
+    from core.domain.sync import GroupInfo
+
+    await store.upsert_groups([
+        GroupInfo(group_id="g1", account_id="a1", managed=1),
+        GroupInfo(group_id="g2", account_id="a1", managed=1),
+        GroupInfo(group_id="g3", account_id="a2", managed=1),
+    ])
+
+    n_off = await store.mark_account_groups_managed("a1", 0)
+    assert n_off == 2, f"下线置 0 应返回受影响行数，实际 {n_off!r}"
+
+    # 再置 0 已无变化 → 0（幂等）
+    assert await store.mark_account_groups_managed("a1", 0) == 0
+
+    n_back = await store.restore_account_groups("a1")
+    assert n_back == 2, f"restore_account_groups 应透传行数，实际 {n_back!r}"
+
+    assert await store.mark_account_groups_managed("", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_account_groups_managed_skips_user_removed(store):
+    """managed=1 恢复不得复活用户主动移除（removed=1）的群，行数须如实。"""
+    from core.domain.sync import GroupInfo
+
+    await store.upsert_groups([
+        GroupInfo(group_id="g1", account_id="a1", managed=1),
+        GroupInfo(group_id="g2", account_id="a1", managed=1),
+    ])
+    await store.mark_account_groups_managed("a1", 0)
+    await store.mark_groups_removed(["g2"], 1)
+
+    n = await store.mark_account_groups_managed("a1", 1)
+    assert n == 1, "仅 removed=0 的 g1 被恢复"
+    groups = {g.group_id: g for g in await store.list_groups(include_hidden=True)}
+    assert groups["g1"].managed == 1
+    assert groups["g2"].managed == 0, "用户移除的群不被自愈复活"

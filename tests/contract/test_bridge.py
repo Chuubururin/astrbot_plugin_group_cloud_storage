@@ -154,6 +154,32 @@ async def test_status_single_task_lookup(env):
     }
 
 
+# ---------- P1b：submit_offline / get_raw_url 存储布局契约直钉 ----------
+
+
+@pytest.mark.asyncio
+async def test_submit_offline_renders_layout_and_mkdirs(env):
+    """生产包装 BridgeService.submit_offline 的直接契约。
+
+    test_distributor 的 _FakeBridge.submit_offline 只是它的镜像——若不在这里
+    直钉生产实现（模板渲染 + 幂等 mkdir + 提交），镜像漂移（如丢了 mkdir）
+    时契约测试仍会全绿。
+    """
+    ns = env
+    tid = await ns.bridge.submit_offline("https://cdn.test/a.zip", "g1", "a.zip")
+    assert tid == "oltask_1"
+    # 布局契约：openlist_dst_dir + {group_id}/{filename} 模板 → /g1
+    assert "/g1" in ns.client.dirs
+    assert ns.client.submitted == [(["https://cdn.test/a.zip"], "/g1")]
+
+
+@pytest.mark.asyncio
+async def test_get_raw_url_passthrough(env):
+    ns = env
+    link = await ns.bridge.get_raw_url("/g1/a.zip")
+    assert link.url == "http://openlist.test/dl/g1/a.zip"
+
+
 # ---------- Issue #8：bridge_out 经代理注入 Content-Disposition ----------
 
 

@@ -112,7 +112,7 @@ export function initE2EHooks() {
 
     /** Assert no emoji codepoints anywhere in body text (TE-5). */
     assertNoEmoji() {
-      const emojiRegex = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{231A}-\u{23FF}\u{FE0F}]/gu;
+      const emojiRegex = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{231A}-\u{23FF}\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}]/gu;
       const text = document.body.textContent;
       const hasEmoji = emojiRegex.test(text);
       if (hasEmoji) {

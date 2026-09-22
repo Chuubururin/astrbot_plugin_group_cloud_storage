@@ -9,14 +9,12 @@ from .like import like_contains, like_prefix
 from .state import StorePart
 
 if TYPE_CHECKING:
-    from .connection import ConnectionManager
+    pass
 
 
 class NetdiskMixin(StorePart):
     """Netdisk metadata operations ."""
 
-    if TYPE_CHECKING:
-        _conn: "ConnectionManager"
 
     async def upsert_netdisk_rows(self, rows: list[dict]) -> int:
         def _do(conn: sqlite3.Connection):

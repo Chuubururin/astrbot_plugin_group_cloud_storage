@@ -1,13 +1,9 @@
 """SubmitMixin — outbound transfer submission methods."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 class SubmitMixin:
-    """Queue async submission for bridge tasks ."""
+    """Queue async submission for bridge tasks."""
 
     async def submit_out(
         self,

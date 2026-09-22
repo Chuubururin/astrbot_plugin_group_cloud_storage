@@ -107,9 +107,9 @@ def test_missing_route_handler_fails_at_registration():
     RouteRegistry.register 里的 handler is None 永远为假。
     """
     from webapi import webapi as _wp
-    from webapi.routes import RouteRegistry
+    from webapi.routes import Route, RouteRegistry
 
-    reg = RouteRegistry([("bogus", ["GET"], "api_not_defined_xyz", "d", "page")])
+    reg = RouteRegistry([Route("bogus", ("GET",), "api_not_defined_xyz", "d", "page")])
     with pytest.raises(LookupError) as e:
         reg.register(
             _FakeContext(), webapi.PLUGIN_NAME, _wp._route_handler_lookup(_FakeServices())
@@ -123,5 +123,6 @@ def test_defined_handlers_still_resolve():
     from webapi.routes import ROUTES
 
     lookup = _wp._route_handler_lookup(_FakeServices())
-    for _, _, handler_name, _, _ in ROUTES:
-        assert lookup(handler_name) is not None, handler_name
+    assert ROUTES, "ROUTES 为空——本用例会静默空转"
+    for route in ROUTES:
+        assert lookup(route.handler) is not None, route.handler

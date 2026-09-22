@@ -35,7 +35,7 @@ _READ_ACTIONS = frozenset({
     "get_msg",
 })
 
-READ_MULT = 0.4
+READ_MULT: float = 0.4
 
 
 def interval_mult(action: str) -> float:

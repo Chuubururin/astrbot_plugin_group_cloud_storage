@@ -19,7 +19,7 @@ class PermissionService:
         self,
         managed_groups: list[str] | None = None,
         global_admin_qqs: list[str] | None = None,
-    ):
+    ) -> None:
         self._managed = set(str(g) for g in (managed_groups or []))
         self._admins = set(str(q) for q in (global_admin_qqs or []))
         self._has_managed = bool(self._managed)

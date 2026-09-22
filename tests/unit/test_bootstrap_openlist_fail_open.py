@@ -48,7 +48,7 @@ from core.config import PluginConfig  # noqa: E402
 
 EXPECTED_KEYS = {
     "store", "api", "perm", "sync", "limiter", "queue", "scan", "ops",
-    "transfer", "ingest", "dlserver", "gateway", "bridge", "openlist_client",
+    "transfer", "ingest", "dlserver", "bridge", "openlist_client",
     "task_control", "services", "auto_scan_hours", "database_admin",
 }
 
@@ -147,7 +147,7 @@ def test_invalid_base_url_does_not_cost_unrelated_handlers(tmp_path):
     comps = _build(tmp_path, openlist_base_url="ftp://openlist:5244")
     for key in (
         "store", "api", "sync", "queue", "scan", "ops",
-        "transfer", "ingest", "dlserver", "gateway", "task_control",
+        "transfer", "ingest", "dlserver", "task_control",
     ):
         assert comps[key] is not None, f"{key} 被网盘配置错误连带摧毁"
 

@@ -44,7 +44,7 @@ jobs:
       - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
       # 全量 tests/：原先只跑 tests/unit/，tests/contract（400 条）与
       # tests/security（174 条）从未进过 CI——test_i5 的确定性回归就是被这个
-      # 缺口漏掉的。全套 1976 条本机约 49s。
+      # 缺口漏掉的。全套约 2000 条本机约 45s。
       #
       # -n auto --dist loadfile：多进程并行。本机 4 核实测 49s → 17s（2.9×），
       # 连续 4 次全绿。loadfile 保证同文件用例落在同一 worker。全仓 tests/ 已
@@ -75,7 +75,24 @@ jobs:
       - run: pip install pytest pytest-asyncio pytest-timeout
       - name: Import contracts
         run: python tools/check_import_contracts.py
+      - name: Doc drift (config schema / routes / frontend API)
+        run: python tools/check_doc_drift.py
       - name: Architecture tests
         env:
           REQUIRE_NO_SKIP: "1"
         run: python -m pytest tests/unit/test_architecture.py -x -q
+
+  # 静态类型门禁（P0b）：动态派发（__getattr__/method_map）让 ruff 与 IDE
+  # 全盲，这里用 pyright 补上静态可见性。范围先钉死 adapters+ports
+  # （pyrightconfig.json），扩大 include 范围前必须先把报错清零。
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -r requirements.txt
+      - run: pip install "pyright==1.1.414"
+      - run: pyright

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -280,3 +281,113 @@ def test_preview_policy_override_normal_still_works():
     assert preview_policy_for("image", overrides)["mode"] == "builtin"
     # 空 types 不得命中任何组
     assert preview_policy_for("image", {"y": {"types": "", "mode": "download"}})["mode"] == "builtin"
+
+
+# ---------------- kernel: cancel_all() 停机有界性 ----------------
+
+
+def _load_kernel():
+    """按文件路径加载 core/runtime/kernel.py。
+
+    同 _load_lifecycle()：``import core.runtime.kernel`` 会先执行包 __init__，
+    后者拉 RuntimeAdapter -> 宿主 astrbot.core 包（测试桩下不存在）。
+    """
+    path = ROOT / "core" / "runtime" / "kernel.py"
+    spec = importlib.util.spec_from_file_location("_kernel_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+RuntimeKernel = _load_kernel().RuntimeKernel
+
+
+class _AbsorbOnce:
+    """吞掉前两次取消、第三次才退出的任务（"mid-handler 只吸收标志"的最小形态）。
+
+    **为什么是两次而不是一次**：守卫在调用 cancel_all() 之前会先自己 cancel 一次
+    （证明这个桩确实吞得掉取消，否则守卫会假绿），那一次把"第一次"预支掉了。
+    若桩只吞一次，注入"无界 gather"时桩在 cancel_all 里会被第二次取消打死，
+    cancel_all 立刻返回 —— 守卫照样全绿（实测踩过）。
+    """
+
+    ABSORB = 2
+
+    def __init__(self) -> None:
+        self.cancels = 0
+        self.quit = False
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.cancels += 1
+                if self.quit or self.cancels > self.ABSORB:
+                    raise
+
+
+async def _force_finish(task, stub):
+    """兜底清理，避免用例自身把任务泄漏给后续用例。"""
+    stub.quit = True
+    for _ in range(5):
+        if task.done():
+            break
+        task.cancel()
+        await asyncio.sleep(0.05)
+    assert task.done(), "stubborn task 未能清理"
+
+
+async def test_cancel_all_is_bounded_when_a_task_absorbs_cancellation():
+    """有界性：吞掉取消的任务不得把 cancel_all() 拖成永久挂起。
+
+    回归守卫：原实现 `await asyncio.gather(*self._tasks, return_exceptions=True)`
+    **没有 deadline** —— 吞掉一次取消的任务永不结束，gather 也就永不返回，
+    terminate()（插件停用/重载路径）直接挂死。OpQueue.shutdown() 的 S-1 是同一
+    类缺陷，只是发生在 runtime kernel 上（实测：探针用 wait_for(.., 0.5) 包住
+    旧实现会超时，即 bounded=False）。
+    """
+    kernel = RuntimeKernel(SimpleNamespace())
+    stub = _AbsorbOnce()
+    task = asyncio.create_task(stub.run(), name="kernel-stub")
+    kernel.track_task(task)
+    try:
+        # 先让桩真正停泊并证明它吞得掉取消 —— 否则守卫会假绿（同队列侧守卫）。
+        await asyncio.sleep(0.05)
+        assert not task.done(), "stub 提前结束，守卫无效"
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "stub 未吞掉取消，守卫无效"
+
+        t0 = time.monotonic()
+        # wait_for 是本用例自己的上界：注入"无界实现"时它超时变红，而不是把
+        # 整个测试进程挂死（裸环境没有 pytest-timeout 插件兜底）。
+        await asyncio.wait_for(kernel.cancel_all(timeout=0.5), 2.0)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, f"cancel_all 被吞取消的任务拖住: {elapsed:.3f}s"
+    finally:
+        await _force_finish(task, stub)
+
+
+async def test_cancel_all_cancels_and_clears_tracked_tasks():
+    """正路径：正常任务必须真的被取消、登记表清空。
+
+    反空断言：没有这条，一个"什么都不做"的 cancel_all() 也能通过上一条守卫。
+    """
+    kernel = RuntimeKernel(SimpleNamespace())
+    started = asyncio.Event()
+
+    async def idle() -> None:
+        started.set()
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(idle(), name="kernel-idle")
+    kernel.track_task(task)
+    await asyncio.wait_for(started.wait(), 1.0)
+    assert kernel._tasks, "登记表为空，守卫无效"
+
+    await kernel.cancel_all(timeout=0.5)
+
+    assert task.done() and task.cancelled(), "cancel_all 未取消已跟踪的任务"
+    assert not kernel._tasks, "cancel_all 之后登记表应为空"

@@ -10,7 +10,7 @@ from .state import StorePart
 from core.domain.sync import GroupInfo
 
 if TYPE_CHECKING:
-    from .connection import ConnectionManager
+    pass
 
 _GROUP_FIELD_WHITELIST = frozenset(
     {
@@ -31,8 +31,6 @@ _GROUP_FIELD_WHITELIST = frozenset(
 class GroupsMixin(StorePart):
     """Group management operations."""
 
-    if TYPE_CHECKING:
-        _conn: "ConnectionManager"
 
     async def list_groups(self, include_hidden: bool = False) -> list[GroupInfo]:
         def _do(conn: sqlite3.Connection):
@@ -201,7 +199,7 @@ class GroupsMixin(StorePart):
             conn.commit()
             return cur.rowcount
 
-        await self._conn.exec(_do)
+        return await self._conn.exec(_do)
 
     async def restore_account_groups(self, account_id: str) -> int:
         return await self.mark_account_groups_managed(account_id, 1)
@@ -256,6 +254,7 @@ class GroupsMixin(StorePart):
         return await self._conn.exec(_do)
 
     async def hide_account_groups(self, account_id: str, hidden: int) -> int:
+        """Hide or show all groups belonging to an account."""
         def _do(conn: sqlite3.Connection):
             cur = conn.execute(
                 "UPDATE groups SET hidden=? WHERE account_id=?", (int(hidden), account_id)

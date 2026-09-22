@@ -438,109 +438,34 @@ class DownloadMixin:
     # Redirect hops share the transfer pipeline's budget
     _MAX_REDIRECT_HOPS = 5
 
-    def _resolve_url(self, url: str) -> tuple[str, str | None]:
-        """SSRF validation + DNS pinning (shared with the transfer pipeline).
+    def _fetch_policy(self, *, timeout: float = 120.0):
+        from adapters.external.secure_fetch import FetchPolicy
 
-        http hostnames are pinned to the validated IP (Host header keeps the
-        original name); https keeps the hostname (TLS identity binding —
-        see resolve_and_pin_ip). Raises ValueError for restricted addresses.
-        Blocking call — invoke via to_thread.
-        """
-        from adapters.external.base import resolve_and_pin_ip
-
-        try:
-            return resolve_and_pin_ip(url, allow_private=False)
-        except Exception as e:
-            raise ValueError(f"_fetch_bytes: url rejected: {e}") from e
+        return FetchPolicy(
+            max_bytes=self._MAX_FETCH_BYTES,
+            timeout=timeout,
+            allow_private=False,
+            max_redirects=self._MAX_REDIRECT_HOPS,
+        )
 
     async def _fetch_bytes(self, url: str) -> bytes:
-        import asyncio
+        """In-memory fetch; SSRF per-hop validation lives in secure_fetch
+        (single implementation shared with the transfer pipeline).
 
-        import httpx
-        from urllib.parse import urljoin
+        Kept as a method seam: tests patch this exact name."""
+        from adapters.external.secure_fetch import fetch_bytes
 
-        # BUG-5 / SSRF hardening: every hop (including redirects) is
-        # re-validated and DNS-pinned against loopback/private/reserved
-        # ranges — same model as transfer.HttpAdapter. Manual redirect
-        # loop; blind follow_redirects would skip the re-checks.
-        async with httpx.AsyncClient(follow_redirects=False, timeout=120.0) as client:
-            for _hop in range(self._MAX_REDIRECT_HOPS + 1):
-                pinned_url, original_host = await asyncio.to_thread(
-                    self._resolve_url, url
-                )
-                headers = {}
-                if original_host:
-                    headers["Host"] = original_host
-                async with client.stream("GET", pinned_url, headers=headers) as resp:
-                    if resp.is_redirect and resp.has_redirect_location:
-                        if _hop == self._MAX_REDIRECT_HOPS:
-                            raise ValueError(
-                                f"_fetch_bytes: redirects exceeded "
-                                f"({self._MAX_REDIRECT_HOPS})"
-                            )
-                        url = urljoin(url, resp.headers["location"])
-                        continue
-                    resp.raise_for_status()
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in resp.aiter_bytes(chunk_size=1 << 16):
-                        total += len(chunk)
-                        if total > self._MAX_FETCH_BYTES:
-                            raise ValueError(
-                                f"_fetch_bytes: response exceeds "
-                                f"{self._MAX_FETCH_BYTES} bytes"
-                            )
-                        chunks.append(chunk)
-                    return b"".join(chunks)
-        raise ValueError("_fetch_bytes: unreachable redirect loop exit")
+        return await fetch_bytes(url, self._fetch_policy(), site="_fetch_bytes")
 
     async def _download_to_file(self, url: str, dest: Path) -> int:
         """Streaming variant of _fetch_bytes for callers that only need the
         bytes on disk (multi-GB originals / video segments): the whole body
-        never sits in memory (and b"".join would double-buffer it). Same
-        per-hop SSRF validation as _fetch_bytes."""
-        import asyncio
+        never sits in memory. secure_fetch publishes atomically (.part +
+        rename), so a partial download never looks complete at ``dest``.
 
-        import httpx
-        from urllib.parse import urljoin
+        Kept as a method seam: tests patch this exact name."""
+        from adapters.external.secure_fetch import fetch_to_file
 
-        total = 0
-        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
-        try:
-            async with httpx.AsyncClient(follow_redirects=False, timeout=120.0) as client:
-                for _hop in range(self._MAX_REDIRECT_HOPS + 1):
-                    pinned_url, original_host = await asyncio.to_thread(
-                        self._resolve_url, url
-                    )
-                    headers = {}
-                    if original_host:
-                        headers["Host"] = original_host
-                    async with client.stream(
-                        "GET", pinned_url, headers=headers
-                    ) as resp:
-                        if resp.is_redirect and resp.has_redirect_location:
-                            if _hop == self._MAX_REDIRECT_HOPS:
-                                raise ValueError(
-                                    f"_download_to_file: redirects exceeded "
-                                    f"({self._MAX_REDIRECT_HOPS})"
-                                )
-                            url = urljoin(url, resp.headers["location"])
-                            continue
-                        resp.raise_for_status()
-                        with tmp.open("wb") as fh:
-                            async for chunk in resp.aiter_bytes(chunk_size=1 << 16):
-                                total += len(chunk)
-                                if total > self._MAX_FETCH_BYTES:
-                                    raise ValueError(
-                                        f"_download_to_file: response exceeds "
-                                        f"{self._MAX_FETCH_BYTES} bytes"
-                                    )
-                                fh.write(chunk)
-                        break
-            # Atomic publish: a partial download must never look like a
-            # complete file to a concurrent reader of dest.
-            tmp.replace(dest)
-        finally:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
-        return total
+        return await fetch_to_file(
+            url, dest, self._fetch_policy(), site="_download_to_file"
+        )

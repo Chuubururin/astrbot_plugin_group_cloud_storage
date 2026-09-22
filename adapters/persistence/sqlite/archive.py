@@ -8,14 +8,12 @@ from typing import TYPE_CHECKING
 from .state import StorePart
 
 if TYPE_CHECKING:
-    from .connection import ConnectionManager
+    pass
 
 
 class ArchiveMixin(StorePart):
     """Archive map operations (bridge in/out tracking)."""
 
-    if TYPE_CHECKING:
-        _conn: "ConnectionManager"
 
     async def get_archive_map(
         self, group_id: str, resource_id: int, direction: str

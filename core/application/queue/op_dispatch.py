@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.log import logger
@@ -82,6 +82,34 @@ class OpDispatcher(FileScanMixin, CapacityMixin):
         self._bot_health = self._health.bot_health
         self._global_cooldown_until = 0.0
         logger.info(f"[op-queue] scan concurrency: {max_concurrent}")
+        # kind -> handler registry (replaces the former _dispatch if/elif
+        # chain). Entries are bound methods; collaborators (self.scan/self.ops/
+        # self.ingest/...) are resolved inside each handler at call time, so
+        # post-init attribute swaps keep working.
+        self._handlers: dict[str, Callable[[Any], Awaitable[None]]] = {
+            "scan": self._handle_scan,
+            "file_scan": self.do_file_scan,
+            "diff_file_scan": self.do_diff_scan,
+            "rename": self._handle_rename,
+            "sync_all": self._handle_sync_all,
+            "sync": self._handle_sync,
+            "upload": self.run_file_op_and_announce,
+            "delete": self.run_file_op_and_announce,
+            "move_file": self.run_file_op_and_announce,
+            "replace_name": self.run_file_op_and_announce,
+            "convert_volumes": self.run_file_op_and_announce,
+            "create_folder": self._handle_create_folder,
+            "essence_save": self._handle_ingest,
+            "essence_delete": self._handle_ingest,
+            "fetch": self._handle_ingest,
+            "video_upload": self._handle_ingest,
+            "video_album": self._handle_ingest,
+            "image_album": self._handle_ingest,  # single image into the group album
+            "netdisk_index": self._handle_netdisk_index,
+            "bridge_out": self._handle_bridge,
+            "bridge_in": self._handle_bridge,
+            "batch_groups": self._handle_batch_groups,
+        }
 
     # -- Group -> account routing --------------------------------------
     async def _account_of(self, group_id: str) -> str:
@@ -300,140 +328,131 @@ class OpDispatcher(FileScanMixin, CapacityMixin):
                     self._announce(op)
 
     async def _dispatch(self, op) -> None:
-        if op.kind == "scan":
-            bots = self._bots_getter() or [None]
-            mode = op.payload.get("mode")
-            group_filter = op.payload.get("group_ids")
-            if len(bots) <= 1:
-                # Single bot or none: scan directly on one account (zero overhead)
-                b = bots[0] if bots else None
-                if mode == "incremental":
-                    await self.scan.scan_owned_incremental(account_bot=b, group_filter=group_filter, op=op)
-                else:
-                    await self.scan.scan_owned(account_bot=b, group_filter=group_filter, op=op)
-            else:
-                # Global circuit breaker check
-                if self._check_global_circuit_breaker(bots):
-                    logger.warning("[op-queue] scan skipped: global circuit breaker")
-                    return
-                # Stable sharding: sort by bot id to remove iteration-order
-                # nondeterminism
-                bots_sorted = sorted(bots, key=lambda b: self._bot_id(b))
-                # Membership-based assignment: every bot scans only groups
-                # its own list_groups() returns (new-group discovery included,
-                # each group claimed once), so account attribution and API
-                # visibility are always correct.
-                assignment = await self._assign_groups(bots_sorted, group_filter)
-                # Parallel across bots (dedicated adapter per bot + sharded
-                # group lists)
-                tasks = [
-                    asyncio.create_task(
-                        self._run_scan_for_bot(b, mode, assignment.get(i, []), op),
-                        name=f"scan-{self._bot_id(b)}",
-                    )
-                    for i, b in enumerate(bots_sorted)
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                # return_exceptions=True traps the per-bot pause/cancel: any
-                # control-flow exception must re-raise here so the worker's
-                # OpPausedError/OpCancelError paths take over (hold/cancel),
-                # otherwise the scan would keep going after 中断/暂停.
-                for r in results:
-                    if isinstance(r, (OpPausedError, OpCancelError)):
-                        raise r
-                    if isinstance(r, asyncio.CancelledError):
-                        raise r
-            # Per-group chaining already queued file scans as groups were
-            # scanned; the bulk fallback only applies when the callback is
-            # not wired (e.g. minimal test assemblies).
-            if op.payload.get("initial") and getattr(
-                self.scan, "on_group_scanned", None
-            ) is None:
-                await self._queue_initial_file_scan(op.payload.get("accounts"))
-        elif op.kind == "file_scan":
-            await self.do_file_scan(op)
-        elif op.kind == "diff_file_scan":
-            # Withering differential reconciliation (root + first-level folder
-            # listings; groups absent from the listing are frozen, not
-            # withered; full scans remain a manual exception)
-            await self.do_diff_scan(op)
-        elif op.kind == "rename":
-            await self.scan.rename_remote(
-                op.target,
-                op.payload["name"],
-                display_name=op.payload.get("display_name"),
-                label=op.payload.get("label"),
-            )
-        elif op.kind == "sync_all":
-            raise ValueError("sync_all removed: use files/scan (all/range)")
-        elif op.kind == "sync":
-            lock = self.services.lock_for(op.target)
-            result = await self.sync.run_full_sync(op.target, lock)
-            await self.refresh_capacity(op.target)  # refresh capacity stats after file sync
-            if not result.ok and result.error:
-                raise RuntimeError(result.error)
-        elif op.kind in (
-            "upload",
-            "delete",
-            "move_file",
-            "replace_name",
-            "convert_volumes",
-        ):
-            await self.run_file_op_and_announce(op)
-        elif op.kind == "create_folder":
-            await self.ops.handle(op)
-        elif op.kind in (
-            "essence_save",
-            "essence_delete",
-            "fetch",
-            "video_upload",
-            "video_album",
-            "image_album",  # import a single image into the group album
-        ):
-            try:
-                await self.ingest.handle(op)
-            finally:
-                # Ingest results land in albums/essence/files listings; the
-                # frontend topic map covers these kinds but had no events to
-                # listen for. Announce even on failure (failure paths also
-                # refresh task state client-side).
-                self.queue.publish(
-                    {
-                        "type": "data_changed",
-                        "kind": op.kind,
-                        "target": op.target,
-                        "ts": time.time(),
-                    }
-                )
-        elif op.kind == "netdisk_index":
-            # Deep indexing: manual task, rate-limited at directory
-            # granularity and cancellable
-            if self.services.netdisk is None:
-                raise OneBotApiError(
-                    OneBotErrorKind.LOCAL_ERROR,
-                    op.kind,
-                    "netdisk service not configured",
-                )
-            await self.services.netdisk.handle_index(op)
-        elif op.kind in ("bridge_out", "bridge_in"):
-            if self.bridge is None:
-                raise OneBotApiError(
-                    OneBotErrorKind.LOCAL_ERROR,
-                    op.kind,
-                    "bridge service not configured",
-                )
-            if op.kind == "bridge_out":
-                await self.bridge.handle_bridge_out(op)
-            else:
-                await self.bridge.handle_bridge_in(op)
-        elif op.kind == "batch_groups":
-            await self.scan.run_batch_ops(op)
-        else:
+        handler = self._handlers.get(op.kind)
+        if handler is None:
             # Unknown kind is a programming error: LOCAL_ERROR, not retried
             # (retrying cannot fix it)
             raise OneBotApiError(
                 OneBotErrorKind.LOCAL_ERROR, op.kind, f"unknown op kind: {op.kind}"
             )
+        await handler(op)
+
+    # -- Kind handlers (registered in the __init__ kind table) --------------
+
+    async def _handle_scan(self, op) -> None:
+        bots = self._bots_getter() or [None]
+        mode = op.payload.get("mode")
+        group_filter = op.payload.get("group_ids")
+        if len(bots) <= 1:
+            # Single bot or none: scan directly on one account (zero overhead)
+            b = bots[0] if bots else None
+            if mode == "incremental":
+                await self.scan.scan_owned_incremental(account_bot=b, group_filter=group_filter, op=op)
+            else:
+                await self.scan.scan_owned(account_bot=b, group_filter=group_filter, op=op)
+        else:
+            # Global circuit breaker check
+            if self._check_global_circuit_breaker(bots):
+                logger.warning("[op-queue] scan skipped: global circuit breaker")
+                return
+            # Stable sharding: sort by bot id to remove iteration-order
+            # nondeterminism
+            bots_sorted = sorted(bots, key=lambda b: self._bot_id(b))
+            # Membership-based assignment: every bot scans only groups
+            # its own list_groups() returns (new-group discovery included,
+            # each group claimed once), so account attribution and API
+            # visibility are always correct.
+            assignment = await self._assign_groups(bots_sorted, group_filter)
+            # Parallel across bots (dedicated adapter per bot + sharded
+            # group lists)
+            tasks = [
+                asyncio.create_task(
+                    self._run_scan_for_bot(b, mode, assignment.get(i, []), op),
+                    name=f"scan-{self._bot_id(b)}",
+                )
+                for i, b in enumerate(bots_sorted)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # return_exceptions=True traps the per-bot pause/cancel: any
+            # control-flow exception must re-raise here so the worker's
+            # OpPausedError/OpCancelError paths take over (hold/cancel),
+            # otherwise the scan would keep going after 中断/暂停.
+            for r in results:
+                if isinstance(r, (OpPausedError, OpCancelError)):
+                    raise r
+                if isinstance(r, asyncio.CancelledError):
+                    raise r
+        # Per-group chaining already queued file scans as groups were
+        # scanned; the bulk fallback only applies when the callback is
+        # not wired (e.g. minimal test assemblies).
+        if op.payload.get("initial") and getattr(
+            self.scan, "on_group_scanned", None
+        ) is None:
+            await self._queue_initial_file_scan(op.payload.get("accounts"))
+
+    async def _handle_rename(self, op) -> None:
+        await self.scan.rename_remote(
+            op.target,
+            op.payload["name"],
+            display_name=op.payload.get("display_name"),
+            label=op.payload.get("label"),
+        )
+
+    async def _handle_sync_all(self, op) -> None:
+        raise ValueError("sync_all removed: use files/scan (all/range)")
+
+    async def _handle_sync(self, op) -> None:
+        lock = self.services.lock_for(op.target)
+        result = await self.sync.run_full_sync(op.target, lock)
+        await self.refresh_capacity(op.target)  # refresh capacity stats after file sync
+        if not result.ok and result.error:
+            raise RuntimeError(result.error)
+
+    async def _handle_create_folder(self, op) -> None:
+        await self.ops.handle(op)
+
+    async def _handle_ingest(self, op) -> None:
+        try:
+            await self.ingest.handle(op)
+        finally:
+            # Ingest results land in albums/essence/files listings; the
+            # frontend topic map covers these kinds but had no events to
+            # listen for. Announce even on failure (failure paths also
+            # refresh task state client-side).
+            self.queue.publish(
+                {
+                    "type": "data_changed",
+                    "kind": op.kind,
+                    "target": op.target,
+                    "ts": time.time(),
+                }
+            )
+
+    async def _handle_netdisk_index(self, op) -> None:
+        # Deep indexing: manual task, rate-limited at directory
+        # granularity and cancellable
+        if self.services.netdisk is None:
+            raise OneBotApiError(
+                OneBotErrorKind.LOCAL_ERROR,
+                op.kind,
+                "netdisk service not configured",
+            )
+        await self.services.netdisk.handle_index(op)
+
+    async def _handle_bridge(self, op) -> None:
+        if self.bridge is None:
+            raise OneBotApiError(
+                OneBotErrorKind.LOCAL_ERROR,
+                op.kind,
+                "bridge service not configured",
+            )
+        if op.kind == "bridge_out":
+            await self.bridge.handle_bridge_out(op)
+        else:
+            await self.bridge.handle_bridge_in(op)
+
+    async def _handle_batch_groups(self, op) -> None:
+        await self.scan.run_batch_ops(op)
 
     def _announce(self, op) -> None:
         """Terminal data_changed push for centrally-announced kinds; also

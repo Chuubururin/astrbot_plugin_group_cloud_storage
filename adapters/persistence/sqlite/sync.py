@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from core.domain.sync import SyncLog, SyncResult, Snapshot
 
 if TYPE_CHECKING:
-    from .connection import ConnectionManager
+    pass
 
 # Append-only history retention: keep the newest N rows and drop anything
 # older than the cutoff (both conditions must hold, so a burst of writes
@@ -26,8 +26,6 @@ SNAPSHOT_MAX_AGE_S = 90 * 86400
 class SyncMixin(StorePart):
     """Sync log and snapshot operations."""
 
-    if TYPE_CHECKING:
-        _conn: "ConnectionManager"
 
     async def create_sync_log(self, log: SyncLog) -> int:
         def _do(conn: sqlite3.Connection):
@@ -41,7 +39,7 @@ class SyncMixin(StorePart):
                 "DELETE FROM sync_logs WHERE start_at < ? AND id <= ?",
                 (
                     cutoff,
-                    cur.lastrowid - SYNC_LOG_KEEP,
+                    (cur.lastrowid or 0) - SYNC_LOG_KEEP,
                 ),
             )
             conn.commit()

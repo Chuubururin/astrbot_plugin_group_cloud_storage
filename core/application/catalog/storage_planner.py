@@ -125,19 +125,18 @@ class StoragePlanner:
         """Unified multi-group statistics: total capacity/used/group count/alerting groups."""
         total = sum(g.total_space for g in groups if g.total_space > 0)
         used = sum(g.used_space for g in groups if g.used_space > 0)
-        alerts = [
-            {
-                "group_id": g.group_id,
-                "shown_name": g.shown_name,
-                "state": StoragePlanner.capacity_state(g.used_space, g.total_space),
-                "pct": round((g.used_space / g.total_space) * 100, 1)
-                if g.total_space
-                else 0,
-            }
-            for g in groups
-            if g.total_space > 0
-            and StoragePlanner.capacity_state(g.used_space, g.total_space) != "ok"
-        ]
+        alerts = []
+        for g in groups:
+            if g.total_space <= 0:
+                continue
+            state = StoragePlanner.capacity_state(g.used_space, g.total_space)
+            if state != "ok":
+                alerts.append({
+                    "group_id": g.group_id,
+                    "shown_name": g.shown_name,
+                    "state": state,
+                    "pct": round((g.used_space / g.total_space) * 100, 1),
+                })
         return {
             "groups": len(groups),
             "total_space": total,

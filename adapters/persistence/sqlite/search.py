@@ -9,15 +9,12 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .connection import ConnectionManager
+    pass
 
 
 class SearchMixin(StorePart):
     """Full-text search and tag cloud operations."""
 
-    if TYPE_CHECKING:
-        _conn: "ConnectionManager"
-        _tag_cloud_cache: dict
 
     async def fts_match(
         self, group_id: str | None, q: str, limit: int = 2000

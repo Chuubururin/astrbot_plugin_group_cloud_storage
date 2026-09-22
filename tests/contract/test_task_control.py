@@ -143,12 +143,18 @@ async def test_resume_queued_writesthrough_pending(env):
 async def test_pause_running_cooperative(env):
     # 运行锚点 = handler 内存信号（calls），不做 SQLite running 轮询（规避 WAL 可见性竞态）；
     # pause_task 返回值基于内存 _running 表，可靠；终态（paused/done）经 SQLite 观察稳定。
+    #
+    # 回归护栏：resume 后必须走到 done。曾因 _execute 的 OpPausedError 分支先写
+    # ledger("paused") 再登记 _paused[id]，resume 若落在两步之间会被误判为「运行中
+    # 未到检查点」——只清 op.pause 不重新入队，任务永久停在 paused（本机偶发、CI
+    # -n auto 下更易触发）。修复=先登记 _paused 再写 ledger（见 execution.py）。
+    # 超时放宽纯粹是慢 CI 的余量，与该竞态无关（真回归时任务永不 done，多大超时都红）。
     t1 = await env.queue.submit("move_file", "g1", _steps({}, 200))
     await _wait_handler_started(env.calls)
     assert env.queue.pause_task(t1) == "running"  # 运行中受理（内存态，非 SQLite）
-    await _wait_state(env.store, t1, "paused", timeout=5.0)
+    await _wait_state(env.store, t1, "paused", timeout=10.0)
     assert env.queue.resume_task(t1) == "resumed"
-    await _wait_state(env.store, t1, "done", timeout=8.0)
+    await _wait_state(env.store, t1, "done", timeout=20.0)
 
 
 # ---------- 中断（运行中协作式 + 暂停挂起） ----------

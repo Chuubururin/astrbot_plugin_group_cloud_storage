@@ -12,7 +12,7 @@ _群云存储管理器_
 
 </div>
 
-QQ 群原生云存储（群文件 / 群相册 / 精华消息）统一管理插件，经 OneBot 协议对接 NapCat 等协议端。支持多账号，云端为真源，本地仅维护可重建的元数据索引，文件内容不落盘。
+QQ 群原生云存储（群文件 / 群相册 / 精华消息）统一管理插件，经 OneBot 协议对接 NapCat 等协议端。支持多账号，云端为真源，本地仅维护可重建的元数据索引，文件内容不落盘（例外：开启下载服务后，被拉取的文件会按需暂存到插件私有临时目录，用于避免同一文件被反复下载；该目录随插件重载整体清空，并受 `download_cache_max_mb` / `download_cache_ttl_hours` 约束）。
 
 > [!NOTE]
 > 第三方工具，请遵守《QQ 用户协议》，按"现状"使用，风险自负。
@@ -50,18 +50,46 @@ QQ 群原生云存储（群文件 / 群相册 / 精华消息）统一管理插�
 
 ## 主要配置
 
-| 配置项 | 默认 | 说明 |
-| --- | --- | --- |
-| `managed_groups` | `[]` | 受管群白名单；留空 = 全部可管理 |
-| `global_admin_qqs` | `[]` | 全局管理员 QQ 号 |
-| `request_interval` | `1.0` | QQ 接口调用间隔（秒），防风控 |
-| `auto_scan_interval_hours` | `6` | 定时与云端对账周期（小时），0 = 关闭 |
-| `volume_threshold` | `95MB` | 分卷上传阈值 |
-| `fetch_max_size` | `2GB` | 外部链接导入单文件上限 |
-| `download_server_enabled` | `false` | 本机下载服务（HTTP/SFTP/SMB 直链） |
-| `openlist_enabled` | `false` | OpenList 网盘桥接 |
+分类与 [_conf_schema.json](_conf_schema.json) 的 `group` 字段一致（页面「配置」Tab 按分类展示）：
+
+| 分类 | 配置项 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| 基础设置 | `managed_groups` | `[]` | 受管群白名单；留空 = 全部可管理 |
+| 基础设置 | `global_admin_qqs` | `[]` | 全局管理员 QQ 号 |
+| 基础设置 | `request_interval` | `1.0` | QQ 接口调用间隔（秒），防风控 |
+| 基础设置 | `auto_scan_interval_hours` | `6` | 定时与云端对账周期（小时），0 = 关闭 |
+| 自动保存与分卷 | `fetch_max_size` | `2GB` | 外部链接导入单文件上限 |
+| 下载服务 | `download_server_enabled` | `false` | 本机下载服务（HTTP/SFTP/SMB 直链） |
+| 下载服务 | `download_cache_max_mb` | `1024` | 下载缓存容量上限（MB，0 = 不限） |
+| 网盘归档 | `openlist_enabled` | `false` | OpenList 网盘桥接 |
+| 高级选项 | `volume_threshold` | `95MB` | 分卷上传阈值 |
 
 完整配置见 [_conf_schema.json](_conf_schema.json) 与 [docs/配置项总表.md](docs/配置项总表.md)。
+
+## 开发与测试
+
+- **版本号**唯一定义在 [`metadata.yaml`](metadata.yaml) 的 `version`；发布流程
+  （dev 提交 `chore(release): vX.Y.Z` → 自动 promote 到 main → 在 main 打 tag）见
+  [docs/版本与发布.md](docs/版本与发布.md)。
+- **分支模型**：`dev` = 日常开发分支，可直接 push（push 时自动跑 CI）；
+  `main` = 稳定分支，只能经 dev→main PR 合入，且五项门禁检查
+  （`lint` / `python-tests` / `frontend-tests` / `contract-checks` / `typecheck`）
+  全绿才允许合并（promote workflow 逐名轮询这五项；GitHub 分支保护侧亦应把
+  `typecheck` 列为 required check）。
+- **本地自检**（与 CI 同口径，提交前过一遍）：
+
+  ```bash
+  REQUIRE_NO_SKIP=1 python3 -m pytest tests/ -q          # 全量（CI 串行口径，skip 必须为 0）
+  python3 -m pytest tests/ -q -n auto --dist loadfile    # CI 并行口径（需 pytest-xdist）
+  ruff check . --output-format=github                    # 与 CI 同版本 ruff==0.16.6
+  node --test pages/storage-ng/testing/unit/*.test.mjs   # 前端单测
+  python3 tools/check_import_contracts.py                # 分层契约 C1-C4
+  python3 tools/check_doc_drift.py .                     # 配置 schema / 路由表 / 前端 API 漂移
+  python3 -m pyright                                     # 静态类型门禁（同 CI typecheck job）
+  ```
+
+  完整自检清单（含体积门禁与 `comm` 用例对账口径）见
+  [docs/版本与发布.md](docs/版本与发布.md)。
 
 ## 文档
 
