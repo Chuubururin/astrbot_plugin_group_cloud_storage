@@ -65,7 +65,12 @@ def test_download_to_http(env):
             pass
 
     srv = HTTPServer(("127.0.0.1", 0), H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # poll_interval 默认 0.5s：BaseServer.serve_forever 内部是
+    # selector.select(poll_interval)，而 srv.shutdown() 会阻塞到这一轮 poll
+    # 返回为止 —— 默认值让每个这样的用例白等半秒。0.01s 语义不变。
+    threading.Thread(
+        target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    ).start()
     try:
         dest = tmp_path / "dl.bin"
         n = asyncio.run(svc.download_to(
