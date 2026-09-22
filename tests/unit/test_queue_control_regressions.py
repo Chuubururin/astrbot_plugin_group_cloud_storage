@@ -102,3 +102,137 @@ async def test_cancel_does_not_leak_cancelled_for_dead_ids():
     assert tid not in q._cancelled  # 修复前无条件登记 -> 残留
     await _drain(q, 2)
     await q.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_cheap_when_workers_are_idle():
+    """正常路径：空闲 worker 一 cancel 就死，shutdown 不得空等宽限期。
+
+    回归守卫：宽限期曾被写成 `await asyncio.sleep(timeout)`，它永不提前退出，
+    于是每次 teardown 都白付满额 1.0s —— 单测套件从 17s 涨到 88s（高负载下
+    326s），并且打挂了 tests/contract/test_queue_exploratory.py 里
+    `assert elapsed < 1.0` 这类与时序无关的断言（实测 1.0206 = 1.0 宽限 +
+    20ms 轮询粒度）。
+    """
+    q = OpQueue(lambda op: asyncio.sleep(0), interval=0.0)
+    await q.start()
+    await asyncio.sleep(0.05)  # 让 worker 真正停泊在 queue.get() 上
+    t0 = time.monotonic()
+    await q.shutdown()  # 默认 timeout=1.0
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.5, f"shutdown 空等了宽限期: {elapsed:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_bounded_when_a_worker_ignores_cancellation():
+    """有界性：连 cancel 都吞掉的 worker 不能把 shutdown 拖成永久挂起。
+
+    回归守卫（版本相关）：asyncio.wait_for 在 CPython <= 3.11 的超时路径是
+    _cancel_and_wait -> task.cancel() 然后 await waiter，即"取消之后仍然等它
+    结束"。吞掉取消的 worker 永远不会结束，所以 wait_for 根本不是上界 —— CI
+    跑 3.10 时整套挂死、本地 3.13 却是绿的（3.12+ 把 wait_for 重建在
+    timeouts.timeout 上，丢掉了这个洞）。
+
+    现在的实现用 deadline + asyncio.wait + 重发 cancel，到期明确放弃并告警。
+    """
+    q = OpQueue(lambda op: asyncio.sleep(0), interval=0.0)
+    quit_flag = asyncio.Event()
+
+    async def stubborn() -> None:
+        # 永久吞掉取消并重新停泊 —— 这正是"cancel 丢失"之后 worker 的形态。
+        # 只有 quit_flag 置位后的那次取消才真正结束它（否则会泄漏到后续用例）；
+        # 而"能否被取消掉"恰恰是本用例要证明 shutdown 不依赖的性质。
+        while True:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                if quit_flag.is_set():
+                    raise
+                continue
+
+    task = asyncio.create_task(stubborn(), name="op-queue-stubborn")
+    q._workers = [task]
+    try:
+        # 先让桩真正停泊，再证明它确实吞得掉取消 —— 否则本守卫会假绿：
+        # create_task 之后立刻 shutdown，_must_cancel 会在协程体执行之前就把
+        # 任务打死（CancelledError 抛在 try 之外），桩根本没机会吞，于是旧代码
+        # 也能"通过"。
+        await asyncio.sleep(0.05)
+        assert not task.done(), "stubborn worker 提前结束，守卫无效"
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "stubborn worker 未吞掉取消，守卫无效"
+
+        t0 = time.monotonic()
+        await q.shutdown(timeout=0.5)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, f"shutdown 被吞取消的 worker 拖住: {elapsed:.3f}s"
+    finally:
+        quit_flag.set()
+        for _ in range(5):
+            if task.done():
+                break
+            task.cancel()
+            await asyncio.sleep(0.05)
+        assert task.done(), "stubborn worker 未能清理"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_re_cancels_a_worker_that_absorbs_the_first_cancel():
+    """重发取消必须真的发生 —— 写在 docstring 里不算数。
+
+    回归守卫（第二轮窗口被第一轮吃光）：第一轮等待曾直接用整个 timeout
+    （``asyncio.wait(workers, timeout=timeout)``），一个"吞掉第一次取消"的
+    worker 会把这一轮占满到 deadline；第二轮再算 ``remaining = deadline - now``
+    必然 <= 0，于是 ``w.cancel()`` 一次都没发出去就 break —— "survivors need
+    another round" 成了死代码，worker 被静默放弃（生产里即任务泄漏）。
+
+    上面两条 shutdown 守卫都拦不住它：``test_shutdown_is_cheap_when_workers_
+    are_idle`` 的 worker 一 cancel 就死（根本走不到第二轮）；
+    ``test_shutdown_is_bounded_when_a_worker_ignores_cancellation`` 只断言
+    "耗时 < 2.0s"，而"第一轮空转到 0.5s 后立刻放弃"同样满足它。
+
+    本用例的 worker 只吞掉**第一次**取消，于是：
+      * 修复前：第一轮吃满 timeout -> 第二轮不发取消 -> 任务仍在跑（断言 1/2 失败）
+      * 修复后：第一轮只等一个切片 -> 第二轮重发取消 -> 任务被真正收走
+    """
+    q = OpQueue(lambda op: asyncio.sleep(0), interval=0.0)
+    quit_flag = asyncio.Event()
+    absorbed = {"n": 0}
+
+    async def absorb_once() -> None:
+        # "mid-handler 只吸收标志"的最小形态：第一次取消被吞，第二次才生效。
+        # quit_flag 兜底，避免本用例自身泄漏到后续用例。
+        while True:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                absorbed["n"] += 1
+                if absorbed["n"] >= 2 or quit_flag.is_set():
+                    raise
+                continue
+
+    task = asyncio.create_task(absorb_once(), name="op-queue-absorb-once")
+    q._workers = [task]
+    try:
+        await asyncio.sleep(0.05)  # 让桩真正停泊，否则守卫会假绿
+        assert not task.done(), "worker 提前结束，守卫无效"
+
+        t0 = time.monotonic()
+        await q.shutdown(timeout=1.0)
+        elapsed = time.monotonic() - t0
+
+        assert absorbed["n"] >= 2, (
+            "重发取消从未执行：worker 只收到 1 次 cancel 就被放弃"
+            "（第二轮窗口被第一轮吃光）"
+        )
+        assert task.done(), "shutdown 返回时 worker 仍存活 —— 任务被静默泄漏"
+        assert elapsed < 0.5, f"shutdown 未在切片内收走 worker: {elapsed:.3f}s"
+    finally:
+        quit_flag.set()
+        for _ in range(5):
+            if task.done():
+                break
+            task.cancel()
+            await asyncio.sleep(0.05)
+        assert task.done(), "absorb-once worker 未能清理"

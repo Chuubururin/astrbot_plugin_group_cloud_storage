@@ -15,6 +15,13 @@ from core.log import logger
 
 from .op import BULK_KINDS, Op, OpCancelError, OpPausedError
 
+# ``OpQueue.shutdown()`` 重发取消的切片上限（秒）。
+# 每次等待都不得超过它，否则一个"扛住第一次取消"的 worker 会独占整个
+# 宽限期，使重发取消那一轮因 remaining <= 0 而一次都不执行（实测过）。
+# 0.05 的取舍：快路径（worker 都停在 queue.get()）下 asyncio.wait 会在
+# worker 一结束就返回，切片刻不产生额外等待；慢路径下每秒可重发约 20 次。
+_CANCEL_SLICE = 0.05
+
 
 class ExecutionMixin:
     # ---------- Lifecycle ----------
@@ -63,35 +70,57 @@ class ExecutionMixin:
             t.add_done_callback(self._respawn_worker)
 
     async def shutdown(self, timeout: float = 1.0) -> None:
+        """Stop the worker pool -- bounded, and cheap in the common case.
+
+        Two traps this deliberately avoids, both of which cost real time:
+
+        * ``await asyncio.sleep(timeout)`` as the grace period.  It never
+          early-exits, so every teardown paid the full grace even when the
+          workers were already dead microseconds later (measured: exactly
+          1.0 s per shutdown, which turned a 77 s suite into 326 s and broke
+          timing assertions in tests/contract).
+        * ``await asyncio.wait_for(w, ...)`` as the drain.  On CPython <= 3.11
+          the timeout path is ``_cancel_and_wait`` -> ``w.cancel()`` followed
+          by ``await waiter``, i.e. it waits for the worker to *finish* after
+          cancelling it.  A worker that absorbs the cancellation never
+          finishes, so wait_for is not a bound at all.  (3.12+ reimplemented
+          wait_for on top of ``timeouts.timeout`` and lost this hole, which is
+          why the hang reproduced in CI on 3.10 but not locally on 3.13.)
+
+        ``asyncio.wait`` returns as soon as the workers are done and still
+        honours the deadline, so a deadline plus re-cancel is a real bound.
+        """
         self._shutting_down = True
-        # Phase 1: issue cancel to all workers
-        for w in self._workers:
-            w.cancel()
-        # Phase 2: give workers a brief grace period to finish current handlers
-        if self._workers:
-            await asyncio.sleep(timeout)
-        # Phase 3: re-cancel workers that survived the grace period.
-        # A worker that was mid-handler when the first cancel() arrived
-        # absorbs the flag in the handler's except.CancelledError, then
-        # re-enters queue.get() — the first cancel is lost.  Re-issuing
-        # cancel hits a worker that now *has* a _fut_waiter, so it
-        # actually raises CancelledError.
-        for w in self._workers:
-            if not w.done():
-                w.cancel()
-        # Phase 4: bounded drain — each worker gets at most 5 s
-        for w in self._workers:
-            try:
-                await asyncio.wait_for(w, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                if not w.done():
-                    logger.warning(
-                        f"[queue] worker {w.get_name()} survived two "
-                        f"cancel rounds; abandoning"
-                    )
-            except Exception:
-                pass
+        workers = list(self._workers)
         self._workers = []
+        if not workers:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        # Round 1: a worker parked in queue.get() dies here.  A worker that is
+        # mid-handler only *absorbs* the flag (it is consumed the next time the
+        # handler suspends), so survivors need another round.
+        for w in workers:
+            w.cancel()
+        await asyncio.wait(workers, timeout=min(timeout, _CANCEL_SLICE))
+
+        # Round 2..n: re-cancel whatever is still alive until the deadline.
+        for w in workers:
+            while not w.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    logger.warning(
+                        f"[queue] worker {w.get_name()} survived cancellation; "
+                        f"abandoning it after {timeout}s"
+                    )
+                    break
+                w.cancel()
+                await asyncio.wait({w}, timeout=min(remaining, _CANCEL_SLICE))
+            if w.done() and not w.cancelled():
+                exc = w.exception()
+                if exc is not None:
+                    logger.warning(f"[queue] worker {w.get_name()} died: {exc}")
 
     async def acquire(self, mult: float = 1.0, account=None) -> None:
         """Lets composite operations (scans, etc.) reuse rate limiting within
