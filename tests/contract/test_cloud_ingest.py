@@ -14,6 +14,7 @@ from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from core.domain.sync import ResourceQuery  # noqa: E402
 from core.domain.enums import CapabilityState, OneBotApiError, OneBotErrorKind  # noqa: E402
 from core.application.ingest import CloudIngestService  # noqa: E402
+from core.application.ingest import essence  # noqa: E402
 from core.application.composition.splitter import effective_chunk_limit, split_text  # noqa: E402
 from core.application.files import FileOpsService  # noqa: E402
 from core.application.queue import OpQueue  # noqa: E402
@@ -23,13 +24,22 @@ from tests.contract.helpers import drain_op  # noqa: E402
 
 
 @pytest.fixture
-async def env(tmp_path, monkeypatch):
+async def env(tmp_path, monkeypatch, request):
     store = SqliteMetaStore(tmp_path / "meta.db")
     await store.init()
     api = FakeOneBotApi(tree={None: ([], [])})
     sync = ResourceSyncService(api, store)
     ingest: CloudIngestService | None = None
-    queue = OpQueue(lambda op: ingest.handle(op), interval=0.0)
+    # 标记 no_backoff 的用例不关心"等多久"，只关心"重试了几次/终态是什么"。
+    # 退避与轮询间隔归零都不改变重试次数，也不改变 op.replayed 的置位。
+    if request.node.get_closest_marker("no_backoff"):
+        backoff_base = 0.0
+        monkeypatch.setattr(essence, "CONFIRM_RETRY_INTERVAL", 0.0)
+        monkeypatch.setattr(essence, "REBUILD_RETRY_INTERVAL", 0.0)
+    else:
+        backoff_base = 2.0
+    queue = OpQueue(lambda op: ingest.handle(op), interval=0.0,
+                    backoff_base=backoff_base)
     await queue.start()
     ingest = CloudIngestService(
         api, store, queue, sync, tmp_dir=tmp_path / "tmp",
@@ -106,6 +116,7 @@ async def test_essence_save_split_and_rebuild(env):
     assert full == text
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_essence_rebuild_missing_part(env):
     tmp_path, store, api, queue, ingest = env
@@ -234,6 +245,7 @@ async def test_fetch_image_to_album_stale_declared_name(env):
     assert api.album_uploads[0]["file"].endswith("精华_9.png")
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_fetch_image_to_album_create_unsupported(env):
     """协议端无创建相册接口（NapCat）时报出可操作的中文指引。"""
@@ -412,6 +424,7 @@ async def test_video_recon_concat(env, monkeypatch):
     assert Path(out).read_bytes() == b"AAAABBBB"
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_essence_save_retries_on_dropped_set(env):
     """v1.2：QQ 偶发丢设精华 → 逐段回读验证 + 仅重设精华（不重发消息），最终全部确认。"""
@@ -435,6 +448,7 @@ async def test_essence_save_retries_on_dropped_set(env):
     assert len(api.sent_messages) == 3
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_essence_save_unconfirmable_fails_without_resend(env):
     """设精始终不落地（权限不足被 NapCat 静默吞掉）→ 每分片只发一条消息，
@@ -509,6 +523,7 @@ async def test_essence_full_text_local_cache_fast_path(env, monkeypatch):
     assert len(api.calls) == calls_before  # 零云端调用（离线秒开）
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_essence_full_text_cloud_timeout_raises(env, monkeypatch):
     """云端精华列表挂起 → 超时抛出清晰错误（不无限等待）。"""
@@ -674,6 +689,7 @@ async def test_image_album_single_upload(env):
     assert not src.exists()  # 暂存已清理
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_image_album_replay_does_not_duplicate_media(env):
     """重试不得把同一张图二次入册（上传非幂等）。
@@ -710,6 +726,7 @@ async def test_image_album_replay_does_not_duplicate_media(env):
     assert any(c.startswith("get_group_album_media_list") for c in api.calls)
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_image_album_replay_dedup_falls_back_to_name_and_file_name(env):
     """去重键必须回落到 name / file_name：真实协议端的条目不一定给 desc。
@@ -751,6 +768,7 @@ async def test_image_album_replay_dedup_falls_back_to_name_and_file_name(env):
     assert await ingest._album_has_media("g1", "a1", "封面.png") is False
 
 
+@pytest.mark.no_backoff
 @pytest.mark.asyncio
 async def test_image_album_replay_reuses_renamed_staged_file(env):
     """真机坏链（2026-09-16）：改名后的重放必须找到改名后的文件。

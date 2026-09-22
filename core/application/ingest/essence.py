@@ -14,6 +14,11 @@ from core.application.composition.splitter import (
 )
 
 CLOUD_CALL_TIMEOUT = 12.0
+# 精华列表是最终一致的（设精/上传后云端可见有延迟），下面两处是"等可见"的
+# 轮询间隔。抽成模块常量是为了让测试能把等待归零：测试断言的是重试次数与
+# 终态，不是等了多久；默认值与抽取前逐字相同。
+CONFIRM_RETRY_INTERVAL = 1.5  # _send_part：设精后确认可见，最多 3 次
+REBUILD_RETRY_INTERVAL = 1.0  # essence_full_text：分片重建，最多 4 次
 _PART_MARK = "[云盘|{title}|{seq}/{total}]"
 
 
@@ -74,7 +79,7 @@ class EssenceMixin:
                 f"[ingest] essence part {seq}/{total} not confirmed, retry {attempt + 1}"
             )
             if attempt < 2:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(CONFIRM_RETRY_INTERVAL)
         # The set step is where server-side rejection surfaces (permissions /
         # rate limits; NapCat still reports success). Re-running the whole
         # task would re-send every part again, so fail without queue-level
@@ -282,7 +287,7 @@ class EssenceMixin:
             logger.debug(
                 f"[ingest] essence parts missing {missing}, retry {attempt + 1}"
             )
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(REBUILD_RETRY_INTERVAL)
         if missing:
             import json as _json
 
