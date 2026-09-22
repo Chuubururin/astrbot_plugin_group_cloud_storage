@@ -28,15 +28,29 @@ jobs:
   python-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # 任何一条 skip 都让 job 失败：跳过不是"通过"，是覆盖率缺口。
+      # 见 tests/conftest.py 的 SKIP GUARD。
+      REQUIRE_NO_SKIP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install -r requirements.txt
-      # paramiko/pysmb 是可选传输依赖，测试里 importorskip——装上才能跑 sftp/smb 用例
-      - run: pip install pytest pytest-asyncio paramiko pysmb
-      - run: python -m pytest tests/unit/ -x -q
+      # paramiko/pysmb/pillow/impacket 是可选依赖，测试里 importorskip——装上才能跑
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # ffmpeg 是二进制依赖（test_composition/test_converter 无它则 skip）。
+      # runner 镜像通常自带，缺了才装，避免无谓的 apt 开销。
+      - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      # 全量 tests/：原先只跑 tests/unit/，tests/contract（400 条）与
+      # tests/security（174 条）从未进过 CI——test_i5 的确定性回归就是被这个
+      # 缺口漏掉的。全套 1976 条本机约 49s。
+      #
+      # -n auto --dist loadfile：多进程并行。本机 4 核实测 49s → 17s（2.9×），
+      # 连续 4 次全绿。loadfile 保证同文件用例落在同一 worker。全仓 tests/ 已
+      # 核对无固定端口绑定（SMB/HTTP/SFTP 一律临时端口 0，或只构造 URL 不 bind），
+      # 故跨 worker 无端口碰撞面。若出现偶发失败，先退回 `-n 2`（实测 26s）。
+      - run: python -m pytest tests/ -x -q -n auto --dist loadfile
 
   frontend-tests:
     runs-on: ubuntu-latest
@@ -58,8 +72,10 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements.txt
-      - run: pip install pytest pytest-asyncio
+      - run: pip install pytest pytest-asyncio pytest-timeout
       - name: Import contracts
         run: python tools/check_import_contracts.py
       - name: Architecture tests
+        env:
+          REQUIRE_NO_SKIP: "1"
         run: python -m pytest tests/unit/test_architecture.py -x -q

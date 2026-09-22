@@ -282,15 +282,34 @@ def test_configure_smb_server_matches_real_impacket(tmp_path, monkeypatch):
     impacket 未安装时本用例 skip——这正是「假 impacket 掩盖真实契约」的残留风险。
     """
     pytest.importorskip("impacket")
-    from impacket.ntlm import compute_nthash
+    from impacket.ntlm import compute_lmhash, compute_nthash
     from impacket.smbserver import SimpleSMBServer
 
     svc = _build_service(tmp_path, monkeypatch)
     server = SimpleSMBServer(listenAddress="127.0.0.1", listenPort=1445)
+
+    # 不要读 SimpleSMBServer 的凭据表：impacket 0.13.x 的 addCredential 只是
+    # 转发给内部 SMBSERVER，凭据落在 _SMBSERVER__credentials 这种私有 mangled
+    # 名上，旧写法 server.getCredentials() 在真实 impacket 上根本不存在。
+    # 本用例此前被 importorskip 长期跳过，这个 AttributeError 一直没人看见 ——
+    # 正是"跳过 = 静默覆盖率缺口"的样本。
+    # 改成"包一层再转发"：既捕获仓库到底传了什么，又仍然走真实 impacket 的
+    # 签名（参数个数不对依旧 TypeError，这正是 T3 要守的契约）。
+    captured: dict[str, tuple] = {}
+    real_add_credential = server.addCredential
+
+    def _spy_add_credential(name, uid, lmhash, nthash):
+        captured[name] = (uid, lmhash, nthash)
+        return real_add_credential(name, uid, lmhash, nthash)
+
+    monkeypatch.setattr(server, "addCredential", _spy_add_credential)
     configure_smb_server(server, svc)  # 修复前：TypeError（addCredential 少 2 个参数）
 
-    _uid, _lmhash, nthash = server.getCredentials()["cloud"]
-    assert nthash == compute_nthash(TOKEN), "H4: 注册的必须是 token 的 NT hash"
+    assert "cloud" in captured, f"未注册 cloud 凭据: {captured}"
+    _uid, lmhash, nthash = captured["cloud"]
+    assert nthash == compute_nthash(TOKEN).hex(), "H4: 注册的必须是 token 的 NT hash"
+    assert lmhash == compute_lmhash(TOKEN).hex(), "H4: LM hash 同样来自 token"
+    assert nthash != TOKEN, "H4: 绝不能把明文 token 当 hash 传进去"
     # SimpleSMBServer 没有公开的 share 读取接口，只能看它写进 ConfigParser 的值。
     cfg = server._SimpleSMBServer__smbConfig
     assert cfg.get("CLOUD", "read only") == "yes", "H5: 只读声明必须是字符串 yes"

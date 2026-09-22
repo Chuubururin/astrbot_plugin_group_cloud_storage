@@ -53,8 +53,6 @@ class TestLegacyLayersRemoved:
         ROOT / "bootstrap.py",
     ])
     def test_no_legacy_import_paths(self, py_file):
-        if py_file.name == "__init__.py":
-            pytest.skip("init file")
         content = py_file.read_text(encoding="utf-8")
         for term in ("core.services", "adapters.store", "application.op_queue"):
             assert term not in content, \
@@ -76,8 +74,6 @@ class TestPythonFileSize:
         ids=lambda p: str(p.relative_to(ROOT)),
     )
     def test_core_under_700(self, py_file):
-        if py_file.name == "__init__.py":
-            pytest.skip("init file")
         lines = _file_lines(py_file)
         assert lines < 700, f"{py_file.relative_to(ROOT)}: {lines} lines >= 700"
 
@@ -87,8 +83,6 @@ class TestPythonFileSize:
         ids=lambda p: str(p.relative_to(ROOT)),
     )
     def test_adapters_under_700(self, py_file):
-        if py_file.name == "__init__.py":
-            pytest.skip("init file")
         lines = _file_lines(py_file)
         assert lines < 700, f"{py_file.relative_to(ROOT)}: {lines} lines >= 700"
 
@@ -98,8 +92,6 @@ class TestPythonFileSize:
         ids=lambda p: str(p.relative_to(ROOT)),
     )
     def test_webapi_under_700(self, py_file):
-        if py_file.name == "__init__.py":
-            pytest.skip("init file")
         lines = _file_lines(py_file)
         assert lines < 700, f"{py_file.relative_to(ROOT)}: {lines} lines >= 700"
 
@@ -129,8 +121,6 @@ class TestApplicationDependencies:
         ids=lambda p: str(p.relative_to(ROOT)),
     )
     def test_no_direct_adapter_imports(self, py_file):
-        if py_file.name == "__init__.py":
-            pytest.skip("init file")
         tree = ast.parse(py_file.read_text(encoding="utf-8"),
                          filename=str(py_file))
         for node in ast.walk(tree):
@@ -319,10 +309,6 @@ class TestNoLegacyBackends:
         ids=lambda p: str(p.relative_to(ROOT)),
     )
     def test_no_postgres_refs(self, py_file):
-        if py_file.name == "__init__.py":
-            pytest.skip("test file")
-        if "test_" in py_file.name:
-            pytest.skip("test file")
         content = py_file.read_text(encoding="utf-8")
         for term in ("postgres", "opensearch", "psycopg", "scheduler_mode", "storage_mode", "search_mode"):
             assert term not in content.lower(), f"{py_file.relative_to(ROOT)} contains '{term}'"
