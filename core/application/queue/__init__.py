@@ -2,7 +2,8 @@
 control, kind dispatch, capacity/health.
 
 Composed of: op.py + op_queue.py + execution.py + control.py + events.py
-    + task_control.py + op_dispatch.py + capacity.py + health.py
+    + task_control.py + op_dispatch.py + op_file_scan.py + capacity.py
+    + health.py
 """
 from .op import Op, OpCancelError, OpPausedError
 from .op_queue import OpQueue

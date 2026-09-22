@@ -74,6 +74,13 @@ class _FakeSync:
             self.op.cancel = True
         return SimpleNamespace(ok=True, error=None)
 
+    async def run_diff_sync(self, gid: str, lock):
+        """差分桩：与 run_full_sync 同样的「第 N 个群后中断」注入点。"""
+        self.calls.append(gid)
+        if self.cancel_after is not None and len(self.calls) >= self.cancel_after:
+            self.op.cancel = True
+        return SimpleNamespace(ok=True, error=None, files_removed=0)
+
 
 async def _list_groups():
     return []
@@ -177,6 +184,34 @@ async def test_file_scan_cancel_still_invalidates_index_and_notifies():
         e for e in queue.events
         if e.get("type") == "data_changed"
         and e.get("kind") == "file_scan"
+        and "i" not in e
+    ]
+    assert finals, queue.events
+
+
+@pytest.mark.asyncio
+async def test_diff_scan_cancel_still_invalidates_index_and_notifies():
+    """低危回归（与 file_scan 对称）：取消 diff_file_scan 也要清索引 + 通知前端。
+
+    do_file_scan 的 mark_dirty / data_changed 已经搬进 try/finally，取消时
+    仍会执行；do_diff_scan 的同类清理却还写在循环之后 —— 一旦用户点「中断」
+    （pause_check 抛 OpCancelError）就被整体跳过。而 _SELF_ANNOUNCED_KINDS
+    同时含 "file_scan" 与 "diff_file_scan"，handle() 的 _announce 对两者都
+    跳过，于是取消一次差分扫描 = 搜索索引陈旧 + 前端任务页停在 pending。
+    """
+    kv = _FakeSearchKv()
+    queue = _FakeQueue()
+    sync = _FakeSync(cancel_after=1)  # 第一个群差分完后用户中断
+    d = _make_dispatcher({}, _FakeScan(["g1", "g2", "g3"]), sync, kv=kv, queue=queue)
+    op = Op(task_id="t_ds", kind="diff_file_scan", target="*", payload={})
+    sync.op = op
+    with pytest.raises(OpCancelError):
+        await d.do_diff_scan(op)
+    assert kv.marked == ["g1", "g2", "g3"], kv.marked
+    finals = [
+        e for e in queue.events
+        if e.get("type") == "data_changed"
+        and e.get("kind") == "diff_file_scan"
         and "i" not in e
     ]
     assert finals, queue.events
