@@ -1,9 +1,10 @@
 /**
  * Task panel (A3/G1-G3) - floating log behind the header queue indicator.
  *
- * Renders the SSE-fed taskLog (newest first); rows update in place by
- * log id so progress events mutate rather than rebuild . Panel
- * visibility follows store.taskPanelOpen, toggled by cs-header.
+ * Renders the SSE-fed taskLog (newest first) through the shared keyed-row diff
+ * (utils/dom-diff): rows reconcile by log id, an unchanged row keeps its node,
+ * and a changed one is rebuilt by buildRow. Panel visibility follows
+ * store.taskPanelOpen, toggled by cs-header.
  *
  * @module components/task-panel
  */
@@ -11,7 +12,8 @@
 import { getState, subscribe, set } from '../store.js';
 import { getIcon } from '../icons.js';
 import { escapeHtml, formatTimeFull } from '../utils/helpers.js';
-import { STATE_CLASS } from '../views/task-labels.js';
+import { applyKeyedDiff } from '../utils/dom-diff.js';
+import { STATE_CLASS, taskLogDetail, taskLogSignature } from '../views/task-labels.js';
 
 /** Initialize the task panel (singleton appended to body). */
 export function initTaskPanel() {
@@ -56,26 +58,11 @@ function renderTasks(panel) {
   const tasks = getState().taskLog || [];
   if (count) count.textContent = tasks.length ? `${tasks.length} 条` : '';
 
-  // In-place update by log id: drop stale rows, then place every row at its
-  // model index. pushTaskLog unshifts (newest first), so appending new rows
-  // would send each fresh event to the bottom of the scrollable list.
-  const existing = new Map();
-  for (const el of Array.from(list.children)) {
-    if (el.dataset && el.dataset.key != null) existing.set(el.dataset.key, el);
-  }
-  const wantSet = new Set(tasks.map((t) => t.log_id));
-  for (const [key, el] of existing) {
-    if (!wantSet.has(key)) el.remove();
-  }
-  tasks.forEach((t, i) => {
-    const el = existing.get(t.log_id);
-    if (el) {
-      updateRow(el, t);
-      if (list.children[i] !== el) list.insertBefore(el, list.children[i] || null);
-    } else {
-      list.insertBefore(buildRow(t), list.children[i] || null);
-    }
-  });
+  // 与所有其它列表共用同一个键控 diff 引擎：pushTaskLog 头插（最新在前），
+  // want 顺序即渲染顺序，新行落在列表头部而不是追加到底部。
+  // log_id = `${ts}-${task_id}-${type}`，同一毫秒的同类事件会撞 key：diff 加
+  // 序号消歧并告警（此前手写的 Map 归并会把撞 key 的一行悄悄丢掉）。
+  applyKeyedDiff(list, tasks, buildRow, (t) => String(t.log_id), taskLogSignature);
 }
 
 function buildRow(t) {
@@ -87,24 +74,7 @@ function buildRow(t) {
     <span class="task-time">${formatTimeFull(t.ts / 1000)}</span>
     <span class="task-kind">${escapeHtml(t.kind || '-')}</span>
     <span class="task-state ${STATE_CLASS[t.type] || ''}">${escapeHtml(t.type || '-')}</span>
-    <span class="task-detail">${escapeHtml(taskDetail(t))}</span>
+    <span class="task-detail">${escapeHtml(taskLogDetail(t))}</span>
   `;
   return el;
-}
-
-function updateRow(el, t) {
-  const state = el.querySelector('.task-state');
-  const detail = el.querySelector('.task-detail');
-  if (state) {
-    state.className = `task-state ${STATE_CLASS[t.type] || ''}`;
-    state.textContent = t.type || '-';
-  }
-  if (detail) detail.textContent = taskDetail(t);
-}
-
-function taskDetail(t) {
-  if (t.percent != null && t.percent > 0) {
-    return `${t.detail || ''} ${Math.round(t.percent)}%`.trim();
-  }
-  return t.detail || t.state || '';
 }

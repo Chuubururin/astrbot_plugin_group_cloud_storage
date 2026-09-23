@@ -75,12 +75,13 @@ class TaskControlService:
 
     async def list_tasks(
         self, state: str | None = None, kind: str | None = None,
+        kinds: list[str] | None = None,
         target: str | None = None, limit: int = 100, offset: int = 0,
         task_ids: list[str] | None = None,
     ) -> list[dict]:
         return await self.store.ledger_query(
-            state=state, kind=kind, target=target, limit=limit, offset=offset,
-            task_ids=task_ids,
+            state=state, kind=kind, kinds=kinds, target=target,
+            limit=limit, offset=offset, task_ids=task_ids,
         )
 
     async def queue_status(self) -> dict:

@@ -147,6 +147,7 @@ test('structure: row signatures cover every field their builders read', () => {
   const sigs = read('features/row-signatures.js');
   const labels = read('views/task-labels.js');
   const tasks = read('views/tasks.js');
+  const taskPanel = read('components/task-panel.js');
 
   // `id` / `group_id` / `task_id` carry row identity through keyFn, not the signature.
   const checks = [
@@ -160,6 +161,12 @@ test('structure: row signatures cover every field their builders read', () => {
       ...readFields(tasks, 'buildTaskRow', 't'),
       ...readFields(tasks, 'actionCell', 't'),
     ]), readFields(labels, 'taskSignature', 't'), ['task_id']],
+    // The floating task panel logs through the same diff engine. `log_id` is its
+    // keyFn field, and components/task-panel.js buildRow reads nothing else that
+    // the signature does not project (percent/detail/state arrive folded into
+    // taskLogDetail, like payload does into taskSummary above).
+    ['taskLogSignature', readFields(taskPanel, 'buildRow', 't'),
+      readFields(labels, 'taskLogSignature', 't'), ['log_id']],
   ];
 
   for (const [name, rendered, covered, keyFields] of checks) {

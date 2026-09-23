@@ -112,6 +112,7 @@ class OutboxMixin(StorePart):
         self,
         state: str | None = None,
         kind: str | None = None,
+        kinds: list[str] | None = None,
         target: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -128,7 +129,11 @@ class OutboxMixin(StorePart):
             if state:
                 sql += " AND state=?"
                 args.append(state)
-            if kind:
+            if kinds:
+                placeholders = ",".join("?" * len(kinds))
+                sql += f" AND kind IN ({placeholders})"
+                args.extend(kinds)
+            elif kind:
                 sql += " AND kind=?"
                 args.append(kind)
             if target:

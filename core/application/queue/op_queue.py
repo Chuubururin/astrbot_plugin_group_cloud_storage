@@ -117,6 +117,42 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         )
         return op.task_id
 
+    async def claim(
+        self, task_id: str, kind: str, target: str = "", payload: dict | None = None,
+    ) -> str:
+        """Adopt an existing ledger row (pending → running) instead of
+        creating a new one.  Used by resume_pending to avoid orphaning the
+        original pending row (submit() always creates a new task_id + new
+        pending write, leaving the original row stranded).
+        """
+        await self.start()
+        op = Op(
+            task_id=task_id,
+            kind=kind,
+            target=target,
+            payload=payload or {},
+        )
+        self._pending.add(op.task_id)
+        self._ops_by_id[op.task_id] = op
+        # The ledger row already exists in "pending" state (written by a
+        # prior submit or reconcile).  Skip the pending write and go
+        # straight to "running" so the old row is not orphaned.
+        await self._ledger_state(op, "running")
+        if kind in self._high_priority:
+            await self._q_hi.put(op)
+        else:
+            await self._q.put(op)
+        self._push(
+            {
+                "type": "queued",
+                "task_id": op.task_id,
+                "kind": op.kind,
+                "target": op.target,
+                "ts": time.time(),
+            }
+        )
+        return op.task_id
+
     def has_pending(self, kind: str, payload_key: str, payload_value: Any) -> bool:
         """True if a queued/running op of ``kind`` already carries
         payload[payload_key] == payload_value (dedup for auto-submits)."""

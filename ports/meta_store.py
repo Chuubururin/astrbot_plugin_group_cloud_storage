@@ -349,9 +349,11 @@ class LedgerPort(Protocol):
         self,
         state: str | None = None,
         kind: str | None = None,
+        kinds: list[str] | None = None,
         target: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        task_ids: list[str] | None = None,
     ) -> list[dict]:
         """Paged task ledger query (ordered by updated_at desc)."""
         ...

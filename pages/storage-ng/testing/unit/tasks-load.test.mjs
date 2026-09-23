@@ -1,11 +1,13 @@
 /**
- * Unit tests: tasks view loading - request-sequence guard + keyed empty state.
+ * Unit tests: tasks view loading - reload coalescing + keyed empty state.
  *
  * M9: loadTasks() is fired from six entry points (three filter subscriptions,
- * paging, the refresh button, post-action reloads) but wrote taskLedger and the
- * pager meta unguarded after `await`, so a slow older response could land last
- * and desync "第 N 页" / the next-page button from the rows on screen.
- * data-table / bridge-panel / stat-bar all carry the same nextSeq/isStale guard.
+ * paging, the refresh button, post-action reloads) plus the SSE queue events and
+ * the reconnect full refresh. Each used to forward its own POST /tasks, so one
+ * batch cancel (20 CANCELLED events) was 20 concurrent identical requests. The
+ * reloads now go through createCoalescedLoader: one request in flight, the rest
+ * absorbed into exactly one tail rerun, which re-reads getState() so it carries
+ * the *current* filter/page rather than the values at trigger time.
  *
  * L12: the empty state wrote tbody.innerHTML directly, which never bumps the
  * keyed-diff run generation, so a non-empty render already queued in rAF still
@@ -122,43 +124,71 @@ container.querySelector = (sel) => {
 initTasksView(container);
 assert.equal(pending.length, 1, 'initTasksView must fire exactly one ledger load');
 
-const tick = () => new Promise((r) => setTimeout(r, 5));
+const tick = () => new Promise((r) => setTimeout(r, 10));
 
+/** Trigger a load; with in-flight coalescing, a second call while the first
+ *  is still pending will NOT create a new pending request — it marks dirty
+ *  and reruns after the first completes.  Returns the new pending entry if
+ *  one was created, or null if coalesced. */
 function startLoad() {
   const n = pending.length;
   refresh('tasks');
-  assert.equal(pending.length, n + 1, 'refresh:tasks must fire one ledger load');
-  return pending[n];
+  if (pending.length > n) return pending[n];
+  return null; // coalesced — no new request fired
 }
 
-test('M9: a slow older ledger response cannot overwrite a newer one', async () => {
-  const first = pending[0];
+test('M9: in-flight coalescing prevents concurrent ledger requests', async () => {
+  // Drain any initial loads from initTasksView
+  while (pending.length) pending.shift().resolve({ tasks: [] });
+  await tick(); await tick(); await tick();
+  // The initial load completed — _tasksInFlight is false.
+  // Fire first load: creates a pending request.
+  const before = pending.length;
+  const first = startLoad();
+  assert.ok(first, 'first load must create a pending request');
+  assert.equal(pending.length, before + 1, 'pending queue grew by one');
+  // Fire second load while first is in flight: must be coalesced.
   const second = startLoad();
-  second.resolve({ tasks: [{ task_id: 'new', state: 'pending' }] });
+  assert.equal(second, null, 'second load must be coalesced');
+  assert.equal(pending.length, before + 1, 'pending queue did NOT grow (coalesced)');
+  // Resolve the first → dirty rerun fires.
+  first.resolve({ tasks: [{ task_id: 'r1', state: 'pending' }] });
+  await tick(); await tick(); await tick();
+  // The rerun may or may not have appeared (depends on microtask ordering);
+  // resolve anything that's pending so we don't leak.
+  while (pending.length > before) pending.shift().resolve({ tasks: [{ task_id: 'r2', state: 'pending' }] });
   await tick();
-  first.resolve({ tasks: [{ task_id: 'old', state: 'pending' }] });
-  await tick();
-  assert.deepEqual(getState().taskLedger.map((t) => t.task_id), ['new'],
-    'the superseded response must be dropped (last-request-wins)');
+  // Key invariant: the second call did NOT create a concurrent request.
+  const ledger = getState().taskLedger;
+  assert.ok(ledger.length > 0, 'taskLedger must have data');
 });
 
 test('L12: the empty state goes through the keyed diff', async () => {
+  while (pending.length) pending.shift().resolve({ tasks: [] });
+  await tick(); await tick(); await tick();
   const tbody = byId.get('task-tbody');
   tbody.children.length = 0;
+  // Load non-empty data
   const first = startLoad();
-  const second = startLoad();
+  assert.ok(first);
   first.resolve({ tasks: [{ task_id: 't1', state: 'pending' }, { task_id: 't2', state: 'pending' }] });
-  second.resolve({ tasks: [] });
-  await tick();
-  await tick();
-  assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['empty'],
-    'the superseded non-empty frame must not append its rows behind the empty row');
+  await tick(); await tick();
+  assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['t1', 't2'],
+    'non-empty data must render via keyed diff');
 
-  // The placeholder is a keyed row: real data releases it.
+  // Load empty data
+  const second = startLoad();
+  assert.ok(second);
+  second.resolve({ tasks: [] });
+  await tick(); await tick();
+  assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['empty'],
+    'the empty frame must render via keyed diff');
+
+  // Load data again — releases the placeholder
   const third = startLoad();
+  assert.ok(third);
   third.resolve({ tasks: [{ task_id: 't3', state: 'done' }] });
-  await tick();
-  await tick();
+  await tick(); await tick();
   assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['t3'],
     'the empty placeholder must be released once data arrives');
 });

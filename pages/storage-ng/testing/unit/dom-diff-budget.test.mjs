@@ -132,6 +132,30 @@ test('L10: reordering a long list is chunked and stays within budget', async () 
     `a reversal must plan the minimum move set (N-1 = ${many.length - 1}, got ${res.moves})`);
 });
 
+test('L10: a whole-page reorder settles in one frame', async () => {
+  const tbody = el('tbody');
+  const many = list(MAX_ROWS_PER_FRAME * 2);
+  applyKeyedDiff(tbody, many, render, (x) => x.id);
+  await drain();
+  const before = getDiffStats();
+  const reversed = [...many].reverse();
+  const res = applyKeyedDiff(tbody, reversed, render, (x) => x.id);
+  await drain();
+  const after = getDiffStats();
+  assert.deepEqual(keys(tbody), reversed.map((m) => m.id));
+  // A reparent is pointer surgery, not content construction, so it is charged
+  // a fraction of a row rebuild: 2N moves must still fit the frame that a
+  // single N-row create pass needs two frames for.
+  assert.equal(after.lastFramesUsed, 1,
+    `a pure reorder must settle in one frame, took ${after.lastFramesUsed}`);
+  assert.equal(after.violations, before.violations);
+  // The charge is weighted; the real move count must stay observable.
+  assert.equal(res.moves, many.length - 1,
+    `moves must still report every DOM move (got ${res.moves})`);
+  assert.ok(after.maxMoves >= many.length - 1,
+    'maxMoves must still expose the true move count');
+});
+
 test('LIS: moving one row to the tail costs one move, not N', async () => {
   const tbody = el('tbody');
   const rows = list(5);

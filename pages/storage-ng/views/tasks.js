@@ -12,6 +12,7 @@ import { API, apiGet, apiPost } from '../api.js';
 import { getIcon } from '../icons.js';
 import { formatTimeFull, escapeHtml } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
+import { createCoalescedLoader } from '../utils/refresh-coalescer.js';
 import { confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { DEFAULT_PAGE_SIZE } from '../constants.js';
@@ -82,7 +83,8 @@ export function initTasksView(container) {
   return () => { subs.forEach((u) => u()); };
 }
 
-async function loadTasks() {
+/** The ledger request itself; reloads go through `ledgerLoader` below. */
+async function fetchTaskLedger() {
   const seq = nextSeq('tasks');
   set('loading', true);
   try {
@@ -107,6 +109,16 @@ async function loadTasks() {
     set('loading', false);
   }
 }
+
+// 账本重载的唯一合并入口（形状同 components/data-table.js 的 load()：在飞期间
+// 到达的触发只标脏，落地后补一次；补刷重新读取 getState()，所以带的是**当前**
+// 筛选/页码，不是触发时的旧值）。六个触发源——筛选订阅、分页、刷新按钮、
+// 动作后置重载、SSE 队列事件、重连全量刷新——全部经此，一次批量取消不再是
+// N 条并发 POST /tasks。
+const ledgerLoader = createCoalescedLoader(fetchTaskLedger);
+
+/** Ask for a ledger reload (coalesced; fire-and-forget like every caller). */
+function loadTasks() { ledgerLoader.load(); }
 
 /** Empty-state placeholder row; keyed 'empty' so a later diff releases it. */
 function buildEmptyRow() {
@@ -254,6 +266,9 @@ async function handleAction(act, taskId) {
         break;
       }
     }
+    // 点击后的这一次重载不能删：`ops` 不产生任何 SSE 事件、`undo` 只入队补偿任务
+    // （QUEUED/DONE 不在队列事件白名单里）、SSE 断线时也没有回声——删了就再没人重画。
+    // 它与 SSE 回声的重复由 ledgerLoader 合并（在飞只标脏），所以不再并发两条。
     loadTasks();
   } catch (e) {
     toast(`操作失败: ${e.message || e}`, 'error');

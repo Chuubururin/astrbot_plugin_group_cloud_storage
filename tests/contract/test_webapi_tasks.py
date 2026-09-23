@@ -133,15 +133,20 @@ class _FakeTaskControl:
 
 
 class _FakeQueue:
-    """OpQueue stub for submit/resume_pending."""
+    """OpQueue stub for submit/claim/resume_pending."""
 
     def __init__(self):
         self.submitted: list[tuple[str, dict]] = []
+        self.claimed: list[tuple[str, dict]] = []
         self._submit_id = "task-001"
 
     async def submit(self, kind, target="", payload=None):
         self.submitted.append((kind, {"target": target, "payload": payload}))
         return self._submit_id
+
+    async def claim(self, task_id, kind, target="", payload=None):
+        self.claimed.append((task_id, kind, {"target": target, "payload": payload}))
+        return task_id
 
 
 class _FakeScan:
@@ -413,8 +418,8 @@ class TestApiResumePending:
         result = await api_tasks_resume_pending(svc)
         assert result["resumed"] == 3
         # move_file should be skipped (not in whitelist)
-        submitted_kinds = [k for k, _ in svc.queue.submitted]
-        assert "move_file" not in submitted_kinds
+        claimed_kinds = [kind for _, kind, _ in svc.queue.claimed]
+        assert "move_file" not in claimed_kinds
 
     @pytest.mark.asyncio
     async def test_resume_pending_invalid_json_payload(self, monkeypatch):
@@ -449,7 +454,7 @@ class TestApiResumePending:
         assert result["failed_preflight"] == 1
         assert states[0][0] == "t1" and states[0][1] == "failed"
         assert "资源不存在" in states[0][2]
-        assert svc.queue.submitted == []
+        assert svc.queue.claimed == []
 
     @pytest.mark.asyncio
     async def test_resume_pending_precheck_already_composite(self, monkeypatch):
@@ -471,7 +476,7 @@ class TestApiResumePending:
         result = await api_tasks_resume_pending(svc)
         assert result["resumed"] == 0
         assert result["failed_preflight"] == 1
-        assert svc.queue.submitted == []
+        assert svc.queue.claimed == []
 
     @pytest.mark.asyncio
     async def test_resume_pending_precheck_passes_legacy_numeric(self, monkeypatch):
@@ -486,7 +491,7 @@ class TestApiResumePending:
         result = await api_tasks_resume_pending(svc)
         assert result["resumed"] == 1
         assert result["failed_preflight"] == 0
-        assert [k for k, _ in svc.queue.submitted] == ["convert_volumes"]
+        assert [kind for _, kind, _ in svc.queue.claimed] == ["convert_volumes"]
 
     @pytest.mark.asyncio
     async def test_resume_pending_precheck_video_missing(self, monkeypatch):
@@ -501,7 +506,7 @@ class TestApiResumePending:
         result = await api_tasks_resume_pending(svc)
         assert result["resumed"] == 0
         assert result["failed_preflight"] == 1
-        assert svc.queue.submitted == []
+        assert svc.queue.claimed == []
 
 
 # ---------------------------------------------------------------------------

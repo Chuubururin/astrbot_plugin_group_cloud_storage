@@ -5,16 +5,17 @@
  * key, changed ones are replaced, stale ones removed, and order is fixed with
  * the *minimal* set of DOM moves (longest increasing subsequence) - never a
  * full innerHTML rewrite, and never a full-list re-append. All mutations are
- * rAF-batched, and each frame stops before the *measured* DOM write count
- * would pass MAX_ROWS_PER_FRAME (enforced against real writes, not op count).
- * Statistics feed the E2E probes.
+ * rAF-batched, and each frame stops before the *measured* frame units would
+ * pass MAX_ROWS_PER_FRAME (one unit rebuilds one row; a reparent move is
+ * charged a fraction - see MOVE_UNITS). Statistics feed the E2E probes.
  *
  * Change detection is a per-row render signature when the caller supplies
- * `signatureFn`, and a whole-DTO field compare otherwise.
+ * `signatureFn`, and a whole-DTO field compare otherwise (warned once).
  * @module utils/dom-diff
  */
 
 import { MAX_ROWS_PER_FRAME } from '../constants.js';
+import { stableRun } from './lis.js';
 
 /** Cumulative keyed-render statistics (exposed to E2E probes). */
 const diffStats = {
@@ -60,31 +61,12 @@ function hasChanged(oldItem, newItem) {
 }
 
 /**
- * Longest increasing subsequence over the `c` (current DOM index) of a
- * want-order scan; returns indices into `seq` of one optimal stable run.
- * Rows in it already sit in final relative order, so N - LIS is the provable
- * minimum number of DOM moves. Patience sorting: O(N log N).
+ * A move is a reparent (pointer surgery), not content construction, so it is
+ * charged a fraction of a row rebuild against the frame budget: a whole-page
+ * reorder settles in one frame instead of two, while a pathological reorder of
+ * hundreds of rows still chunks.
  */
-function stableRun(seq) {
-  const tails = [];
-  const prev = new Array(seq.length).fill(-1);
-  for (let i = 0; i < seq.length; i++) {
-    const c = seq[i].c;
-    let lo = 0;
-    let hi = tails.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (seq[tails[mid]].c < c) lo = mid + 1;
-      else hi = mid;
-    }
-    if (lo > 0) prev[i] = tails[lo - 1];
-    tails[lo] = i;
-  }
-  const run = [];
-  if (!tails.length) return run;
-  for (let k = tails[tails.length - 1]; k !== -1; k = prev[k]) run.push(k);
-  return run;
-}
+const MOVE_UNITS = 0.25;
 
 /**
  * Apply a keyed diff to a container.
@@ -98,6 +80,17 @@ function stableRun(seq) {
  * @returns {{rewrittenRows: number, moves: number}} rows rewritten / moves planned
  */
 export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', signatureFn = null) {
+  // One render generation per container, shared with the supersede guard below.
+  const state = runSeq.get(container) || { seq: 0, sigWarned: false };
+  // Every list caller is expected to project what it renders: the fallback
+  // compares the whole DTO, so unrelated server-side fields rebuild rows on
+  // every poll. Warn once per container so the omission names itself.
+  if (!signatureFn && !state.sigWarned) {
+    state.sigWarned = true;
+    console.warn('[dom-diff] caller omitted signatureFn on',
+      container.id || container.className || container.tagName,
+      '- falling back to the whole-DTO compare');
+  }
   const keyOf = typeof keyFn === 'function' ? keyFn : (item) => String(item[keyFn]);
 
   const byKey = new Map();
@@ -212,8 +205,9 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
   // ---- reorder: minimal move set ------------------------------------------
   // The previous pass re-appended every row, so moving one row near the top of
   // a 100-row page cost 100 DOM moves. Here only the rows outside the stable
-  // run move, and each move is charged 1 write, so even a pathological reorder
-  // is honestly chunked across frames rather than overrunning one.
+  // run move, and each move is charged MOVE_UNITS against the frame budget, so
+  // a reorder of a whole page still fits one frame while a pathological one
+  // chunks rather than overrunning.
   let plannedMoves = 0;
   if (orderChanged || toRemove.length > 0 || plan.some((p) => p.create)) {
     const curIdx = new Map();
@@ -233,17 +227,16 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
       if (stable.has(i)) { ref = i; continue; }
       const target = i;
       const refIdx = ref;
-      ops.push({ cost: 1, run: () => {
+      ops.push({ cost: MOVE_UNITS, run: () => {
         container.insertBefore(
           finalEls[target], refIdx === null ? null : finalEls[refIdx]);
-        return 1;
+        return MOVE_UNITS;
       } });
       plannedMoves += 1;
       ref = target;
     }
   }
 
-  const state = runSeq.get(container) || { seq: 0 };
   const myRun = ++state.seq;
   runSeq.set(container, state);
 

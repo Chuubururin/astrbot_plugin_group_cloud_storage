@@ -246,3 +246,23 @@ test('signatureFn: a rendered field change still rewrites the row in place', asy
   // against undefined and rewrites forever.
   assert.ok(tbody.children[1].__sig === 'B', `row carries __sig, got ${tbody.children[1].__sig}`);
 });
+
+test('signatureFn omitted: the fallback is announced once per container', async () => {
+  const warnings = [];
+  const real = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(' ')); };
+  try {
+    const tbody = el('tbody');
+    applyKeyedDiff(tbody, [{ id: '1', name: 'a' }], render, (x) => x.id);
+    await flushRAF();
+    applyKeyedDiff(tbody, [{ id: '1', name: 'b' }], render, (x) => x.id);
+    await flushRAF();
+    // A caller that does project its fields stays silent.
+    applyKeyedDiff(el('tbody'), [{ id: '1', name: 'a' }], render, (x) => x.id, (i) => i.name);
+  } finally {
+    console.warn = real;
+  }
+  const omitted = warnings.filter((w) => w.includes('omitted signatureFn'));
+  assert.equal(omitted.length, 1,
+    `one warning per container, got ${omitted.length}: ${JSON.stringify(warnings)}`);
+});

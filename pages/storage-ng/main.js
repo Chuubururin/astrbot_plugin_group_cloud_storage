@@ -19,6 +19,7 @@ import { initTaskPanel } from './components/task-panel.js';
 import { initStatBar } from './components/stat-bar.js';
 import { EVENT_TYPES, DATA_CHANGED_TOPICS, EVENT_KINDS } from './constants.js';
 import { createResilientSSE } from './utils/sse.js';
+import { createRefreshWindow } from './utils/refresh-coalescer.js';
 import { startQueueIndicator } from './utils/queue-indicator.js';
 import { toast } from './components/toast.js';
 
@@ -51,20 +52,12 @@ function refreshAllTopics() {
   refresh('essence');
 }
 
-// ---------- data_changed topic refresh coalescing ----------
-// Batch completions push consecutive data_changed events: same-topic refreshes
-// within 150ms coalesce into one request instead of a concurrent refetch storm.
-const _pendingDataRefresh = new Map();
-
-function debouncedTopicRefresh(topics) {
-  for (const topic of topics) {
-    clearTimeout(_pendingDataRefresh.get(topic));
-    _pendingDataRefresh.set(topic, setTimeout(() => {
-      _pendingDataRefresh.delete(topic);
-      refresh(topic);
-    }, 150));
-  }
-}
+// ---------- SSE refresh windows ----------
+// 事件成串到达（批量任务每群/每文件一条 data_changed、每个终态一条队列事件），
+// 同主题在窗口内的重复请求合并成一次；合并只发生在"请求侧"，用户点击的回声
+// 走 leading 窗口，首帧仍然立即刷（见 createRefreshWindow 的 leading 说明）。
+const scheduleTopicsRefresh = createRefreshWindow();
+const scheduleLedgerRefresh = createRefreshWindow({ leading: true });
 
 function handleSSEEvent(ev) {
   const { type, task_id, kind, state: taskState, percent, i, n, detail } = ev;
@@ -80,9 +73,10 @@ function handleSSEEvent(ev) {
   }
 
   if (LEDGER_SYNC_TYPES.has(type)) {
-    // 暂停/继续/取消是用户刚点击的操作: 立即重载任务账本, 行状态与
-    // 点击结果一致 (避免"点了暂停仍显示排队中"的脱节窗口)。
-    refresh('tasks');
+    // 暂停/继续/取消是用户刚点击的操作: leading 窗口立即重载任务账本, 行状态与
+    // 点击结果一致 (避免"点了暂停仍显示排队中"的脱节窗口); 批量取消的 20 条
+    // CANCELLED 不会变成 20 次重载。
+    scheduleLedgerRefresh('tasks');
   }
 
   switch (type) {
@@ -91,7 +85,7 @@ function handleSSEEvent(ev) {
         toast(`${kind === EVENT_KINDS.BRIDGE_OUT ? '转存网盘' : '转存群'}完成`, 'success');
         // Bridge ops emit no data_changed: reload the affected topics
         // (netdisk/files) and the bridge ledger from the shared map.
-        debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
+        scheduleTopicsRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
       }
       break;
 
@@ -100,13 +94,13 @@ function handleSSEEvent(ev) {
       // (partial uploads, half-applied batches): hot-reload the affected
       // topics so the visible rows match the cloud instead of going stale.
       toast(`${kind || '任务'}失败: ${detail || ''}`, 'error');
-      debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
+      scheduleTopicsRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
       break;
 
     case EVENT_TYPES.CANCELLED:
       // 中断同样是部分写入后的终态（批量任务可能已改了一半云状态）：
       // 与 FAILED 同样处理, 避免表格停留在中断前的旧数据上。
-      debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
+      scheduleTopicsRefresh(DATA_CHANGED_TOPICS[kind] || ['files']);
       break;
 
     case EVENT_TYPES.BRIDGE:
@@ -115,7 +109,7 @@ function handleSSEEvent(ev) {
       // DONE 分支负责，这里只补失败可见性。
       if (taskState === 'failed') {
         toast(`转存失败: ${detail || task_id || ''}`, 'error');
-        debouncedTopicRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
+        scheduleTopicsRefresh(DATA_CHANGED_TOPICS[kind] || ['bridge']);
       }
       break;
 
@@ -132,7 +126,7 @@ function handleSSEEvent(ev) {
       // 150ms window coalescing (storm guard for batch events).
       const topics = DATA_CHANGED_TOPICS[kind] || ['files'];
       lastDataRefreshAt = Date.now();
-      debouncedTopicRefresh(topics);
+      scheduleTopicsRefresh(topics);
       break;
     }
 

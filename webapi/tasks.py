@@ -121,17 +121,14 @@ async def api_tasks_resume_pending(s: Services) -> dict:
     """
     await _ensure_ready(s)
     _BREAKPOINT_KINDS = {"convert_volumes", "video_upload", "netdisk_index"}
-    # Page instead of a single capped query: the ledger routinely holds
-    # hundreds of pending file_scan rows (one scan per hot-reload), so a
-    # capped read can cut off before reaching the breakpoint rows.
+    # SQL-level kind filtering: avoids paginating through hundreds of
+    # file_scan rows just to find the breakpoint ones.
     breakpoint_rows: list[dict] = []
-    total_pending = 0
     offset = 0
     while True:
         page = await s.task_control.list_tasks(
-            state="pending", limit=100, offset=offset
+            state="pending", kinds=sorted(_BREAKPOINT_KINDS), limit=100, offset=offset
         )
-        total_pending += len(page)
         if not page:
             break
         breakpoint_rows.extend(
@@ -141,7 +138,7 @@ async def api_tasks_resume_pending(s: Services) -> dict:
             break
         offset += 100
     if not breakpoint_rows:
-        return json_response({"resumed": 0, "total_pending": total_pending,
+        return json_response({"resumed": 0, "total_pending": 0,
                               "note": "无待恢复任务"})
     resumed = 0
     failed_preflight = 0
@@ -170,14 +167,14 @@ async def api_tasks_resume_pending(s: Services) -> dict:
             )
             continue
         try:
-            await s.queue.submit(kind, target=target, payload=payload)
+            await s.queue.claim(task_id, kind, target=target, payload=payload)
             resumed += 1
         except Exception as e:
-            logger.warning(f"[tasks-resume] re-submit {task_id} ({kind}) failed: {e}")
+            logger.warning(f"[tasks-resume] claim {task_id} ({kind}) failed: {e}")
     return json_response({
         "resumed": resumed,
         "failed_preflight": failed_preflight,
-        "total_pending": total_pending,
+        "total_pending": len(breakpoint_rows),
     })
 
 

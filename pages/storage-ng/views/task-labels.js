@@ -1,7 +1,8 @@
 /**
  * Display label tables shared across views (task kind/state names, badge
  * classes, 13-class type names, storage states, bridge states), plus the task
- * ledger's summary text and its keyed-diff render signature. Kind keys
+ * ledger's summary text and its keyed-diff render signature and the task
+ * panel's log-row detail text with the same. Kind keys
  * must cover every string the backend submits through queue.submit() or
  * dispatches in op_dispatch; a missing key falls back to the raw kind.
  *
@@ -170,4 +171,35 @@ export function taskSummary(t) {
  */
 export function taskSignature(t) {
   return joinSignature([t.kind, t.target, t.state, t.error, t.created_at, taskSummary(t)]);
+}
+
+/**
+ * Detail text of one task-panel log row.
+ *
+ * The panel logs SSE events rather than ledger rows, so its text comes from the
+ * event's own progress shape: queued/started events carry only `detail`/`state`,
+ * progress events add a percentage.
+ * @param {Object} t
+ * @returns {string}
+ */
+export function taskLogDetail(t) {
+  if (t.percent != null && t.percent > 0) {
+    return `${t.detail || ''} ${Math.round(t.percent)}%`.trim();
+  }
+  return t.detail || t.state || '';
+}
+
+/**
+ * Projection of exactly the fields the task-panel log row renders.
+ *
+ * `log_id` is carried by keyFn, like `id`/`group_id`/`task_id` in the other
+ * signatures. taskLogDetail already collapses `percent`/`detail`/`state` into
+ * the displayed string, so this projects its result instead of its inputs —
+ * the same shape as taskSignature projecting taskSummary.
+ * Keep in sync with components/task-panel.js buildRow.
+ * @param {Object} t
+ * @returns {string}
+ */
+export function taskLogSignature(t) {
+  return joinSignature([t.ts, t.kind, t.type, t.task_id, taskLogDetail(t)]);
 }
