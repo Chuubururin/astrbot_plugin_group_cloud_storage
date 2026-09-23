@@ -46,8 +46,9 @@
   临界点会翻红而本机全绿。
 - 依赖数据库版本启发式的行为（如 `PRAGMA optimize` 决定要不要分析）不能当测试前提。
   用数据自身能回答的守卫（"这张表有没有统计行"）替换，行为跨版本一致。
-- 跳过不是通过。`REQUIRE_NO_SKIP=1` 下任何 skip 都是失败；本机 4 条 skip 来自
-  `impacket`/`pysmb` 未安装，`pip install -r requirements-dev.txt` 即可归零。
+- 跳过不是通过。`REQUIRE_NO_SKIP=1` 下任何 skip 都是失败。skip 一般来自未装的可选
+  测试依赖（`impacket`/`pysmb`/`paramiko`/`pillow`，全在 `requirements-dev.txt`），
+  装上即归零。
 
 ## 本机环境
 
@@ -59,6 +60,13 @@
   必须按二进制处理，否则整份文件变成 636 行空白差异。
 - `.mimosa/`、`.opencode/`、`node_modules/`、`out/`、`dist/` 是被 gitignore 的工具
   目录，会污染全仓 grep——搜索时排除。
+- 装 dev 依赖要 `python3 -m pip install --user --break-system-packages ...`：
+  本机是 PEP 668 externally-managed 环境，裸 `pip install` 被拒；既有依赖
+  （pytest / paramiko / pillow）都在 `~/.local/lib/python3.13/site-packages`，
+  `--user` 只写这个用户站点，不碰系统站点。
+- `pytest -n auto` 需要 `pytest-xdist`。缺它就只有串行口径，而 CI 跑的是
+  `-n auto --dist loadfile`——并行度与负载都是 CI 独有的失败维度，本机复现
+  不了它，就别把"本机全绿"当成"CI 全绿"。
 - 未提交的工作树里不要用 `git checkout --`/`git restore`/`git reset --hard` 之类的
   破坏性命令"顺手清理"。要看文件内容就读文件。
 
