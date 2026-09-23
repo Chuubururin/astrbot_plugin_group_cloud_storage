@@ -9,6 +9,7 @@
  */
 
 import { BRIDGE_STATES, BRIDGE_CAPABILITIES } from '../constants.js';
+import { joinSignature } from '../features/row-signatures.js';
 
 /** Undoable operation kinds (aligned with task_control._REVERSIBLE_KINDS). */
 export const REVERSIBLE_KINDS = new Set(['move_file', 'replace_name', 'tags']);
@@ -168,5 +169,5 @@ export function taskSummary(t) {
  * @returns {string}
  */
 export function taskSignature(t) {
-  return [t.kind, t.target, t.state, t.error, t.created_at, taskSummary(t)].join('\u0000');
+  return joinSignature([t.kind, t.target, t.state, t.error, t.created_at, taskSummary(t)]);
 }

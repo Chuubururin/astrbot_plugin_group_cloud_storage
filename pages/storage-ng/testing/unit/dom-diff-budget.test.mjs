@@ -9,6 +9,13 @@
  * couple of units, and even a full reversal is chunked instead of overrunning
  * a frame. The runSeq supersede semantics must stay exactly as they were.
  *
+ * Note on what these assertions can and cannot detect now: the dearest single
+ * op is a row replacement at 2 units, far under the 50-unit budget, so no
+ * render can overrun a frame and `violations` cannot fire on today's code. It
+ * stays asserted as a regression canary - it wakes up the moment anyone batches
+ * writes back into one op again. The live signal is `moves` on the return
+ * value, which is what pins the move set to the LIS minimum.
+ *
  * Run: node --test pages/storage-ng/testing/unit/dom-diff-budget.test.mjs
  */
 import { test } from 'node:test';
