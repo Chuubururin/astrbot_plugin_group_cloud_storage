@@ -194,7 +194,7 @@
     "type": "int",
     "default": 599,
     "group": "高级选项",
-    "description": "长视频导入相册时切分的时长上限（受 QQ 相册 599 秒硬限制）",
+    "description": "长视频切分的单段时长上限（受 QQ 相册 599 秒硬限制约束）；用于存入群文件的分片管线，相册视频入库待协议端支持后同享此上限",
     "invisible": true
   },
   "volume_threshold": {
