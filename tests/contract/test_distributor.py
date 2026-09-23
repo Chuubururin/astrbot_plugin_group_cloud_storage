@@ -133,7 +133,7 @@ async def env(tmp_path):
     store = SqliteMetaStore(tmp_path / "meta.db")
     await store.init()
     api = FakeOneBotApi(tree={None: ([], [])})
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     await queue.start()
     ingest = _FakeIngest(queue)
     bridge = _FakeBridge(store, queue)

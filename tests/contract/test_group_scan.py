@@ -31,7 +31,7 @@ async def env(tmp_path):
             "g3": [GroupMember("30001", "B", "owner")],  # 机器人不在成员列表（异常兜底）
         },
     )
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     svc = GroupScanService(api, store, queue)
     yield store, api, svc
     await queue.shutdown()
@@ -375,7 +375,7 @@ async def test_scan_streams_groups_progressively(tmp_path):
         bot_qq="10001",
         members_by_group={g: [GroupMember("10001", "Me", "owner")] for g in gids},
     )
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     svc = GroupScanService(api, store, queue)
 
     # 间谍：每次落库时读库，验证「扫描中途」数据已可见（第 2 次调用时第 1 群已在库）
@@ -416,7 +416,7 @@ async def test_guarded_call_timeout(tmp_path):
     store = SqliteMetaStore(tmp_path / "meta.db")
     await store.init()
     api = FakeOneBotApi(tree={None: ([], [])}, group_ids=["g1"])
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     svc = GroupScanService(api, store, queue)
     try:
         # 快速调用：正常返回
@@ -442,7 +442,7 @@ async def test_removed_group_reappears_via_whitelist(tmp_path):
         bot_qq="10001",
         members_by_group={g: [GroupMember("10001", "Me", "owner")] for g in gids},
     )
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     svc = GroupScanService(api, store, queue)
     try:
         await svc.scan_owned()

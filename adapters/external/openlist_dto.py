@@ -1,11 +1,8 @@
-"""OpenList wire DTOs, constants and the task-state normalizer.
+"""OpenList wire DTOs and constants.
 
-Split out of ``openlist.py`` so the client module fits the <700-line gate
-(W-3 follow-up).  This module is pure data: no httpx, no I/O, no client
-instance - just the shapes the control plane speaks in.
-
-``openlist.py`` re-exports every name here, so importing from either module
-works; existing call sites need no change.
+This module is pure data: no httpx, no I/O, no client instance - just the
+shapes the control plane speaks in. ``openlist.py`` re-exports every name
+here, so importing from either module works.
 """
 
 from __future__ import annotations
@@ -54,13 +51,3 @@ _MAX_LIST_PAGES = 1000
 # (2026-09-21 live: "failed get storage: storage not found; rawPath: ...").
 _STORAGE_MARKERS = ("failed get storage", "storage not found")
 
-
-def _normalize_task_state(state) -> str:
-    """Normalize task state from OpenList to internal representation.
-
-    Handles both string and integer state values from OpenList API.
-    Delegates to BridgeTaskState.from_external() for single source of truth.
-    """
-    from core.domain.enums import BridgeTaskState
-
-    return BridgeTaskState.from_external(state).value

@@ -45,8 +45,8 @@ async def test_rate_limited_execution():
     from adapters.limiter.interval import KeyedLimiter
 
     rec = _Recorder()
-    # 限速经 RateLimiter 端口注入（bootstrap 组装 KeyedLimiter）；interval 参数仅为兼容保留
-    q = OpQueue(rec.run, interval=0.0, limiter=KeyedLimiter(interval=0.06))
+    # 限速经 RateLimiter 端口注入（bootstrap 组装 KeyedLimiter）；无注入即不限速
+    q = OpQueue(rec.run, limiter=KeyedLimiter(interval=0.06))
     await q.start()
     for _ in range(3):
         await q.submit("test")
@@ -61,7 +61,7 @@ async def test_rate_limited_execution():
 @pytest.mark.asyncio
 async def test_retry_with_backoff():
     rec = _Recorder(fail_first=2)
-    q = OpQueue(rec.run, interval=0.0, max_retries=3, backoff_base=0.05)
+    q = OpQueue(rec.run, max_retries=3, backoff_base=0.05)
     await q.start()
     await q.submit("test")
     await _drain(q, 1)
@@ -74,7 +74,7 @@ async def test_retry_with_backoff():
 @pytest.mark.asyncio
 async def test_permanent_failure_marked():
     rec = _Recorder(fail_first=99)
-    q = OpQueue(rec.run, interval=0.0, max_retries=2, backoff_base=0.03)
+    q = OpQueue(rec.run, max_retries=2, backoff_base=0.03)
     await q.start()
     await q.submit("test")
     await _drain(q, 1)
@@ -100,7 +100,7 @@ async def test_pause_visible_during_retry_backoff():
             failed.set()
             raise RuntimeError("boom")
 
-    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=0.3)
+    q = OpQueue(run, max_retries=3, backoff_base=0.3)
     await q.start()
     tid = await q.submit("test")
     await failed.wait()
@@ -129,7 +129,7 @@ async def test_cancel_during_retry_backoff_sticks():
         failed.set()
         raise RuntimeError("boom")
 
-    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=0.3)
+    q = OpQueue(run, max_retries=3, backoff_base=0.3)
     await q.start()
     tid = await q.submit("test")
     await failed.wait()
@@ -145,7 +145,7 @@ async def test_cancel_during_retry_backoff_sticks():
 @pytest.mark.asyncio
 async def test_sse_events_flow():
     rec = _Recorder()
-    q = OpQueue(rec.run, interval=0.0)
+    q = OpQueue(rec.run)
     await q.start()
     events: list[str] = []
 
@@ -171,7 +171,7 @@ async def test_local_error_not_retried():
     async def fail(op):
         raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, "scan", "no bot")
 
-    q = OpQueue(fail, interval=0.0, max_retries=5, backoff_base=0.02)
+    q = OpQueue(fail, max_retries=5, backoff_base=0.02)
     await q.start()
     await q.submit("scan")
     await _drain(q, 1)
@@ -183,15 +183,26 @@ async def test_local_error_not_retried():
 
 @pytest.mark.asyncio
 async def test_cancel_skips_queued_op():
-    rec = _Recorder()
-    q = OpQueue(rec.run, interval=0.2)  # 限速让第 2 个任务留在队列
+    """排队中取消：worker 出队时看到取消位，handler 一次都不执行。"""
+    ran: list[str] = []
+    gate = asyncio.Event()
+
+    async def run(op: Op) -> None:
+        ran.append(op.kind)
+        await gate.wait()
+
+    q = OpQueue(run, slots=2)              # 1 个高优 worker + 1 个普通 worker
     await q.start()
-    await q.submit("first")
-    tid2 = await q.submit("second")
-    # second 已出队进入限速等待（running）→ 取消位生效，等待后跳过执行
-    assert q.cancel_task(tid2) is True
+    await q.submit("move_file")            # 占住高优 worker
+    await q.submit("blocker")              # 占住普通 worker
+    await asyncio.sleep(0.05)
+    tid = await q.submit("queued")         # 留在普通队列里
+    assert tid in q._pending and tid not in q._running
+    assert q.cancel_task(tid) is True
+    gate.set()
     await _drain(q, 2)
-    assert len(rec.times) == 1  # 仅 first 执行（second 在限速等待中被取消）
+    assert ran == ["move_file", "blocker"], f"排队中被取消的任务不得执行: {ran}"
+    assert tid not in q._ops_by_id         # 索引收敛，不留僵尸
     await q.shutdown()
 
 
@@ -205,7 +216,7 @@ async def _blocking_handler(gate: asyncio.Event):
 async def test_custom_high_priority_set():
     """自定义 high_priority：集合内 kind 走高优队列，集合外走常规队列。"""
     gate = asyncio.Event()
-    q = OpQueue(await _blocking_handler(gate), interval=0.0,
+    q = OpQueue(await _blocking_handler(gate),
                 high_priority={"hi_kind"})
     await q.start()
     await q.submit("hi_kind")   # 高优 worker 阻塞
@@ -226,7 +237,7 @@ async def test_custom_high_priority_set():
 async def test_default_high_priority_behavior_unchanged():
     """默认集合：rename 走高优，scan 走常规（内置行为不因配置化而变化）。"""
     gate = asyncio.Event()
-    q = OpQueue(await _blocking_handler(gate), interval=0.0)
+    q = OpQueue(await _blocking_handler(gate))
     await q.start()
     await q.submit("rename")    # 高优 worker 阻塞
     await q.submit("scan")      # 常规 worker 阻塞
@@ -258,31 +269,47 @@ async def test_keyed_limiter_accounts_parallel():
 
 @pytest.mark.asyncio
 async def test_queue_per_account_concurrency():
-    """v2.11：队列按账号并发消费——A/B 账号 ops 同时执行（非全局串行）。"""
+    """队列按账号并发消费：A/B 账号的 op 同时执行，不互等限速窗口。"""
+    from adapters.limiter.interval import KeyedLimiter
+
     rec = _Recorder()
-    q = OpQueue(rec.run, interval=0.3, slots=4)
+    q = OpQueue(rec.run, limiter=KeyedLimiter(interval=0.6, min_interval=0.0), slots=4)
     await q.start()
     await q.submit("t1", account="A")
     await q.submit("t2", account="B")
     await _drain(q, 2)
-    # 两账号并行：第二个 op 不等待 0.3s 全局限速
     assert len(rec.times) == 2
-    assert abs(rec.times[0] - rec.times[1]) < 0.25
+    assert abs(rec.times[0] - rec.times[1]) < 0.3, "跨账号不应互相等待"
+
+    # 对照组：同账号必须串行等满窗口，否则上一条在无限速时也成立
+    rec.times.clear()
+    await q.submit("t3", account="A")
+    await q.submit("t4", account="A")
+    await _drain(q, 4)
+    assert rec.times[1] - rec.times[0] >= 0.5, "同账号必须受限速约束"
     await q.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_bulk_kinds_skip_pacing():
-    """v2.11：重活分流——非交互重活不占全局限速节奏。"""
-    rec = _Recorder()
-    q = OpQueue(rec.run, interval=0.4, slots=4)
+    """重活分流：BULK 类走并发闸，不占交互任务的限速节奏。"""
+    from adapters.limiter.interval import KeyedLimiter
+
+    starts: dict[str, float] = {}
+
+    async def run(op: Op) -> None:
+        starts[op.kind] = time.monotonic()
+
+    q = OpQueue(run, limiter=KeyedLimiter(interval=0.6, min_interval=0.0), slots=4)
     await q.start()
-    await q.submit("convert_volumes")
-    await q.submit("t2")
-    await _drain(q, 2)
-    # convert_volumes 为 BULK：两者均立即执行（无 0.4s 串行等待）
-    assert len(rec.times) == 2
-    assert abs(rec.times[0] - rec.times[1]) < 0.2
+    await q.submit("warmup")            # 让限速器记下窗口起点
+    await _drain(q, 1)
+    t0 = time.monotonic()
+    await q.submit("convert_volumes")   # BULK：并发闸，不等限速
+    await q.submit("paced")             # 普通：必须等满窗口
+    await _drain(q, 3)
+    assert starts["convert_volumes"] - t0 < 0.3, "BULK 类不应被限速拖住"
+    assert starts["paced"] - t0 >= 0.5, "普通任务必须受限速约束（否则上一条无证明力）"
     await q.shutdown()
 
 
@@ -301,7 +328,7 @@ async def test_cancel_queued_op_fires_single_terminal_event():
     async def run(op: Op) -> None:
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=4)  # 2 个高优 worker
+    q = OpQueue(run, slots=4)  # 2 个高优 worker
     orig_push = q._push
 
     def push(ev: dict) -> None:
@@ -354,7 +381,7 @@ async def test_cancel_running_then_retriable_error_converges_to_cancelled():
             await release.wait()
             raise RuntimeError("boom")   # 普通异常：队列当作可重试
 
-    q = OpQueue(run, interval=0.0, max_retries=3, backoff_base=0.05)
+    q = OpQueue(run, max_retries=3, backoff_base=0.05)
     orig_push = q._push
 
     def push(ev: dict) -> None:
@@ -403,7 +430,7 @@ async def test_pause_resume_marks_replay_without_eating_retry_budget():
         elif len(seen) == 2:
             raise RuntimeError("boom")   # 恢复重入后失败一次 → 真实重试 1 次
 
-    q = OpQueue(run, interval=0.0, max_retries=2, backoff_base=0.05)
+    q = OpQueue(run, max_retries=2, backoff_base=0.05)
     await q.start()
     tid = await q.submit("test")
     await started.wait()
@@ -436,7 +463,7 @@ async def test_cancel_running_without_checkpoint_records_cancelled():
         started.set()
         await release.wait()  # 整段执行无 pause_check 检查点
 
-    q = OpQueue(run, interval=0.0)
+    q = OpQueue(run)
     await q.start()
     tid = await q.submit("convert_volumes")
     await started.wait()
@@ -462,7 +489,7 @@ async def test_pause_running_then_immediate_resume_not_lost():
         await release.wait()
         await q.pause_check(op)  # 检查点：暂停位未清除则此处抛出并挂起
 
-    q = OpQueue(run, interval=0.0)
+    q = OpQueue(run)
     await q.start()
     tid = await q.submit("move_file")
     await started.wait()
@@ -504,7 +531,7 @@ async def test_claim_adopts_the_row_id_and_writes_no_ledger_state():
     async def run(op: Op) -> None:
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=4, ledger=led)
+    q = OpQueue(run, slots=4, ledger=led)
     await q.start()
     await q.submit("move_file")            # 高优 worker 1 阻塞
     await q.submit("move_file")            # 高优 worker 2 阻塞
@@ -529,7 +556,7 @@ async def test_claim_refuses_an_id_the_queue_still_owns():
     async def run(op: Op) -> None:
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=4, ledger=led)
+    q = OpQueue(run, slots=4, ledger=led)
     await q.start()
     live = await q.submit("convert_volumes", "g1", {"steps": 5})
     # 拒绝路径无 await，worker 无从插队：前后快照必须逐条相等

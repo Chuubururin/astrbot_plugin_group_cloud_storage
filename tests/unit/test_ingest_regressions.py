@@ -44,7 +44,7 @@ async def env(tmp_path, monkeypatch):
     api = FakeOneBotApi(tree={None: ([], [])})
     sync = ResourceSyncService(api, store)
     ingest: CloudIngestService | None = None
-    queue = OpQueue(lambda op: ingest.handle(op), interval=0.0, backoff_base=0.05)
+    queue = OpQueue(lambda op: ingest.handle(op), backoff_base=0.05)
     await queue.start()
     ingest = CloudIngestService(
         api,

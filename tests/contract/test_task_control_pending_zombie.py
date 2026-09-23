@@ -30,7 +30,7 @@ async def env(tmp_path):
     async def run_handler(op):
         await hold.wait()
 
-    queue = OpQueue(run_handler=run_handler, interval=0.0, max_retries=0)
+    queue = OpQueue(run_handler=run_handler, max_retries=0)
     tc = TaskControlService(store=store, queue=queue, ops=None)
     yield store, queue, tc
     await queue.shutdown()

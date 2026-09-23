@@ -401,17 +401,11 @@ def resolve_and_pin_ip(
     return pinned_url, hostname
 
 
-# State normalization map
-# Mapping is centralized in core.domain.enums.BridgeTaskState.from_external()
-# This function is kept as a backward-compatible entry point.
-_STATE_MAP = None  # Unused; mapping lives in BridgeTaskState.from_external()
-
-
 def normalize_task_state(state: str) -> str:
-    """Normalize OpenList task state to internal representation.
+    """Normalize an OpenList task state to its internal representation.
 
-    Delegates to BridgeTaskState.from_external() for single source of truth.
-    Unknown states are returned as 'unknown' (do not guess).
+    The mapping lives in BridgeTaskState.from_external(); unknown states
+    normalize to 'unknown' rather than a guess.
     """
     from core.domain.enums import BridgeTaskState
 

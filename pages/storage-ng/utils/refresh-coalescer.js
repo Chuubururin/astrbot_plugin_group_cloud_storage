@@ -8,8 +8,9 @@
  * sources: absorb the repeats instead of forwarding them.
  *
  * - createRefreshWindow: per-topic time window for `refresh:<topic>` publishers.
- *   Trailing (default) for data_changed bursts; leading for queue-state echoes,
- *   where the first repaint must be immediate (see the option note).
+ *   Trailing (default) for data_changed bursts, capped by maxWait so a fast
+ *   stream cannot defer forever; leading for queue-state echoes, where the
+ *   first repaint must be immediate (see the option note).
  * - createCoalescedLoader: in-flight guard + dirty tail rerun around one async
  *   loader, so triggers can never overlap into concurrent identical requests.
  *
@@ -21,12 +22,16 @@ import { refresh as publishTopicRefresh } from '../store.js';
 /** Repeat-refresh window (ms): matches the data_changed batch cadence. */
 export const COALESCE_WINDOW_MS = 150;
 
+/** Longest a trailing window may defer while events keep arriving (ms). */
+export const COALESCE_MAX_WAIT_MS = 1000;
+
 /**
  * Per-topic refresh window.
  *
- * trailing (default): every request pushes the timer back, so a stream of
- * data_changed events (one per group/file of a batch) yields one refresh after
- * the burst settles.
+ * trailing (default): repeats inside the window collapse into one refresh, and
+ * `maxWaitMs` bounds how long that collapse may defer, so a stream arriving
+ * faster than delayMs (one data_changed per item of a large batch) still
+ * publishes.
  *
  * leading ({leading:true}): the first request refreshes *immediately* and only
  * the repeats inside the window are folded into a single follow-up. Needed for
@@ -37,24 +42,37 @@ export const COALESCE_WINDOW_MS = 150;
  * @param {Object} [options]
  * @param {boolean} [options.leading=false] - fire the first refresh at once
  * @param {number} [options.delayMs] - window length
+ * @param {number} [options.maxWaitMs] - trailing cap: publish at least this
+ *   often while a stream keeps arriving (ignored in leading mode)
  * @param {function} [options.publish] - (topic) => void, defaults to store.refresh
  * @returns {function((string|string[]))} schedule - request one or more topics
  */
 export function createRefreshWindow(options = {}) {
   const {
-    leading = false, delayMs = COALESCE_WINDOW_MS, publish = publishTopicRefresh,
+    leading = false, delayMs = COALESCE_WINDOW_MS,
+    maxWaitMs = COALESCE_MAX_WAIT_MS, publish = publishTopicRefresh,
   } = options;
+  // leading: topic -> timer. trailing: topic -> {timer, deadline}. The two
+  // modes never mix inside one window, so one Map holds either shape.
   const windows = new Map();
   const folded = new Set();
 
   return function schedule(topics) {
     for (const topic of typeof topics === 'string' ? [topics] : topics) {
       if (!leading) {
-        clearTimeout(windows.get(topic));
-        windows.set(topic, setTimeout(() => {
-          windows.delete(topic);
-          publish(topic);
-        }, delayMs));
+        const open = windows.get(topic);
+        if (open) {
+          clearTimeout(open.timer);
+          open.timer = setTimeout(() => release(topic), delayMs);
+          continue;
+        }
+        // The deadline is armed once, by the first event of the stream, and is
+        // not re-armed by later events: that is what bounds the deferral.
+        const entry = {
+          timer: setTimeout(() => release(topic), delayMs),
+          deadline: setTimeout(() => release(topic), maxWaitMs),
+        };
+        windows.set(topic, entry);
         continue;
       }
       if (windows.has(topic)) { folded.add(topic); continue; }
@@ -65,6 +83,15 @@ export function createRefreshWindow(options = {}) {
       }, delayMs));
     }
   };
+
+  function release(topic) {
+    const entry = windows.get(topic);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    clearTimeout(entry.deadline);
+    windows.delete(topic);
+    publish(topic);
+  }
 }
 
 /**

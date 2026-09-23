@@ -38,7 +38,7 @@ async def env(tmp_path, monkeypatch, request):
         monkeypatch.setattr(essence, "REBUILD_RETRY_INTERVAL", 0.0)
     else:
         backoff_base = 2.0
-    queue = OpQueue(lambda op: ingest.handle(op), interval=0.0,
+    queue = OpQueue(lambda op: ingest.handle(op),
                     backoff_base=backoff_base)
     await queue.start()
     ingest = CloudIngestService(
@@ -1060,7 +1060,7 @@ async def test_ingest_fallback_limits_match_qq_hard_limits(tmp_path):
     try:
         svc = CloudIngestService(
             FakeOneBotApi(tree={None: ([], [])}), store,
-            OpQueue(lambda op: None, interval=0.0),
+            OpQueue(lambda op: None),
             ResourceSyncService(FakeOneBotApi(tree={None: ([], [])}), store),
             tmp_dir=tmp_path / "t", config={},
         )

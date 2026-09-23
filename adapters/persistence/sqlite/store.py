@@ -221,6 +221,14 @@ else:
                         raise
 
             await self._conn.exec(_do)
+            # Refresh planner statistics once per startup. Without sqlite_stat1
+            # the planner estimates from index cardinality alone and picks
+            # idx_archive_map_state (two distinct values) over the primary key's
+            # resource_id prefix for the correlated EXISTS in the store_status
+            # queries, which turns them quadratic. PRAGMA optimize only runs
+            # ANALYZE when SQLite judges the stats stale, so a steady-state
+            # startup pays nothing.
+            await self._conn.exec(lambda conn: conn.execute("PRAGMA optimize"))
             logger.info(
                 f"[group_cloud_storage] meta.db ready (schema v{SCHEMA_VERSION}) at {self._db_path}"
             )

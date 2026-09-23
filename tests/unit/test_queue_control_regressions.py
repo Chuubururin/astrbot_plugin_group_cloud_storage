@@ -55,7 +55,7 @@ async def test_resume_requeued_op_is_controllable_again():
                 await asyncio.sleep(0.005)
         await gate.wait()  # 恢复后的执行由测试放行
 
-    q = OpQueue(run, interval=0.0, slots=2)
+    q = OpQueue(run, slots=2)
     await q.start()
     tid = await q.submit("move_file")
     await started.wait()
@@ -86,7 +86,7 @@ async def test_cancel_does_not_leak_cancelled_for_dead_ids():
     async def run(op: Op) -> None:
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=2)
+    q = OpQueue(run, slots=2)
     await q.start()
     assert q.cancel_task("no-such-task") is False
     assert "no-such-task" not in q._cancelled
@@ -114,7 +114,7 @@ async def test_shutdown_is_cheap_when_workers_are_idle():
     `assert elapsed < 1.0` 这类与时序无关的断言（实测 1.0206 = 1.0 宽限 +
     20ms 轮询粒度）。
     """
-    q = OpQueue(lambda op: asyncio.sleep(0), interval=0.0)
+    q = OpQueue(lambda op: asyncio.sleep(0))
     await q.start()
     await asyncio.sleep(0.05)  # 让 worker 真正停泊在 queue.get() 上
     t0 = time.monotonic()
@@ -135,7 +135,7 @@ async def test_shutdown_is_bounded_when_a_worker_ignores_cancellation():
 
     现在的实现用 deadline + asyncio.wait + 重发 cancel，到期明确放弃并告警。
     """
-    q = OpQueue(lambda op: asyncio.sleep(0), interval=0.0)
+    q = OpQueue(lambda op: asyncio.sleep(0))
     quit_flag = asyncio.Event()
 
     async def stubborn() -> None:
@@ -196,7 +196,7 @@ async def test_shutdown_re_cancels_a_worker_that_absorbs_the_first_cancel():
       * 修复前：第一轮吃满 timeout -> 第二轮不发取消 -> 任务仍在跑（断言 1/2 失败）
       * 修复后：第一轮只等一个切片 -> 第二轮重发取消 -> 任务被真正收走
     """
-    q = OpQueue(lambda op: asyncio.sleep(0), interval=0.0)
+    q = OpQueue(lambda op: asyncio.sleep(0))
     quit_flag = asyncio.Event()
     absorbed = {"n": 0}
 

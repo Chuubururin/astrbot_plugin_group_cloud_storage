@@ -87,7 +87,7 @@ async def test_invariant_success_path_leaves_no_index_entry(kind):
     async def run(op: Op) -> None:
         run_calls["n"] += 1
 
-    q = OpQueue(run, interval=0.0, slots=2)
+    q = OpQueue(run, slots=2)
     await q.start()
     tid = await q.submit(kind)
     await _quiet(q)
@@ -104,7 +104,7 @@ async def test_invariant_failed_path_leaves_no_index_entry(kind):
     async def run(op: Op) -> None:
         raise ValueError("deterministic failure")
 
-    q = OpQueue(run, interval=0.0, slots=2, max_retries=0)
+    q = OpQueue(run, slots=2, max_retries=0)
     await q.start()
     tid = await q.submit(kind)
     await _quiet(q)
@@ -122,7 +122,7 @@ async def test_invariant_retry_exhausted_leaves_no_index_entry(kind):
     async def run(op: Op) -> None:
         raise ValueError("always fails")
 
-    q = OpQueue(run, interval=0.0, slots=2, max_retries=1, backoff_base=0.05)
+    q = OpQueue(run, slots=2, max_retries=1, backoff_base=0.05)
     await q.start()
     tid = await q.submit(kind)
     # 退避窗口内必须仍可被控制（M11：retry 期间不得脱离索引）
@@ -143,7 +143,7 @@ async def test_invariant_cancel_while_queued_leaves_no_index_entry(kind):
     async def run(op: Op) -> None:
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=1)
+    q = OpQueue(run, slots=1)
     await q.start()
     first = await q.submit(kind)  # 占住唯一的 worker
     await _wait(lambda: first in q._running)
@@ -173,7 +173,7 @@ async def test_invariant_cancel_running_leaves_no_index_entry(kind):
             await q.pause_check(op)  # op.cancel -> OpCancelError
             await asyncio.sleep(0.005)
 
-    q = OpQueue(run, interval=0.0, slots=1)
+    q = OpQueue(run, slots=1)
     await q.start()
     tid = await q.submit(kind)
     await started.wait()
@@ -197,7 +197,7 @@ async def test_invariant_pause_then_cancel_hold_leaves_no_index_entry(kind):
             await q.pause_check(op)
             await asyncio.sleep(0.005)
 
-    q = OpQueue(run, interval=0.0, slots=1)
+    q = OpQueue(run, slots=1)
     await q.start()
     tid = await q.submit(kind)
     await started.wait()
@@ -220,7 +220,7 @@ async def test_invariant_cancel_queued_pause_placeholder_leaves_no_index_entry(k
     async def run(op: Op) -> None:
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=1)
+    q = OpQueue(run, slots=1)
     await q.start()
     first = await q.submit(kind)
     await _wait(lambda: first in q._running)
@@ -253,7 +253,7 @@ async def test_invariant_pause_resume_then_success_leaves_no_index_entry(kind):
                 await asyncio.sleep(0.005)
         await gate.wait()
 
-    q = OpQueue(run, interval=0.0, slots=1)
+    q = OpQueue(run, slots=1)
     await q.start()
     tid = await q.submit(kind)
     await started.wait()
@@ -280,7 +280,7 @@ async def test_invariant_many_tasks_leave_indices_empty(kind):
     async def run(op: Op) -> None:
         await asyncio.sleep(0)
 
-    q = OpQueue(run, interval=0.0, slots=4)
+    q = OpQueue(run, slots=4)
     await q.start()
     tids = [await q.submit(kind) for _ in range(25)]
     await _quiet(q)
@@ -306,7 +306,7 @@ async def test_invariant_terminal_task_does_not_block_has_pending(kind):
     async def run(op: Op) -> None:
         await asyncio.sleep(0)
 
-    q = OpQueue(run, interval=0.0, slots=2)
+    q = OpQueue(run, slots=2)
     await q.start()
     tid = await q.submit(kind, target="g1", payload={"id": 7})
     assert q.has_pending(kind, "id", 7) is True

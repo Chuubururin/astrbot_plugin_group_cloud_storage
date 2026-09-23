@@ -45,7 +45,7 @@ async def env(tmp_path):
         bot_qq="10001",
         members_by_group={"g1": [GroupMember("10001", "Me", "owner")]},
     )
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     svc = GroupScanService(api, store, queue)
     yield store, api, svc
     await queue.shutdown()

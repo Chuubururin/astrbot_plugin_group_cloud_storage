@@ -77,7 +77,7 @@ async def test_rate_limited_retries_then_succeeds(store):
     api = FakeOneBotApi(build_tree(folder_total=2, files_per_folder=10))
     handler = _FlakyHandler(ResourceSyncService(api, store), fail_first=2)
 
-    queue = OpQueue(handler, interval=0.0, max_retries=3, backoff_base=0.05)
+    queue = OpQueue(handler, max_retries=3, backoff_base=0.05)
     try:
         listener = asyncio.create_task(_collect_until(queue, {"done", "failed"}))
         await asyncio.sleep(0.02)
@@ -101,7 +101,7 @@ async def test_local_error_not_retried(store):
         calls.append(1)
         raise OneBotApiError(OneBotErrorKind.LOCAL_ERROR, "scan", "no bot")
 
-    queue = OpQueue(run, interval=0.0, max_retries=5, backoff_base=0.02)
+    queue = OpQueue(run, max_retries=5, backoff_base=0.02)
     try:
         listener = asyncio.create_task(_collect_until(queue, {"done", "failed"}))
         await asyncio.sleep(0.02)
@@ -130,7 +130,7 @@ async def test_traversal_failure_no_orphan_cleanup(store):
     async def run(op):
         results.append(await svc.run_full_sync(op.target, asyncio.Lock()))
 
-    queue = OpQueue(run, interval=0.0, max_retries=0)
+    queue = OpQueue(run, max_retries=0)
     try:
         await queue.submit("sync", target="g1")
         deadline = time.monotonic() + 12.0
@@ -154,14 +154,23 @@ async def test_cancel_during_limiter_wait(store):
     async def run(op):
         ran.append(op.kind)
 
-    queue = OpQueue(run, interval=0.4)
+    from adapters.limiter.interval import KeyedLimiter
+
+    # 没有真限速器时这条用例测的是"排队中取消"：op 根本不会停在 acquire 里。
+    queue = OpQueue(run, limiter=KeyedLimiter(interval=0.4, min_interval=0.0))
     try:
-        listener = asyncio.create_task(_collect_until(queue, {"cancelled", "done"}))
-        await asyncio.sleep(0.02)
+        await queue.start()
+        await queue.submit("sync", target="g0")   # 占住限速窗口
         tid = await queue.submit("sync", target="g1")
+        for _ in range(400):                       # 钉住路径：确实停在限速等待
+            if tid in queue._running:
+                break
+            await asyncio.sleep(0.005)
+        assert tid in queue._running, "第二个任务应已出队并停在限速等待里"
+        listener = asyncio.create_task(_collect_until(queue, {"cancelled"}))
         assert queue.cancel_task(tid) is True
         events = await asyncio.wait_for(listener, timeout=10.0)
         assert events[-1]["type"] == "cancelled"
-        assert ran == []
+        assert ran == ["sync"], f"限速等待中被取消的任务不得执行: {ran}"
     finally:
         await queue.shutdown()

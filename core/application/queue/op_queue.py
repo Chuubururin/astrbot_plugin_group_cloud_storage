@@ -40,7 +40,6 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
     def __init__(
         self,
         run_handler: Callable[[Op], Awaitable[None]],
-        interval: float = 0.5,
         max_retries: int = 3,
         backoff_base: float = 2.0,
         limiter: RateLimiter | None = None,
@@ -52,11 +51,9 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         self._high_priority = (
             high_priority if high_priority is not None else DEFAULT_HIGH_PRIORITY
         )
-        # Rate limiting is injected via the RateLimiter port (bootstrap wires a
-        # KeyedLimiter keyed by account); a no-op implementation is used when
-        # nothing is injected (tests/minimal deployments). The interval parameter
-        # is kept for backward compatibility with existing callers; pacing is
-        # fully determined by the injected RateLimiter.
+        # Pacing comes from the RateLimiter port (bootstrap wires a KeyedLimiter
+        # keyed by account); with nothing injected the queue does not pace,
+        # which is what tests and minimal deployments want.
         self._limiter = limiter if limiter is not None else NullLimiter()
         # Bulk operations: non-interactive bulk kinds (volume conversion/video
         # processing/fetch/netdisk export) are concurrency-capped, not
@@ -122,25 +119,22 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
     ) -> str | None:
         """Adopt an existing pending ledger row instead of minting a new id.
 
-        submit() always creates a fresh task_id and the ledger upserts on
-        task_id, so re-submitting a breakpoint row orphaned it: the original
-        row stayed pending forever and the next resume click picked it up
-        again. Claiming keeps the row's identity, so its terminal write lands
-        on the row the user clicked.
+        Keeps the row's identity, so its terminal write lands on the row the
+        caller passed in.
 
         Returns None when the queue already owns the id (queued, rate-limit
-        wait, running, or pause hold) -- claiming a live row would put a second
-        Op under one identity: two sets of cloud writes for one task, and the
-        first terminal write pops the index.
+        wait, running, or pause hold): a second Op under one identity would
+        perform the cloud writes twice, and the first terminal write pops the
+        index.
 
-        Only rows still in "pending" may be claimed: the ledger's terminal-state
-        guard silently drops every write of a re-claimed done/failed/cancelled
-        row, so such a task would run unreported.
+        Only rows still in "pending" may be claimed -- the ledger's
+        terminal-state guard silently drops every write of a
+        done/failed/cancelled row, so such a task would run unreported.
 
-        No ledger write happens here on purpose: the row is already "pending",
-        and claiming is not a state transition. The worker writes "running"
-        when it dequeues the op, so a claim that never reaches a worker cannot
-        leave a pre-marked-running zombie behind (the Bug-13 failure mode).
+        Writes no ledger state: the row is already "pending", and claiming is
+        not a transition. The worker writes "running" when it dequeues the op,
+        so a claim that never reaches a worker cannot leave a pre-marked-running
+        row behind.
         """
         if task_id in self._ops_by_id:
             return None

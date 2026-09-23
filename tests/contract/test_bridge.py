@@ -79,7 +79,7 @@ async def env(tmp_path, monkeypatch):
         else:
             await routing["ingest"].handle(op)
 
-    queue = OpQueue(_route, interval=0.0)
+    queue = OpQueue(_route)
     await queue.start()
     ingest = CloudIngestService(
         api,

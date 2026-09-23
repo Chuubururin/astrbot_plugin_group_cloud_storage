@@ -53,7 +53,6 @@ async def env(tmp_path):
 
     queue = OpQueue(
         run_handler=run_handler,
-        interval=0.0,
         max_retries=0,
         ledger=_Led(),
     )

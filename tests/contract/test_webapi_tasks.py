@@ -449,7 +449,7 @@ class TestApiResumePending:
         # move_file should be skipped (not in whitelist)
         claimed_kinds = [kind for _, kind, _ in svc.queue.claimed]
         assert "move_file" not in claimed_kinds
-        assert result["breakpoint_pending"] == 3
+        assert "note" not in result
 
     @pytest.mark.asyncio
     async def test_resume_pending_invalid_json_payload(self, monkeypatch):
@@ -564,7 +564,7 @@ class TestApiResumePending:
         second = await api_tasks_resume_pending(svc)
         assert second["resumed"] == 0
         assert second["already_queued"] == 2
-        assert second["breakpoint_pending"] == 2
+        assert "note" not in second
         # No second identity per row: t1/t2 were refused, not re-adopted.
         assert [tid for tid, _, _ in svc.queue.claimed] == ["t1", "t2"]
         assert svc.queue.refused == ["t1", "t2"]
@@ -615,7 +615,8 @@ class TestApiResumePending:
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         result = await api_tasks_resume_pending(svc)
         assert result["resumed"] == 0
-        assert result["breakpoint_pending"] == 1
+        assert result["already_queued"] == 0
+        assert result["failed_preflight"] == 0
         assert "认领失败" in result["note"]
 # ---------------------------------------------------------------------------
 # D-4: api_sync_withering (凋零差分手动触发)

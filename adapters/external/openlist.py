@@ -22,21 +22,20 @@ from .base import (
     ExternalApiError,
     OpenListApiError,
     classify_error,
+    normalize_task_state,
     validate_base_url_structure,
     validate_hostname_dns,
 )
 
 
-# Wire DTOs, constants and the task-state normalizer live in openlist_dto;
-# re-exported here so every existing ``from ...openlist import X`` keeps
-# working (including the private names tests reach for).
+# Wire DTOs and constants live in openlist_dto; re-exported here so every
+# existing ``from ...openlist import X`` keeps working.
 from .openlist_dto import (  # noqa: F401
     DirectLink,
     NetFile,
     OfflineTask,
     _MAX_LIST_PAGES,
     _STORAGE_MARKERS,
-    _normalize_task_state,
 )
 
 __all__ = [
@@ -357,7 +356,7 @@ class OpenListClient:
             OfflineTask(
                 id=t.get("id", ""),
                 name=t.get("name", ""),
-                state=_normalize_task_state(t.get("state", "")),
+                state=normalize_task_state(t.get("state", "")),
                 status=t.get("status", ""),
                 progress=float(t.get("progress", 0)),
                 error=t.get("error", ""),
@@ -373,7 +372,7 @@ class OpenListClient:
             OfflineTask(
                 id=t.get("id", ""),
                 name=t.get("name", ""),
-                state=_normalize_task_state(t.get("state", "")),
+                state=normalize_task_state(t.get("state", "")),
                 status=t.get("status", ""),
                 progress=float(t.get("progress", 0)),
                 error=t.get("error", ""),
@@ -389,7 +388,7 @@ class OpenListClient:
             OfflineTask(
                 id=t.get("id", ""),
                 name=t.get("name", ""),
-                state=_normalize_task_state(t.get("state", "")),
+                state=normalize_task_state(t.get("state", "")),
                 status=t.get("status", ""),
                 progress=float(t.get("progress", 0)),
                 error=t.get("error", ""),

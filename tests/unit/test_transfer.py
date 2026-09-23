@@ -24,7 +24,7 @@ from core.application.transfer import TransferService  # noqa: E402
 async def env(tmp_path):
     store = SqliteMetaStore(tmp_path / "meta.db")
     await store.init()
-    queue = OpQueue(lambda op: None, interval=0.0)
+    queue = OpQueue(lambda op: None)
     await queue.start()
     svc = TransferService(store, queue, tmp_path / "tmp", config={
         "fetch_max_bytes": 10 * 1024 * 1024, "fetch_timeout_sec": 10,

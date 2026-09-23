@@ -40,7 +40,7 @@ async def _drain(queue: OpQueue, n: int, timeout: float = 12.0) -> dict:
 def _make_env(store: SqliteMetaStore, api: FakeOneBotApi):
     """构造 队列↔分发器 组合（handler 经 cell 延迟绑定解决构造环）。"""
     cell: dict = {}
-    queue = OpQueue(lambda op: cell["d"].handle(op), interval=0.0,
+    queue = OpQueue(lambda op: cell["d"].handle(op),
                     backoff_base=0.05)
     sync = ResourceSyncService(api, store)
     scan = GroupScanService(api, store, queue)

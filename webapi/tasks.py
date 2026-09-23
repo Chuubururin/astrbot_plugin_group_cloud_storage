@@ -114,17 +114,15 @@ async def api_tasks_resume_pending(s: Services) -> dict:
     hundreds of pending file_scan rows (one scan per hot-reload), and paging
     through them just to drop them was pure waste.
 
-    Recovery goes through queue.claim(), not queue.submit(): submit mints a
-    new task_id and the ledger upserts on task_id, so the original pending row
-    was orphaned -- it stayed pending and the next click picked it up again,
-    growing the resumable set for the life of the process.
+    Recovery goes through queue.claim(), not queue.submit(): submit mints a new
+    task_id and the ledger upserts on task_id, so the row being resumed would
+    stay pending while a second row tracked the work.
 
-    Resumability pre-check (Bug-13, live 2026-09-11): a stale "pending" row
-    can reference inputs that no longer exist (converted resource, deleted
-    staged file, moved netdisk path). Re-submitting such a task yields a
-    zombie: the ledger is pre-marked running, the run crashes without a
-    terminal write, and undo reports "interrupted" while nothing is running.
-    Pre-check each kind's inputs and fail the row instead of re-submitting.
+    Resumability pre-check: a stale "pending" row can reference inputs that no
+    longer exist (converted resource, deleted staged file, moved netdisk path).
+    Such a row is failed here instead of re-submitted -- the run would crash
+    before any terminal write, and undo would report "interrupted" while nothing
+    is running.
     """
     await _ensure_ready(s)
     # Single source: the same tuple ledger_reconcile uses to decide which kinds
@@ -146,7 +144,7 @@ async def api_tasks_resume_pending(s: Services) -> dict:
         offset += 100
     if not breakpoint_rows:
         return json_response({"resumed": 0, "already_queued": 0,
-                              "breakpoint_pending": 0, "note": "无待恢复任务"})
+                              "note": "无待恢复任务"})
     resumed = 0
     already_queued = 0
     failed_preflight = 0
@@ -187,12 +185,10 @@ async def api_tasks_resume_pending(s: Services) -> dict:
         "resumed": resumed,
         "already_queued": already_queued,
         "failed_preflight": failed_preflight,
-        "breakpoint_pending": len(breakpoint_rows),
     }
     if not (resumed or already_queued or failed_preflight):
         # Every claim raised: without a note the frontend falls back to
-        # "无待恢复任务", which would be a lie -- the rows exist and are still
-        # pending, they just could not be adopted.
+        # "无待恢复任务" while the rows are still there, just not adoptable.
         out["note"] = f"{len(breakpoint_rows)} 个断点行认领失败，详见服务端日志"
     return json_response(out)
 

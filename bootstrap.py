@@ -85,7 +85,6 @@ def build_components(
     task_control = TaskControlService(store=store, queue=None)
     queue = OpQueue(
         run_handler=run_handler,
-        interval=0.05,  # ordering/retry/slots only; QQ pacing per account in the adapter
         limiter=limiter,
         high_priority=set(cfg.op_high_priority_kinds) or None,
         slots=4,  # cross-account consumer slots (half high-priority, half normal)

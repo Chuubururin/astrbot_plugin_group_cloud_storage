@@ -7,7 +7,8 @@
  * full innerHTML rewrite, and never a full-list re-append. All mutations are
  * rAF-batched, and each frame stops before the *measured* frame units would
  * pass MAX_ROWS_PER_FRAME (one unit rebuilds one row; a reparent move is
- * charged a fraction - see MOVE_UNITS). Statistics feed the E2E probes.
+ * charged a fraction - see MOVE_UNITS). Those units are a scheduling weight,
+ * not a DOM-op count: diff-stats reports real mutations separately.
  *
  * Change detection is a per-row render signature when the caller supplies
  * `signatureFn`, and a whole-DTO field compare otherwise (warned once).
@@ -16,49 +17,14 @@
 
 import { MAX_ROWS_PER_FRAME } from '../constants.js';
 import { stableRun } from './lis.js';
-
-/** Cumulative keyed-render statistics (exposed to E2E probes). */
-const diffStats = {
-  totalRenders: 0,
-  lastRewrittenRows: 0,
-  maxFrameWrites: 0,
-  lastFramesUsed: 1,
-  lastMoves: 0,
-  maxMoves: 0,
-  violations: 0,
-};
+import { hasChanged } from './dto-equal.js';
+import { noteMutation, stats as diffStats } from './diff-stats.js';
 
 /** Per-container render generation: a newer applyKeyedDiff supersedes any
  * still-chunked older render on the same container (stale-tail guard). */
 const runSeq = new WeakMap();
 
-/** Snapshot of the render statistics . */
-export function getDiffStats() {
-  return { ...diffStats };
-}
-
-/**
- * Value equality for one field: scalars by identity, arrays/objects by JSON
- * projection (JSON.parse yields a fresh reference per poll, so identity alone
- * would mark every nested field changed). This is the *fallback* comparator -
- * it compares the whole DTO, so fields the row never renders still force a
- * replacement. Callers that know what they render pass `signatureFn`.
- */
-function sameValue(a, b) {
-  if (a === b) return true;
-  if (a == null || b == null) return false;
-  if (typeof a !== 'object' || typeof b !== 'object') return false;
-  try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; }
-}
-
-/** Field-level equality across the union of both objects' keys. */
-function hasChanged(oldItem, newItem) {
-  const keys = new Set([...Object.keys(oldItem), ...Object.keys(newItem)]);
-  for (const key of keys) {
-    if (!sameValue(oldItem[key], newItem[key])) return true;
-  }
-  return false;
-}
+export { getStats as getDiffStats } from './diff-stats.js';
 
 /**
  * A move is a reparent (pointer surgery), not content construction, so it is
@@ -148,7 +114,7 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
   // frame loop can hold the real write count inside the budget.
   const ops = [];
   for (const el of toRemove) {
-    ops.push({ cost: 1, run: () => { if (el.isConnected) el.remove(); return 1; } });
+    ops.push({ cost: 1, run: () => { if (el.isConnected) { el.remove(); noteMutation(); } return 1; } });
   }
 
   // finalEls has one slot per plan step in want order: keep-steps fill
@@ -183,7 +149,11 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
         fresh.dataset.key = step.key;
         fresh.__data = step.item;
         fresh.__sig = step.sig;
-        el.replaceWith(fresh);
+        // replaceWith() is a silent no-op on a detached node, so a row another
+        // writer already removed has to be appended instead.
+        if (el.parentNode === container) el.replaceWith(fresh);
+        else container.appendChild(fresh);
+        noteMutation();
         liveKeys.set(step.key, fresh);
         finalEls[i] = fresh;
         rewritten += 1;
@@ -228,8 +198,15 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
       const target = i;
       const refIdx = ref;
       ops.push({ cost: MOVE_UNITS, run: () => {
-        container.insertBefore(
-          finalEls[target], refIdx === null ? null : finalEls[refIdx]);
+        const anchor = refIdx === null ? null : finalEls[refIdx];
+        // Other code writes these containers directly (empty state, pane
+        // switches, error rows), so the anchor may be detached by the time this
+        // frame runs. insertBefore would throw NotFoundError and abort every
+        // remaining op, leaving the list half-updated; appending to the tail
+        // keeps the row reachable and the next render re-plans the order.
+        if (anchor && anchor.parentNode !== container) container.appendChild(finalEls[target]);
+        else container.insertBefore(finalEls[target], anchor);
+        noteMutation();
         return MOVE_UNITS;
       } });
       plannedMoves += 1;
@@ -240,19 +217,22 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
   const myRun = ++state.seq;
   runSeq.set(container, state);
 
+  const runMutations = diffStats.mutations;
   requestAnimationFrame(() => {
     let cursor = 0;
     let frames = 0;
-    // Live key set at frame time: concurrent renders of the same list are
-    // idempotent (the second reuses nodes instead of duplicating them).
-    const liveKeys = new Map();
-    for (const el of Array.from(container.children)) {
-      if (el.dataset && el.dataset.key != null) liveKeys.set(el.dataset.key, el);
-    }
     const runChunk = () => {
       if (runSeq.get(container)?.seq !== myRun) return; // superseded
+      // Live key set, rebuilt per frame: other code writes this container
+      // between frames, and a map captured once at run start would hand the
+      // create/replace dedupe a detached node.
+      const liveKeys = new Map();
+      for (const el of Array.from(container.children)) {
+        if (el.dataset && el.dataset.key != null) liveKeys.set(el.dataset.key, el);
+      }
       let writes = 0;
       let ran = 0;
+      const frameMutations = diffStats.mutations;
       // Budget-aware chunking against the measured write count.
       while (cursor < ops.length && writes + ops[cursor].cost <= MAX_ROWS_PER_FRAME) {
         const op = ops[cursor];
@@ -268,7 +248,9 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
         cursor += 1;
       }
       frames += 1;
+      const frameDone = diffStats.mutations - frameMutations;
       diffStats.maxFrameWrites = Math.max(diffStats.maxFrameWrites, writes);
+      diffStats.maxFrameMutations = Math.max(diffStats.maxFrameMutations, frameDone);
       if (writes > MAX_ROWS_PER_FRAME) {
         diffStats.violations += 1;
         console.warn(`[dom-diff] frame wrote ${writes} units (> ${MAX_ROWS_PER_FRAME})`);
@@ -283,6 +265,7 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', sign
         // never performed its planned moves and must not report them.
         diffStats.lastMoves = plannedMoves;
         diffStats.maxMoves = Math.max(diffStats.maxMoves, plannedMoves);
+        diffStats.lastMutations = diffStats.mutations - runMutations;
       }
     };
     runChunk();

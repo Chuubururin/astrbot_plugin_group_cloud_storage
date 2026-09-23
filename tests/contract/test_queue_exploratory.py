@@ -39,7 +39,7 @@ def _tracking_queue(term: _Terminal, *, fail_kinds: str = ""):
         if op.kind in fail_kinds:
             raise RuntimeError(f"boom {op.kind}")
 
-    q = OpQueue(run, interval=0.0)
+    q = OpQueue(run)
     orig_push = q._push
 
     def push(ev: dict) -> None:
@@ -96,7 +96,7 @@ async def test_i2_cancel_during_pause_suspend_reaches_terminal():
     async def run(op: Op) -> None:
         pass
 
-    q = OpQueue(run, interval=0.0)
+    q = OpQueue(run)
     orig_push = q._push
     q._push = lambda ev: (term.record(ev["task_id"], ev["type"])
                           if ev["type"] in ("done", "failed", "cancelled") else None,
@@ -125,7 +125,7 @@ async def test_i3_pause_resume_roundtrip_preserves_state():
         if attempts["n"] == 1:
             raise OpPausedError()
 
-    q = OpQueue(run, interval=0.0)
+    q = OpQueue(run)
     orig_push = q._push
     q._push = lambda ev: (term.record(ev["task_id"], ev["type"])
                           if ev["type"] in ("done", "failed", "cancelled") else None,
@@ -180,7 +180,7 @@ async def test_i5_bulk_kinds_bypass_limiter():
     async def run(op: Op) -> None:
         pass
 
-    q = OpQueue(run, interval=0.0, limiter=lim)
+    q = OpQueue(run, limiter=lim)
     orig_push = q._push
     q._push = lambda ev: (term.record(ev["task_id"], ev["type"])
                           if ev["type"] in ("done", "failed", "cancelled") else None,
@@ -194,7 +194,7 @@ async def test_i5_bulk_kinds_bypass_limiter():
     assert elapsed < 1.0  # 信号量 2 并发，未按限速串行
     # 对照：非 bulk kind 必经 limiter
     term2 = _Terminal()
-    q2 = OpQueue(run, interval=0.0, limiter=lim)
+    q2 = OpQueue(run, limiter=lim)
     orig_push2 = q2._push
     q2._push = lambda ev: (term2.record(ev["task_id"], ev["type"])
                            if ev["type"] in ("done", "failed", "cancelled") else None,

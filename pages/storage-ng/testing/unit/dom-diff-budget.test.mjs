@@ -1,20 +1,16 @@
 /**
- * Unit tests: keyed-diff frame budget + minimal reorder (FE-16).
+ * Unit tests: keyed-diff frame budget + minimal reorder.
  *
- * L10: the frame budget is enforced against *measured* DOM writes. It used to
- * charge the whole-list fragment append its row count (so normal renders kept
- * tripping the gate), then swung to charging it 1 unconditionally (so a
- * reorder hid 100 DOM moves behind a single unit). Reorders now go through the
- * LIS minimal-move pass: each move is one honest write, small reorders cost a
- * couple of units, and even a full reversal is chunked instead of overrunning
- * a frame. The runSeq supersede semantics must stay exactly as they were.
+ * The frame budget is charged in weighted units, one unit per row rebuild and
+ * MOVE_UNITS per reparent move, and reorders go through the LIS minimal-move
+ * pass. The runSeq supersede semantics are pinned here too.
  *
- * Note on what these assertions can and cannot detect now: the dearest single
- * op is a row replacement at 2 units, far under the 50-unit budget, so no
- * render can overrun a frame and `violations` cannot fire on today's code. It
- * stays asserted as a regression canary - it wakes up the moment anyone batches
- * writes back into one op again. The live signal is `moves` on the return
- * value, which is what pins the move set to the LIS minimum.
+ * What these assertions can and cannot detect: the dearest single op is a row
+ * replacement at 2 units, far under the 50-unit budget, so no render can
+ * overrun a frame and `violations` cannot fire on today's code. It stays
+ * asserted as a canary - it wakes up the moment anyone batches writes back
+ * into one op. The live signal is `moves` on the return value, which pins the
+ * move set to the LIS minimum.
  *
  * Run: node --test pages/storage-ng/testing/unit/dom-diff-budget.test.mjs
  */
@@ -60,15 +56,22 @@ function el(tag = 'tr') {
       if (this.parentNode) {
         const i = this.parentNode.children.indexOf(this);
         if (i > -1) this.parentNode.children.splice(i, 1);
+        // A real detached node stops reporting its old parent; without this
+        // the stub lets parentNode lie, and the diff's "is my anchor still in
+        // the container" guard sees a node that children no longer holds.
+        this.parentNode = null;
       }
     },
     replaceWith(n) {
-      if (this.parentNode) {
-        const i = this.parentNode.children.indexOf(this);
-        if (i > -1) this.parentNode.children[i] = n;
-      }
-      n.parentNode = this.parentNode;
+      const parent = this.parentNode;
+      if (!parent) return;       // as in the DOM: a detached node's replaceWith
+                                 // is a no-op, so the fresh row never lands
+      const i = parent.children.indexOf(this);
+      if (i > -1) parent.children[i] = n;
+      n.parentNode = parent;
       n.isConnected = true;
+      this.parentNode = null;    // the replaced node leaves the tree
+      this.isConnected = false;
     },
   };
 }
@@ -203,4 +206,120 @@ test('L10: runSeq supersede semantics are unchanged', async () => {
   await drain();
   assert.deepEqual(keys(tbody), ['only'],
     'the superseded chunked render must not append its rows');
+});
+
+// ---- W: the plan survives an external write between frames -----------------
+// renderRows() (empty state, pane switches), renderInto() with an empty slice,
+// renderErrorRow() and the retry row all write these containers directly, and
+// none of them bumps runSeq - so they can land *inside* a chunked render.
+// Before the anchor/parent guards, the first such hit made insertBefore throw
+// NotFoundError inside runChunk: the remaining ops never ran, the list stayed
+// half-built, and the render never reported as settled.
+
+/** Step exactly one animation frame (the rAF stub is a setTimeout). */
+const oneFrame = () => new Promise((r) => setTimeout(r, 0));
+const detachAll = (tbody) => {
+  for (const row of [...tbody.children]) row.remove();
+  tbody.children.length = 0;
+};
+const sig = (r) => r.name;
+
+test('a wipe between frames settles the plan instead of aborting it', async () => {
+  const tbody = el('tbody');
+  // 250 rows: a full reversal plans 249 moves = 62.25 units, so the plan is
+  // still running when the second frame starts (one frame holds 200 moves).
+  const rows = list(250);
+  applyKeyedDiff(tbody, rows, render, (x) => x.id, sig);
+  await drain(40);
+  const reversed = [...rows].reverse();
+  const before = getDiffStats();
+
+  applyKeyedDiff(tbody, reversed, render, (x) => x.id, sig);
+  await oneFrame();                       // part of the move set is applied
+  detachAll(tbody);                       // what renderErrorRow() does
+  await drain(40);
+
+  const after = getDiffStats();
+  assert.ok(after.totalRenders > before.totalRenders,
+    'the run must reach its settle branch (an escaped error skips it)');
+  assert.ok(after.violations === before.violations, 'and it must not overrun a frame');
+
+  applyKeyedDiff(tbody, reversed, render, (x) => x.id, sig);
+  await drain(40);
+  assert.deepEqual(keys(tbody), reversed.map((r) => r.id),
+    'the next render must rebuild the full list in the wanted order');
+});
+
+test('a replace whose row was detached externally re-enters the DOM', async () => {
+  const tbody = el('tbody');
+  const rows = list(3);
+  applyKeyedDiff(tbody, rows, render, (x) => x.id, sig);
+  await drain();
+
+  // Change only r1: a replace op is planned, and (since the order still
+  // matches) no move op exists to rescue a row the replace loses.
+  const next = rows.map((r) => (r.id === 'r1' ? { ...r, name: 'b' } : r));
+  applyKeyedDiff(tbody, next, render, (x) => x.id, sig);
+  tbody.children.find((c) => c.dataset.key === 'r1').remove();
+  await drain();
+
+  assert.deepEqual(keys(tbody).sort(), ['r0', 'r1', 'r2'],
+    'replaceWith() on a detached node is a no-op - the row must be appended instead');
+  const back = tbody.children.find((c) => c.dataset.key === 'r1');
+  assert.equal(back.dataset.name, 'b', 'and it carries the new data');
+  assert.notEqual(keys(tbody)[1], 'r1',
+    'the tail is where it lands: this plan had no move op (order matched at plan time)');
+
+  applyKeyedDiff(tbody, next, render, (x) => x.id, sig);
+  await drain();
+  assert.deepEqual(keys(tbody), ['r0', 'r1', 'r2'],
+    'the next render re-plans from the live DOM and restores the order');
+});
+
+// ---- mutations (real writes) vs. weighted frame units --------------------
+test('mutations count container writes, not weighted frame units', async () => {
+  const tbody = el('tbody');
+  const rows = list(4);
+  const m0 = getDiffStats().mutations;
+  applyKeyedDiff(tbody, rows, render, (x) => x.id, sig);
+  await drain();
+  const first = getDiffStats();
+  assert.equal(first.mutations - m0, 4,
+    'four created rows are four writes (a create op builds a detached row)');
+  assert.equal(first.lastMutations, 4);
+
+  const second = getDiffStats();
+  applyKeyedDiff(tbody, [...rows].reverse(), render, (x) => x.id, sig);
+  await drain();
+  const after = getDiffStats();
+  assert.equal(after.mutations - second.mutations, 3,
+    'a 4-row reversal is 3 LIS moves = 3 DOM writes');
+  assert.equal(after.lastFramesUsed, 1,
+    'one frame did all three writes while the weighted cost was only 0.75 units');
+});
+
+test('mutations per operation kind, and the units that hide them', async () => {
+  const cases = [
+    ['append one row', (rows) => [...rows, { id: 'new', name: 'a' }], 1],
+    // A replacement is one container write (replaceWith) even though it costs
+    // 2 units - the row body is rebuilt as well.
+    ['replace one row', (rows) => rows.map((r, i) => (i ? r : { ...r, name: 'z' })), 1],
+    ['move one row to the tail', (rows) => [rows[1], rows[2], rows[3], rows[0]], 1],
+    ['remove three rows', (rows) => rows.slice(3), 3],
+    // Two new rows landing in the middle: both writes happen in their moves.
+    ['create + reorder mixed', (rows) => [rows[0], { id: 'n1', name: 'a' },
+      { id: 'n2', name: 'a' }, ...rows.slice(1)], 2],
+  ];
+  for (const [name, mutate, expected] of cases) {
+    const tbody = el('tbody');
+    const rows = list(4);
+    applyKeyedDiff(tbody, rows, render, (x) => x.id, sig);
+    await drain();
+    const before = getDiffStats().mutations;
+    applyKeyedDiff(tbody, mutate(rows), render, (x) => x.id, sig);
+    await drain();
+    const made = getDiffStats().mutations - before;
+    assert.equal(made, expected,
+      `${name}: expected exactly ${expected} container write(s), got ${made}`);
+  }
 });

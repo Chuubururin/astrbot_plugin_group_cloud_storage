@@ -93,7 +93,7 @@ async def env(tmp_path):
     await store.init()
     api = FakeOneBotApi(tree={None: ([], [])})
     cell: dict = {}
-    queue = OpQueue(lambda op: cell["d"].handle(op), interval=0.0,
+    queue = OpQueue(lambda op: cell["d"].handle(op),
                     backoff_base=0.05)
     sync = ResourceSyncService(api, store)
     scan = GroupScanService(api, store, queue)

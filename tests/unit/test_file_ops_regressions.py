@@ -48,7 +48,7 @@ async def env(tmp_path):
     api = FakeOneBotApi(tree={None: ([], [])})
     sync = ResourceSyncService(api, store)
     ops: FileOpsService | None = None
-    queue = OpQueue(lambda op: ops.handle(op), interval=0.0)
+    queue = OpQueue(lambda op: ops.handle(op))
     await queue.start()
     ops = FileOpsService(api, store, queue, sync, tmp_dir=tmp_path / "tmp")
     yield tmp_path, store, api, queue, ops
@@ -152,7 +152,7 @@ async def test_delete_volume_parts_uses_each_groups_account(tmp_path):
     )
     sync = ResourceSyncService(api, store)
     ops: FileOpsService | None = None
-    queue = OpQueue(lambda op: ops.handle(op), interval=0.0)
+    queue = OpQueue(lambda op: ops.handle(op))
     await queue.start()
     ops = FileOpsService(api, store, queue, sync, tmp_dir=tmp_path / "tmp")
     try:

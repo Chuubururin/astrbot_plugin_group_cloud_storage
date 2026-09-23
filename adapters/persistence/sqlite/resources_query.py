@@ -11,6 +11,19 @@ from .state import StorePart
 
 from core.domain.sync import Page, PageItem, ResourceQuery, ResourceStats
 
+# "This file also lives on the netdisk" cross-reference, shared by the
+# store_status=netdisk and store_status=none filters. It is a module constant
+# because it is the query whose plan sqlite_stat1 decides: without planner
+# statistics the correlated EXISTS is served from idx_archive_map_state (two
+# distinct values) instead of the primary key's resource_id prefix, which makes
+# it quadratic. tests/unit/test_sqlite_planner.py pins that plan against this
+# exact string.
+ARCHIVE_MAP_OUT_DONE = (
+    "SELECT 1 FROM archive_map am "
+    "WHERE am.resource_id = resources.id "
+    "AND am.direction = 'out' AND am.state = 'done'"
+)
+
 
 class ResourceQueryMixin(StorePart):
     """List/search/stats over the resources table."""
@@ -88,11 +101,7 @@ class ResourceQueryMixin(StorePart):
                 # the fall-back from the requirement doc applies: a same-name
                 # resource of the target type in the same group.
                 if q.store_status == "netdisk":
-                    where.append(
-                        "EXISTS (SELECT 1 FROM archive_map am "
-                        "WHERE am.resource_id = resources.id "
-                        "AND am.direction = 'out' AND am.state = 'done')"
-                    )
+                    where.append(f"EXISTS ({ARCHIVE_MAP_OUT_DONE})")
                 elif q.store_status == "album":
                     where.append(
                         "EXISTS (SELECT 1 FROM resources o WHERE o.type = 'album' "
@@ -109,9 +118,7 @@ class ResourceQueryMixin(StorePart):
                     )
                 elif q.store_status == "none":
                     where.append(
-                        "NOT EXISTS ("
-                        "SELECT 1 FROM archive_map am WHERE am.resource_id = resources.id "
-                        "AND am.direction = 'out' AND am.state = 'done')"
+                        f"NOT EXISTS ({ARCHIVE_MAP_OUT_DONE})"
                         " AND NOT EXISTS ("
                         "SELECT 1 FROM resources o WHERE o.type IN ('album', 'essence') "
                         "AND o.group_id = resources.group_id "
