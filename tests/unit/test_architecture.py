@@ -324,6 +324,44 @@ class TestDocDrift:
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
+    def test_db_auth_gate_is_not_vacuous(self):
+        """R4 的正反两面都要成立，否则"全过"没有意义。
+
+        判据是"handler 有没有调用 `_admin`"。只断言 db 路由都调用它，在判据
+        恒真（比如把 `called` 算成了整个模块、或 Route 的 auth 位读错）时也会
+        通过，所以必须同时断言若干 page 路由被判据认定为未走 `_admin`。
+        """
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "check_doc_drift", ROOT / "tools" / "check_doc_drift.py"
+        )
+        drift = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drift)
+
+        routes = drift.routes_table(ROOT)
+        called = drift.handler_calls(ROOT)
+        gate = drift.DB_AUTH_ENTRY_POINTS
+
+        db_routes = [r for r in routes if r[3] == "db"]
+        assert db_routes, "ROUTES 里已无 db 路由，R4 会变成空转"
+        for suffix, _m, handler, _a in db_routes:
+            assert not gate.isdisjoint(called.get(handler, set())), (
+                f"{suffix} 的 handler {handler} 绕过了 db 鉴权入口"
+            )
+
+        # 对照组：page 路由不经 `_admin`，判据必须把它们判为"没走"。
+        page = [r for r in routes if r[3] == "page"]
+        bypassing = [h for _s, _m, h, _a in page if gate.isdisjoint(called.get(h, set()))]
+        assert len(bypassing) >= 10, (
+            f"仅 {len(bypassing)} 条 page 路由被判为未走 _admin —— 判据可能恒真"
+        )
+
+        # auth 位确实来自 Route 的第 5 个实参，而不是恒为某个定值。
+        levels = {r[3] for r in routes}
+        assert levels <= {"page", "db", "none"}, levels
+        assert len(levels) > 1, "全部路由 auth 同值 —— 第 5 个实参可能读错了"
+
 
 # ---- Route registry consistency ----
 

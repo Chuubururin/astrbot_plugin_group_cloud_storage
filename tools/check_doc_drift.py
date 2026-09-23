@@ -12,6 +12,7 @@ K3  `_RELOAD_REQUIRED_KEYS`（`webapi/config.py`）⊆ `DEFAULTS`
 R1  `ROUTES` 的 handler 名都能在 `webapi/` 下静态找到定义
 R2  `ROUTES` 的 suffix 都出现在 `docs/接口契约.md` 的「REST 端点总表」里
 R3  `pages/storage-ng/api.js` 的每个路径都能对应到 `ROUTES` 的 suffix
+R4  `ROUTES` 里每条 `auth="db"` 的路由，其 handler 必须调用 `DB_AUTH_ENTRY_POINTS`
 K5  `docs/**/*.md` 不出现 `DEAD_SYMBOLS`（已删除的模块/类名）
 
 允许清单（每一条都必须写理由，且尽量短）
@@ -64,6 +65,10 @@ DOC_EXEMPT: frozenset[str] = frozenset()
 # 前端把 `<token>` 之类动态段拼在路径后（api.js 只存前缀）
 API_DYNAMIC: frozenset[str] = frozenset({"files/upload"})
 
+# R4：ROUTES 里的 `auth` 不会传给宿主，`db` 路由的保护全在 handler 内部。
+# 这里是那层保护的唯一入口名，新增 db 路由绕过它即 CI 失败。
+DB_AUTH_ENTRY_POINTS: frozenset[str] = frozenset({"_admin"})
+
 # K4：插件名字面量只允许一个定义点（routes.py）。
 # 用 f-string 拼装：避免本文件源码里出现该字面量，否则 K4 会把自己也算成一次定义。
 _PLUGIN_NAME_VALUE = "astrbot_plugin_group_cloud_storage"
@@ -98,7 +103,7 @@ def defaults_keys(root: Path) -> list[str]:
     return sorted(out)
 
 
-def routes_table(root: Path) -> list[tuple[str, tuple[str, ...], str]]:
+def routes_table(root: Path) -> list[tuple[str, tuple[str, ...], str, str]]:
     value = _ast_assign_value(root / ROUTES_PY, "ROUTES")
     if not isinstance(value, ast.List):
         raise SystemExit(f"ABORT: {ROUTES_PY} 的 ROUTES 不是字面量 list")
@@ -116,19 +121,42 @@ def routes_table(root: Path) -> list[tuple[str, tuple[str, ...], str]]:
             raise SystemExit(
                 f"ABORT: {ROUTES_PY} Route(...) 实参不是 5 个: {ast.dump(elt)[:80]}"
             )
-        suffix, methods, handler = elt.args[0], elt.args[1], elt.args[2]
+        suffix, methods, handler, auth = elt.args[0], elt.args[1], elt.args[2], elt.args[4]
         if not isinstance(suffix, ast.Constant) or not isinstance(handler, ast.Constant):
             raise SystemExit(f"ABORT: {ROUTES_PY} 条目含非常量字段: {ast.dump(elt)[:80]}")
         if not isinstance(methods, ast.Tuple):
             raise SystemExit(f"ABORT: {ROUTES_PY} methods 不是字面量 tuple: {suffix.value}")
+        if not isinstance(auth, ast.Constant) or not isinstance(auth.value, str):
+            raise SystemExit(f"ABORT: {ROUTES_PY} auth 不是字面量字符串: {suffix.value}")
         out.append((
             suffix.value,
             tuple(str(m.value) for m in methods.elts),
             handler.value,
+            auth.value,
         ))
     # 反空断言：抽取到 0 条时 R1/R2/R3 会全部空转通过 —— 那是"静默的功能丧失"。
     if not out:
         raise SystemExit(f"ABORT: {ROUTES_PY} 未抽取到任何路由（AST 形状已变？）")
+    return out
+
+
+def handler_calls(root: Path) -> dict[str, set[str]]:
+    """handler 名 -> 它（含其嵌套 def）直接调用的函数名集合。"""
+    out: dict[str, set[str]] = {}
+    for p in sorted((root / "webapi").rglob("*.py")):
+        tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            called: set[str] = set()
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                if isinstance(call.func, ast.Name):
+                    called.add(call.func.id)
+                elif isinstance(call.func, ast.Attribute):
+                    called.add(call.func.attr)
+            out[node.name] = called
     return out
 
 
@@ -275,25 +303,37 @@ def check(root: Path) -> list[str]:
     # R1
     defined = webapi_defs(root)
     routes = routes_table(root)
-    for suffix, _methods, handler in routes:
+    for suffix, _methods, handler, _auth in routes:
         if handler not in defined:
             bad.append(f"R1 {suffix}: handler {handler} 在 webapi/ 下找不到定义")
 
     # R2
     section = rest_section(root)
-    for suffix, _methods, _handler in routes:
+    for suffix, _methods, _handler, _auth in routes:
         if _documented(section, suffix):
             continue
         bad.append(f"R2 {suffix}: docs/接口契约.md 的 REST 端点总表未收录")
 
     # R3
-    suffixes = {s for s, _m, _h in routes}
+    suffixes = {s for s, _m, _h, _a in routes}
     for path in api_js_paths(root):
         if path in suffixes or path in API_DYNAMIC:
             continue
         if any(s == path or s.startswith(path + "/") for s in suffixes):
             continue
         bad.append(f"R3 {path}: api.js 引用但 ROUTES 里没有对应 suffix")
+
+    # R4
+    called = handler_calls(root)
+    for suffix, _methods, handler, auth in routes:
+        if auth != "db":
+            continue
+        if DB_AUTH_ENTRY_POINTS.isdisjoint(called.get(handler, set())):
+            bad.append(
+                f"R4 {suffix}: 声明 auth=\"db\" 但 handler {handler} 没有调用 "
+                f"{'/'.join(sorted(DB_AUTH_ENTRY_POINTS))} —— ROUTES 里的 auth 只是元数据，"
+                f"宿主不收这个字段，不经过它就没有任何保护"
+            )
 
     return bad
 
@@ -308,7 +348,7 @@ def main(argv: list[str]) -> int:
         return 1
     print(
         "文档/路由漂移检查全部通过"
-        f"（K1-K5 + R1-R3；DEFAULTS={len(defaults_keys(root))} 键，"
+        f"（K1-K5 + R1-R4；DEFAULTS={len(defaults_keys(root))} 键，"
         f"ROUTES={len(routes_table(root))} 条，"
         f"DEAD_SYMBOLS={len(DEAD_SYMBOLS)} 条）"
     )
