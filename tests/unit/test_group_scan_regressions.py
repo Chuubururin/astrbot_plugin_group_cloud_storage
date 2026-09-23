@@ -217,3 +217,43 @@ async def test_incremental_does_not_unmanage_other_accounts_group(env):
     api.group_ids = []
     await svc.scan_owned_incremental()
     assert (await _group(store, "g9")).managed == 1
+
+# ---------- P2-9：一次扫描只读一次 groups 全表 ----------
+
+
+class _CountingStore:
+    """Delegates to a real store; counts list_groups calls."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.list_groups_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def list_groups(self, include_hidden: bool = False):
+        self.list_groups_calls += 1
+        return await self._inner.list_groups(include_hidden)
+
+
+@pytest.mark.asyncio
+async def test_scan_owned_reads_group_table_once(env):
+    """P2-9：分片扫描路径原本把 groups 全表读两次（known_ids 与 known 是同一查询）。
+
+    只数"扫描主体"的读：关掉 auto_label，因为 `auto_fill_labels()` 要保持无参
+    签名（`webapi/groups.py` 会单独调它），它内部那次读不在本契约内。
+    """
+    store, api, svc = env
+    await svc.scan_owned()  # 先建一行已知群，让 known 非空
+    spy = _CountingStore(store)
+    svc.store = spy
+    svc.auto_label = False
+
+    spy.list_groups_calls = 0
+    result = await svc.scan_owned(group_filter=["g1"])
+
+    # 反空断言：这一趟必须真的扫到了群，否则计数断言毫无意义。
+    assert result.total == 1, f"本趟应扫 1 个群，实际 {result.total}"
+    assert spy.list_groups_calls == 1, (
+        f"扫描主体应只读 1 次 groups 全表，实际 {spy.list_groups_calls} 次"
+    )

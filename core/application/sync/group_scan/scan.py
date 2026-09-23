@@ -55,19 +55,22 @@ class ScanMixin:
             except Exception as e:
                 logger.debug(f"[group-scan] on_account_resolved callback failed: {e}")
         groups = await api.list_groups()
+        # Existing rows: read once and reused for both the shard filter and the
+        # incremental judgment below. These used to be two identical full-table
+        # reads (scan_owned_incremental already reads it once); the extra read
+        # cost a connection checkout on the sharded multi-account path.
+        known = {g.group_id: g for g in await self.store.list_groups()}
         # Hash-shard filter: groups in this shard plus DB-unknown new groups
         # (discovery critical path) always pass
         if group_filter is not None:
             filter_set = set(group_filter)
-            known_ids = {g.group_id for g in await self.store.list_groups()}
+            known_ids = set(known)
             groups = [
                 g for g in groups
                 if str(g.get("group_id") or "") in filter_set
                 or str(g.get("group_id") or "") not in known_ids
             ]
         group_total = len(groups)
-        # Incremental judgment: read the existing role cache
-        known = {g.group_id: g for g in await self.store.list_groups()}
         owned = 0
         failed = 0  # groups whose API calls failed (circuit breaker signal)
         now = int(time.time())

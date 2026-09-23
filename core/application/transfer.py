@@ -14,13 +14,18 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import urljoin, urlsplit, unquote
+from urllib.parse import urlsplit, unquote
 
-import httpx
 
 from adapters.external.base import (
     assert_fetch_host_allowed,
     resolve_and_pin_ip,
+)
+from adapters.external.secure_fetch import (
+    FetchPolicy,
+    SizeLimitError,
+    UrlRejectedError,
+    fetch_to_file,
 )
 from core.application.queue import OpQueue
 from core.config import PluginConfig
@@ -123,15 +128,31 @@ class HttpAdapter(ProtocolAdapter):
     ):
         super().__init__(max_bytes, timeout, allow_private, trusted_origins)
 
-    def _resolve_url(self, url: str) -> tuple[str, str | None]:
-        """SSRF validation + DNS pinning (blocking, invoked via to_thread).
+    async def get(self, target: dict, dest: Path) -> int:
+        """SSRF-safe fetch via the plugin-wide secure_fetch single
+        implementation: every hop is re-validated + DNS-pinned (a 302 cannot
+        reach the intranet), the body is capped mid-stream, and a failed
+        fetch leaves no partial file at ``dest``."""
+        policy = FetchPolicy(
+            max_bytes=self.max_bytes,
+            timeout=self.timeout,
+            allow_private=self._allow_private,
+            trusted_origins=self._trusted,
+            max_redirects=_HTTP_REDIRECT_MAX,
+        )
+        try:
+            return await fetch_to_file(target["url"], dest, policy, site="fetch")
+        except (UrlRejectedError, SizeLimitError) as e:
+            # Queue contract: LOCAL_ERROR so the op fails fast without replay.
+            # RedirectLimitError keeps its historical plain-ValueError path.
+            raise FetchRejected(
+                OneBotErrorKind.LOCAL_ERROR, "fetch", str(e)
+            ) from e
 
-        Returns (url, original_hostname_or_None). For http hostnames the
-        URL is rewritten to the validated IP and the caller sets Host:
-        original_hostname (no TLS identity to rely on). For https the
-        original URL is kept — TLS binds the hostname (SNI + certificate),
-        and pinning the IP would break certificate verification.
-        """
+    def _resolve_url(self, url: str) -> tuple[str, str | None]:
+        """Entrance pre-check only: fail fast with a clear user-facing error
+        on the first hop. Redirect re-validation happens per hop inside
+        ``secure_fetch``; do not treat this as the security boundary."""
         try:
             return resolve_and_pin_ip(
                 url,
@@ -142,45 +163,6 @@ class HttpAdapter(ProtocolAdapter):
             raise FetchRejected(
                 OneBotErrorKind.LOCAL_ERROR, "fetch", f"fetch url rejected: {e}"
             ) from e
-
-    async def get(self, target: dict, dest: Path) -> int:
-        total = 0
-        url = target["url"]
-        # Manual redirect loop: every hop is re-validated + pinned against
-        # private and reserved address ranges so a 302 redirect cannot reach
-        # the intranet (DNS rebinding protection).
-        async with httpx.AsyncClient(
-            follow_redirects=False, timeout=self.timeout
-        ) as client:
-            for _hop in range(_HTTP_REDIRECT_MAX + 1):
-                pinned_url, original_host = await asyncio.to_thread(
-                    self._resolve_url, url
-                )
-                headers = {}
-                if original_host:
-                    headers["Host"] = original_host
-                async with client.stream("GET", pinned_url, headers=headers) as resp:
-                    if resp.is_redirect and resp.has_redirect_location:
-                        if _hop == _HTTP_REDIRECT_MAX:
-                            raise ValueError(
-                                f"fetch redirects exceeded ({_HTTP_REDIRECT_MAX})"
-                            )
-                        url = urljoin(url, resp.headers["location"])
-                        logger.debug(f"[transfer] fetch redirect -> {url}")
-                        continue
-                    resp.raise_for_status()
-                    with dest.open("wb") as fh:
-                        async for chunk in resp.aiter_bytes(1 << 16):
-                            fh.write(chunk)
-                            total += len(chunk)
-                            if total > self.max_bytes:
-                                raise FetchRejected(
-                                    OneBotErrorKind.LOCAL_ERROR,
-                                    "fetch",
-                                    f"fetch exceeds max bytes ({self.max_bytes})",
-                                )
-                    break
-        return total
 
 
 class SmbAdapter(ProtocolAdapter):

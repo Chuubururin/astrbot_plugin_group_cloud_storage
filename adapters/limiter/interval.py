@@ -16,10 +16,10 @@ class IntervalLimiter:
     """Global minimum-interval limit: at least `interval` seconds elapse
     between any two acquire() calls."""
 
-    def __init__(self, interval: float = 0.5, min_interval: float = 0.1):
-        self.interval = max(interval, min_interval)
-        self._lock = asyncio.Lock()
-        self._last = 0.0
+    def __init__(self, interval: float = 0.5, min_interval: float = 0.1) -> None:
+        self.interval: float = max(interval, min_interval)
+        self._lock: asyncio.Lock = asyncio.Lock()
+        self._last: float = 0.0
 
     async def acquire(
         self, mult: float = 1.0, account: str | None = None
@@ -32,10 +32,11 @@ class IntervalLimiter:
         """
         async with self._lock:
             now = time.monotonic()
-            wait = self.interval * mult - (now - self._last)
+            target = self._last + self.interval * mult
+            wait = target - now
             if wait > 0:
                 await asyncio.sleep(wait)
-            self._last = time.monotonic()
+            self._last = max(target, time.monotonic())
 
 
 class KeyedLimiter:
@@ -48,12 +49,12 @@ class KeyedLimiter:
         interval: float = 0.5,
         min_interval: float = 0.1,
         default_key: str = "__global__",
-    ):
-        self.interval = interval
-        self.min_interval = min_interval
-        self.default_key = default_key
-        self._limiters: dict = {}
-        self._lock = asyncio.Lock()
+    ) -> None:
+        self.interval: float = interval
+        self.min_interval: float = min_interval
+        self.default_key: str = default_key
+        self._limiters: dict[str, IntervalLimiter] = {}
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     async def acquire(
         self, mult: float = 1.0, account: str | None = None
@@ -68,5 +69,5 @@ class KeyedLimiter:
                     self._limiters[k] = lim
         await lim.acquire(mult)
 
-    def keys(self) -> list:
+    def keys(self) -> list[str]:
         return list(self._limiters)

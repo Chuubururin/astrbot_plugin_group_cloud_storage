@@ -17,7 +17,7 @@ class DatabaseAdminService:
 
         When no token is configured the database administration endpoints
         refuse every request instead of falling back to the Page session:
-        restore/reset are destructive, so a single layer of trust is not
+        restore is destructive, so a single layer of trust is not
         enough. Configure database_admin_token to enable them.
         """
         if not self.token:
@@ -71,11 +71,3 @@ class DatabaseAdminService:
         if await asyncio.to_thread(check) != "ok":
             raise ValueError("source database failed integrity check")
         return await self.store.restore(src)
-
-    async def reset(self):
-        """Rebuild an empty schema; store implementation provides rollback."""
-        reset = getattr(self.store, "reset_and_rebuild", None)
-        if reset is None:
-            raise RuntimeError("database reset unavailable")
-        await reset()
-        return {"ok": True, "action": "reset"}

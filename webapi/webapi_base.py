@@ -17,7 +17,7 @@ from commands.handlers import Services
 
 from core.opctx import account_scope
 
-PLUGIN_NAME = "astrbot_plugin_group_cloud_storage"
+from .routes import PLUGIN_NAME  # noqa: F401  (re-export; the single definition lives in routes.py)
 
 # SSE heartbeat interval
 SSE_HEARTBEAT_SEC = 30.0

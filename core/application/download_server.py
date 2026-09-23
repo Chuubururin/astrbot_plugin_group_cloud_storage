@@ -97,6 +97,17 @@ class DownloadServerService:
         self.smb_port = int(cfg.get("download_smb_port", 0) or 0)
         self.token = str(cfg.get("download_token", "") or "")
         self.allow_private = bool(cfg.get("fetch_allow_private_address", False))
+        # Download-cache housekeeping budget (download_cache.sweep_cache).
+        # The mkdtemp root used to grow until the next plugin reload: the
+        # rmtree in shutdown() was the only cleanup, so a long-running bot
+        # filled the temp dir. 0 (or negative) disables the rule.
+        self.cache_max_bytes = (
+            int(cfg.get("download_cache_max_mb", 1024) or 0) * 1024 * 1024
+        )
+        self.cache_ttl_seconds = (
+            int(cfg.get("download_cache_ttl_hours", 24) or 0) * 3600
+        )
+        self._cache_swept_at: float | None = None
         self._download_info = download_info
         self._http_server: asyncio.AbstractServer | None = None
         self._sftp_thread: threading.Thread | None = None

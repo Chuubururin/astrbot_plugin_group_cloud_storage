@@ -16,7 +16,7 @@ The read side accepts legacy shapes: {"volumes": true} (volumes/video),
 
 from __future__ import annotations
 
-COMPOSITION_KINDS = ("volumes", "video_segments", "text_split")
+COMPOSITION_KINDS: frozenset[str] = frozenset({"volumes", "video_segments", "text_split"})
 
 
 def encode_composition(

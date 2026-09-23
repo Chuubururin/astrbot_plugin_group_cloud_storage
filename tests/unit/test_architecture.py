@@ -59,6 +59,42 @@ class TestLegacyLayersRemoved:
                 f"{py_file.relative_to(ROOT)} 引用已删除路径: {term}"
 
 
+# ---- Dead code must stay deleted ----
+
+class TestDeadCodeStaysDeleted:
+    """已裁决删除的死代码不得复活（零调用方 / 指向不存在的方法）。"""
+
+    DEAD_MODULES = [
+        # StorageGateway：全仓零方法调用、零属性读取；且 egress()/probe_target()
+        # 调用的 TransferService.submit_egress/.probe_target 在仓库中根本不存在。
+        "core/application/gateway.py",
+    ]
+
+    @pytest.mark.parametrize("rel", DEAD_MODULES)
+    def test_module_stays_deleted(self, rel):
+        assert not (ROOT / rel).exists(), f"死代码已删除，勿再复活：{rel}"
+
+    def test_database_admin_reset_stays_deleted(self):
+        tree = ast.parse(
+            (ROOT / "core" / "application" / "database" / "service.py").read_text(encoding="utf-8")
+        )
+        classes = sorted(c.name for c in ast.walk(tree) if isinstance(c, ast.ClassDef))
+        # 反空断言：类名一旦改动，下面的方法扫描会抽到空集而静默通过。
+        assert "DatabaseAdminService" in classes, (
+            f"未在 service.py 找到 DatabaseAdminService（AST 形状已变？实际类：{classes}）"
+        )
+        methods = [
+            node.name
+            for cls in ast.walk(tree)
+            if isinstance(cls, ast.ClassDef) and cls.name == "DatabaseAdminService"
+            for node in cls.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        assert "reset" not in methods, (
+            "DatabaseAdminService.reset() 零调用方且为破坏性操作，已删除，勿再复活"
+        )
+
+
 # ---- File size constraints ----
 
 def _file_lines(path: Path) -> int:
@@ -269,6 +305,26 @@ class TestImportContracts:
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+class TestDocDrift:
+    """⑤ 文档/schema/路由/前端 API 漂移：tools/check_doc_drift.py 必须全过。
+
+    这是本仓"最大的维护风险"（文档、配置 schema、路由表、前端 API 常量四者互相漂移）
+    的机检口径；脚本在 CI 的 contract-checks job 里也会单独跑一次。
+    """
+
+    def test_no_drift(self):
+        import subprocess
+
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "check_doc_drift.py"), str(ROOT)],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            env={**os.environ, "PYTHONPATH": str(ROOT)},
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 # ---- Route registry consistency ----
 
 class TestRouteRegistry:
@@ -289,9 +345,16 @@ class TestRouteRegistry:
                     if isinstance(target, ast.Name) and target.id == "ROUTES":
                         if isinstance(node.value, ast.List):
                             for elt in node.value.elts:
-                                if isinstance(elt, ast.Tuple) and len(elt.elts) >= 1:
-                                    if isinstance(elt.elts[0], ast.Constant):
-                                        paths.append(elt.elts[0].value)
+                                if (
+                                    isinstance(elt, ast.Call)
+                                    and isinstance(elt.func, ast.Name)
+                                    and elt.func.id == "Route"
+                                    and elt.args
+                                    and isinstance(elt.args[0], ast.Constant)
+                                ):
+                                    paths.append(elt.args[0].value)
+        # 反空断言：ROUTES 的 AST 形状若再变，本用例必须红灯，而不是静默空转。
+        assert paths, "未能从 ROUTES 抽取任何路径（AST 形状已变？）"
         seen = set()
         for p in paths:
             assert p not in seen, f"Duplicate route path: {p}"
@@ -324,7 +387,6 @@ class TestApplicationLayer:
         "transfer.py",
         "distributor.py",
         "netdisk.py",
-        "gateway.py",
         "download_server.py",
     ]
 
@@ -337,6 +399,7 @@ class TestApplicationLayer:
         "ingest",    # CloudIngestService + fetch/essence/video/album
         "bridge",    # BridgeService + submit/inbound/polling/recovery
         "database",  # DatabaseAdminService
+        "distribution",  # 分发纯逻辑件：media_spec + text_render
     ]
 
     def test_directory_exists(self):
@@ -426,4 +489,178 @@ class TestSchemaVersion:
         # 钉死当前版本：升级 schema 时必须同步更新此断言，
         # 防止版本号被误降级或迁移链断裂也静默通过。
         # 29: logical_key 列 + 部分唯一索引 idx_res_logical（一个逻辑文件一行）。
-        assert _m.SCHEMA_VERSION == 29
+        # 30: DROP v17-25 预建但代码从未落地的僵尸表
+        #     （scan_claims/fts_dirty_queue/fts_state/outbox_events）。
+        assert _m.SCHEMA_VERSION == 30
+
+
+# ---- Anti-fragmentation ratchet (P0c) ----
+
+class TestAntiFragmentation:
+    """行数门禁的对冲规则：堵住"为压行数而拆出 svc-taking 游离函数 /
+    伸手进协作者私有成员"这两类伪模块化增量。
+
+    <700 行门禁只测规模，不测内聚。历史上它已催生 download_server* 四件套
+    （函数以 svc 为首参、反向读写原类私有属性）与 distributor 对 bridge
+    私有成员的直接访问。本规则用基线白名单**棘轮**：存量违例逐文件冻结，
+    新增即红灯；重构消除违例后必须同步调低基线（低于基线也红，防止基线烂掉）。
+    """
+
+    # file -> 允许的违例数（只降不升）
+    SVC_FN_BASELINE = {
+        "core/application/download_cache.py": 2,
+        "core/application/download_server_io.py": 6,
+        "core/application/download_smb.py": 2,
+    }
+    CROSS_PRIVATE_BASELINE: dict[str, int] = {
+        # P1b 清零：distributor 不再伸手进 bridge 私有成员（改走
+        # BridgeService.submit_offline / get_raw_url 公开面）。
+    }
+    GETATTR_PRIVATE_BASELINE = {
+        "core/application/queue/op_dispatch.py": 1,
+    }
+
+    @staticmethod
+    def _iter_core_py():
+        for py in sorted((ROOT / "core").rglob("*.py")):
+            if "__pycache__" not in py.parts:
+                yield py
+
+    @staticmethod
+    def _svc_fn_violations(tree: ast.Module) -> int:
+        """模块级函数以 svc 为首参且访问 svc._x（隐式 self 的游离方法）。"""
+        n = 0
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            args = [a.arg for a in node.args.posonlyargs + node.args.args]
+            if not args or args[0] != "svc":
+                continue
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, ast.Attribute)
+                    and sub.attr.startswith("_")
+                    and isinstance(sub.value, ast.Name)
+                    and sub.value.id == "svc"
+                ):
+                    n += 1
+                    break
+        return n
+
+    @staticmethod
+    def _cross_private_violations(tree: ast.Module) -> int:
+        """self.<collab>._private —— 伸手进协作者的私有成员。"""
+        n = 0
+        for sub in ast.walk(tree):
+            if (
+                isinstance(sub, ast.Attribute)
+                and sub.attr.startswith("_")
+                and isinstance(sub.value, ast.Attribute)
+                and not sub.value.attr.startswith("_")
+                and isinstance(sub.value.value, ast.Name)
+                and sub.value.value.id == "self"
+            ):
+                n += 1
+        return n
+
+    @staticmethod
+    def _getattr_private_violations(tree: ast.Module) -> int:
+        """getattr(<他对象>, "_literal") —— 属性名字符串化的私有访问，
+        常为迁就 test double 而污染生产代码形状。"""
+        n = 0
+        for sub in ast.walk(tree):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id == "getattr"
+                and len(sub.args) >= 2
+                and isinstance(sub.args[1], ast.Constant)
+                and isinstance(sub.args[1].value, str)
+                and sub.args[1].value.startswith("_")
+            ):
+                target = sub.args[0]
+                if isinstance(target, ast.Name) and target.id in ("self", "svc"):
+                    continue
+                if isinstance(target, ast.Attribute) and target.attr.startswith("_"):
+                    continue
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    continue  # self._own._inner 属自身内部，另议
+                n += 1
+        return n
+
+    @pytest.mark.parametrize("rule_name,getter,baseline", [
+        ("svc-taking 函数访问私有属性", _svc_fn_violations.__func__, SVC_FN_BASELINE),
+        ("跨对象私有属性访问", _cross_private_violations.__func__, CROSS_PRIVATE_BASELINE),
+        ("getattr 私有字符串访问", _getattr_private_violations.__func__, GETATTR_PRIVATE_BASELINE),
+    ])
+    def test_ratchet(self, rule_name, getter, baseline):
+        actual: dict[str, int] = {}
+        for py in self._iter_core_py():
+            rel = py.relative_to(ROOT).as_posix()
+            count = getter(ast.parse(py.read_text(encoding="utf-8")))
+            if count:
+                actual[rel] = count
+        grown = {
+            f: (baseline.get(f, 0), c)
+            for f, c in actual.items()
+            if c > baseline.get(f, 0)
+        }
+        assert not grown, (
+            f"{rule_name}：新增违例 (基线,实际)={grown}。"
+            "请沿概念边界抽取端口/协作者，而不是把方法拆成游离函数或伸手进"
+            "协作者私有成员（见 docs/架构总览.md 六边形纪律）。"
+        )
+        shrunk = {
+            f: (baseline[f], c)
+            for f, c in baseline.items()
+            if actual.get(f, 0) < c or c == 0
+        }
+        assert not shrunk, (
+            f"{rule_name}：违例已减少但基线未收紧 (基线,实际)={shrunk}，"
+            "把基线数字调低以固化成果。"
+        )
+
+
+class TestSecureFetchSingleImplementation:
+    """SSRF 抓取循环（手动重定向 + 逐跳复检）全仓只允许存在于
+    adapters/external/secure_fetch.py。
+
+    历史教训：同一安全逻辑曾有 4 份 async + 1 份 sync 拷贝，且 sync 份的
+    重定向语义与其他份分歧（直接拒绝 vs 逐跳复检）。任何加固要改多处，
+    漏一处即漏洞。download_proxy 的 socket 流式代理循环节点例外（不同
+    sink），已单列并锁定不再增长。
+    """
+
+    LOOP_PATTERNS = ("follow_redirects=False", "is_redirect")
+    MIGRATED_FILES = (
+        "core/application/transfer.py",
+        "core/application/files/download.py",
+        "core/application/ingest/video.py",
+        "core/application/download_server_io.py",
+    )
+
+    def test_migrated_sites_route_through_secure_fetch(self):
+        for rel in self.MIGRATED_FILES:
+            content = (ROOT / rel).read_text(encoding="utf-8")
+            for pat in self.LOOP_PATTERNS:
+                assert pat not in content, \
+                    f"{rel} 重新出现手写重定向循环 ({pat})——请调 secure_fetch"
+            if rel != "core/application/transfer.py":
+                assert "secure_fetch" in content, \
+                    f"{rel} 不再引用 secure_fetch——抓取被改回了本地实现？"
+
+    def test_only_secure_fetch_defines_the_hop_loop(self):
+        loops = []
+        for py in sorted((ROOT / "core" / "application").rglob("*.py")):
+            if "__pycache__" in py.parts:
+                continue
+            content = py.read_text(encoding="utf-8")
+            if "follow_redirects=False" in content:
+                loops.append(py.relative_to(ROOT).as_posix())
+        assert loops == ["core/application/download_proxy.py"], (
+            f"手写抓取循环节点增多: {loops}（新 sink 需求请扩展 secure_fetch）"
+        )

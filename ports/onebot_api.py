@@ -35,6 +35,7 @@ class OneBotApiPort(
     @abstractmethod
     def capability(self, action: str) -> CapabilityState:
         """Capability state for an extended API."""
+        ...
 
     @abstractmethod
     async def close(self) -> None: ...

@@ -102,6 +102,19 @@
     "description": "下载服务的访问令牌（留空 = 服务不启动）",
     "hint": "必填：留空时下载服务不会启动（fail-closed）。对外暴露下载服务时建议设置，生成的下载链接会自动附带此令牌"
   },
+  "download_cache_max_mb": {
+    "type": "int",
+    "default": 1024,
+    "group": "下载服务",
+    "description": "下载服务本地缓存的容量上限（MB，0 = 不限）",
+    "hint": "缓存避免同一文件被反复下载；超出上限时按最久未使用逐出。缓存位于临时目录，插件重载时会整体清空"
+  },
+  "download_cache_ttl_hours": {
+    "type": "int",
+    "default": 24,
+    "group": "下载服务",
+    "description": "缓存文件闲置多久后可被清理（小时，0 = 不按时间清理）"
+  },
   "openlist_enabled": {
     "type": "bool",
     "default": false,

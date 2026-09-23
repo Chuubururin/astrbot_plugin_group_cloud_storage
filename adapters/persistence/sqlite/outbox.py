@@ -9,7 +9,7 @@ from .state import StorePart
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .connection import ConnectionManager
+    pass
 
 LEDGER_BREAKPOINT_KINDS = ("convert_volumes", "video_upload", "netdisk_index")
 
@@ -64,8 +64,6 @@ def _now_ts() -> str:
 class OutboxMixin(StorePart):
     """Task ledger and operation flow operations."""
 
-    if TYPE_CHECKING:
-        _conn: "ConnectionManager"
 
     async def ledger_upsert(
         self,

@@ -57,9 +57,9 @@ def classify_error(exc: Exception) -> ErrorKind:
     if "timeout" in str(exc).lower():
         return ErrorKind.TIMEOUT
     # HTTP status-based classification
-    if hasattr(exc, "code") and exc.code in (404, 405):
+    if getattr(exc, "code", None) in (404, 405):
         return ErrorKind.UNSUPPORTED
-    if hasattr(exc, "status_code") and exc.status_code in (404, 405):
+    if getattr(exc, "status_code", None) in (404, 405):
         return ErrorKind.UNSUPPORTED
     return ErrorKind.REMOTE_ERROR
 
@@ -235,7 +235,7 @@ def _check_dns(
         # Blocking DNS resolution; callers should use asyncio.to_thread
         infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         for _family, _, _, _, sockaddr in infos:
-            ip_str = sockaddr[0]
+            ip_str = str(sockaddr[0])
             try:
                 ip = ipaddress.ip_address(ip_str)
                 _check_ip_address(ip, False, url, hint)
@@ -371,7 +371,7 @@ def resolve_and_pin_ip(
         ) from e
     pinned_ip: str | None = None
     for _family, _, _, _, sockaddr in infos:
-        ip_str = sockaddr[0]
+        ip_str = str(sockaddr[0])
         try:
             ip = ipaddress.ip_address(ip_str)
             _check_ip_address(ip, allow_private, url, hint)

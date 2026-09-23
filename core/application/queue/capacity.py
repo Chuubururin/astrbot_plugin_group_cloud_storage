@@ -28,7 +28,7 @@ class CapacityMixin:
                 limit_count=limit,
             )
         except Exception as e:
-            logger.debug(f"[group-scan] capacity refresh failed for {group_id}: {e}")
+            logger.warning(f"[group-scan] capacity refresh failed for {group_id}: {e}")
 
     async def capacity_of(self, group_id: str) -> tuple[int, int, int, int] | None:
         """Unified capacity policy (shared with the group scanner)."""

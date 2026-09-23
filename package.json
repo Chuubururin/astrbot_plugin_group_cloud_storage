@@ -2,10 +2,11 @@
   "name": "astrbot-plugin-group-cloud-storage-ui-tests",
   "private": true,
   "type": "module",
-  "scripts": {
-    "test:unit": "node --test pages/storage-ng/testing/unit/*.test.mjs"
+  "engines": {
+    "node": ">=20"
   },
-  "devDependencies": {
-    "@playwright/mcp": "^0.0.80"
+  "scripts": {
+    "test": "node --test pages/storage-ng/testing/unit/*.test.mjs",
+    "test:unit": "node --test pages/storage-ng/testing/unit/*.test.mjs"
   }
 }

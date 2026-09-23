@@ -44,7 +44,7 @@ class RuntimeAdapter:
         for key, value in components.items():
             setattr(self, key, value)
         self._runtime_kernel = RuntimeKernel(self.services)
-        required = ("store", "api", "sync", "queue", "scan", "ops", "transfer", "ingest", "dlserver", "gateway", "task_control", "services", "auto_scan_hours")
+        required = ("store", "api", "sync", "queue", "scan", "ops", "transfer", "ingest", "dlserver", "task_control", "services", "auto_scan_hours")
         missing = [key for key in required if not hasattr(self, key)]
         if missing:
             raise RuntimeError(f"bootstrap components missing: {missing}")

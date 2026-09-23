@@ -15,6 +15,8 @@ Observed NapCat response fields:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.domain.resource import (
     FileSystemInfo,
@@ -25,7 +27,17 @@ from core.domain.resource import (
 )
 
 
-class NapCatCoreMixin:
+class _CallHost:
+    """Static-only base: every mixin calls the adapter through ``_call``,
+    which is provided at runtime by OneBotApiBase (adapters/onebot/base.py).
+    Declared here so type checkers see the contract instead of 43 phantom
+    attribute errors."""
+
+    if TYPE_CHECKING:
+        async def _call(self, action: str, **params: Any) -> Any: ...
+
+
+class NapCatCoreMixin(_CallHost):
     """Core capabilities: login info, group list, group message sending."""
 
     async def get_login_info(self) -> dict:
@@ -41,7 +53,7 @@ class NapCatCoreMixin:
         )
 
 
-class NapCatGroupMixin:
+class NapCatGroupMixin(_CallHost):
     """Group info queries: group details and member lists."""
 
     async def get_group_info(self, group_id: str, no_cache: bool = False) -> dict:
@@ -98,7 +110,7 @@ class NapCatGroupMixin:
         await self._call("delete_essence_msg", message_id=message_id)
 
 
-class NapCatGroupExtendsMixin:
+class NapCatGroupExtendsMixin(_CallHost):
     """Group extension operations: join options, group remark, and group
     album image upload."""
 
@@ -120,7 +132,7 @@ class NapCatGroupExtendsMixin:
         )
 
 
-class NapCatFileMixin:
+class NapCatFileMixin(_CallHost):
     """Group file operations: file listing, capacity info, and direct-link
     retrieval."""
 
@@ -166,7 +178,7 @@ class NapCatFileMixin:
     async def get_group_file_url(
         self, group_id: str, file_id: str, busid: int | None = None, name: str = ""
     ) -> str:
-        params = {"group_id": group_id, "file_id": file_id}
+        params: dict[str, object] = {"group_id": group_id, "file_id": file_id}
         if busid is not None:
             params["busid"] = busid
         data = await self._call("get_group_file_url", **params)
@@ -199,7 +211,7 @@ class NapCatFileMixin:
         await self._call("upload_group_file", **params)
 
     async def delete_group_file(self, group_id: str, file_id: str, busid: int | None = None) -> None:
-        params = {"group_id": group_id, "file_id": file_id}
+        params: dict[str, object] = {"group_id": group_id, "file_id": file_id}
         if busid is not None:
             params["busid"] = busid
         await self._call("delete_group_file", **params)
@@ -274,7 +286,7 @@ class NapCatFileMixin:
             ) or {}
 
 
-class NapCatGoCqFileMixin:
+class NapCatGoCqFileMixin(_CallHost):
     """Go-CQHTTP file operations: rename, move, and folder creation."""
 
     async def rename_group_file(
@@ -308,7 +320,7 @@ class NapCatGoCqFileMixin:
         )
 
 
-class NapCatAlbumMixin:
+class NapCatAlbumMixin(_CallHost):
     """Group album operations: album list and album media list."""
 
     async def get_qun_album_list(self, group_id: str) -> list:

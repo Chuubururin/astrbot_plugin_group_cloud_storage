@@ -4,15 +4,22 @@ Event-handling logic lives here to keep main.py small.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from core.log import logger
+
+if TYPE_CHECKING:
+    from core.application.queue.op_queue import OpQueue
+    from core.application.sync.resource_sync import ResourceSyncService
+    from core.platform import PlatformBotResolver
 
 
 async def handle_group_upload_event(
-    raw: dict,
+    raw: dict[str, Any],
     *,
-    sync_service,
-    queue,
-    capacity_refresher,
+    sync_service: "ResourceSyncService",
+    queue: "OpQueue",
+    capacity_refresher: Any,
     auto_index_enabled: bool = True,
 ) -> bool:
     """Handle a group_upload event: index the uploaded file and refresh capacity.
@@ -41,9 +48,9 @@ async def handle_group_upload_event(
 
 
 async def handle_new_bot_discovered(
-    evt_bot,
-    resolver,
-    queue,
+    evt_bot: Any,
+    resolver: "PlatformBotResolver",
+    queue: "OpQueue",
 ) -> None:
     """Handle a newly discovered bot: register it and trigger an incremental scan.
 
@@ -61,16 +68,16 @@ async def handle_new_bot_discovered(
 
 
 async def handle_aiocqhttp_event(
-    event,
+    event: Any,
     *,
-    config,
-    resolver,
-    platform_bots: list,
-    queue,
-    sync_service,
-    dispatch,
-    maybe_submit_scan,
-    bot_scope,
+    config: Any,
+    resolver: "PlatformBotResolver",
+    platform_bots: list[Any],
+    queue: "OpQueue",
+    sync_service: "ResourceSyncService",
+    dispatch: Any,
+    maybe_submit_scan: Any,
+    bot_scope: Any,
 ) -> None:
     """Receive all aiocqhttp platform events (including notices); register
     group_upload events into the index.
@@ -131,8 +138,8 @@ async def handle_aiocqhttp_event(
 async def on_account_resolved(
     account_id: str,
     *,
-    resolver,
-    store,
+    resolver: "PlatformBotResolver",
+    store: Any,
 ) -> None:
     """Callback after a successful scan: register the online account and set
     only that account's groups to managed=1.

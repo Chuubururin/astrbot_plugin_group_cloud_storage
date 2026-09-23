@@ -26,7 +26,7 @@ import asyncio
 import time
 import uuid
 from collections import deque
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from ports.limiter import NullLimiter, RateLimiter
 
@@ -46,7 +46,7 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         limiter: RateLimiter | None = None,
         high_priority: set[str] | None = None,
         slots: int = 4,
-        ledger=None,  # task ledger hooks (on_state/on_op, see TaskControlService)
+        ledger: Any = None,  # task ledger hooks (on_state/on_op, see TaskControlService)
     ):
         self._run_handler = run_handler
         self._high_priority = (
@@ -81,14 +81,12 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         self._running: dict[str, Op] = {}
         self._recent: deque[dict] = deque(maxlen=20)
         self._lock = asyncio.Lock()
-        self._ledger = ledger  # task ledger (on_state/on_op); None = no ledger writes
+        self._ledger: Any = ledger  # task ledger (on_state/on_op); None = no ledger writes
 
     async def submit(
         self, kind: str, target: str = "", payload: dict | None = None, account=None
     ) -> str:
-        await (
-            self.start()
-        )  # idempotent: workers are resident, so every submit is consumed
+        await self.start()  # idempotent: workers are resident, so every submit is consumed
         op = Op(
             task_id=uuid.uuid4().hex[:12],
             kind=kind,
@@ -119,7 +117,7 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         )
         return op.task_id
 
-    def has_pending(self, kind: str, payload_key: str, payload_value) -> bool:
+    def has_pending(self, kind: str, payload_key: str, payload_value: Any) -> bool:
         """True if a queued/running op of ``kind`` already carries
         payload[payload_key] == payload_value (dedup for auto-submits)."""
         for op in self._ops_by_id.values():

@@ -22,7 +22,7 @@ from core.application.queue.op import DEFAULT_HIGH_PRIORITY  # noqa: E402
 
 EXPECTED_KEYS = {
     "store", "api", "perm", "sync", "limiter", "queue", "scan", "ops",
-    "transfer", "ingest", "dlserver", "gateway", "bridge", "openlist_client",
+    "transfer", "ingest", "dlserver", "bridge", "openlist_client",
     "task_control", "services", "auto_scan_hours", "database_admin",
 }
 

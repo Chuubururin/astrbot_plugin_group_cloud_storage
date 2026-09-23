@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from core.application.download_server import DownloadServerService
     from core.application.files.converter import ConverterService
     from core.application.files.service import FileOpsService
-    from core.application.gateway import StorageGateway
     from core.application.ingest.service import CloudIngestService
     from core.application.netdisk import NetdiskService
     from core.application.queue.op_queue import OpQueue
@@ -52,7 +51,6 @@ class Services:
     ingest: "CloudIngestService | None" = None
     transfer: "TransferService | None" = None
     dlserver: "DownloadServerService | None" = None
-    gateway: "StorageGateway | None" = None
     bridge: "BridgeService | None" = None  # OpenList bridge 
     netdisk: "NetdiskService | None" = None  # Netdisk browse/registration/indexing
     task_control: "TaskControlService | None" = None  # Task records and control

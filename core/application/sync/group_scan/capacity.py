@@ -1,13 +1,20 @@
 """Scan-side capacity policy (delegates to the shared implementation)."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from core.application.common import compute_capacity
+
+if TYPE_CHECKING:
+    from ports.onebot_api import OneBotApiPort
 
 
 class CapacityMixin:
     """Capacity calculation and refresh methods."""
 
-    async def _capacity_of(self, group_id: str, api=None) -> tuple[int, int, int, int] | None:
+    async def _capacity_of(
+        self, group_id: str, api: "OneBotApiPort | None" = None
+    ) -> tuple[int, int, int, int] | None:
         """Single capacity standard (cloud first, local index fallback).
 
         fs success with total>0 -> returns the 4-tuple.

@@ -21,13 +21,17 @@ from ports.onebot_api import OneBotApiPort
 
 
 class NapCatApiAdapter(
-    NapCatCoreMixin,
+    NapCatCoreMixin,        # MRO leftmost: call channel / rate limiting
     NapCatGroupMixin,
     NapCatGroupExtendsMixin,
     NapCatFileMixin,
     NapCatGoCqFileMixin,
     NapCatAlbumMixin,
-    NapCatBase,
-    OneBotApiPort,
+    NapCatBase,             # base class (shared state, capability probing)
+    OneBotApiPort,          # ABC rightmost: interface contract
 ):
-    """Aggregated assembly: base class plus the six capability mixins."""
+    """Aggregated assembly: base class plus the six capability mixins.
+
+    MRO resolution order (left = higher priority on method conflict):
+    core > group > group-extends > file > gocq-file > album > base > port.
+    """

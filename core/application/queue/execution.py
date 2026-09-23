@@ -12,15 +12,9 @@ import asyncio
 import time
 from core.domain.enums import OneBotApiError, OneBotErrorKind
 from core.log import logger
+from core.task_cancel import cancel_tasks
 
 from .op import BULK_KINDS, Op, OpCancelError, OpPausedError
-
-# ``OpQueue.shutdown()`` 重发取消的切片上限（秒）。
-# 每次等待都不得超过它，否则一个"扛住第一次取消"的 worker 会独占整个
-# 宽限期，使重发取消那一轮因 remaining <= 0 而一次都不执行（实测过）。
-# 0.05 的取舍：快路径（worker 都停在 queue.get()）下 asyncio.wait 会在
-# worker 一结束就返回，切片刻不产生额外等待；慢路径下每秒可重发约 20 次。
-_CANCEL_SLICE = 0.05
 
 
 class ExecutionMixin:
@@ -43,9 +37,11 @@ class ExecutionMixin:
         except ValueError:
             pass
         if "hi" in name:
-            new = asyncio.create_task(self._worker_loop_hi(), name="op-queue-hi")
+            new = asyncio.create_task(
+                self._worker_loop(self._q_hi, high=True), name="op-queue-hi"
+            )
         else:
-            new = asyncio.create_task(self._worker_loop(), name="op-queue")
+            new = asyncio.create_task(self._worker_loop(self._q), name="op-queue")
         self._workers.append(new)
         new.add_done_callback(self._respawn_worker)
 
@@ -59,64 +55,35 @@ class ExecutionMixin:
         for _ in range(
             hi - len([t for t in self._workers if t.get_name() == "op-queue-hi"])
         ):
-            t = asyncio.create_task(self._worker_loop_hi(), name="op-queue-hi")
+            t = asyncio.create_task(
+                self._worker_loop(self._q_hi, high=True), name="op-queue-hi"
+            )
             self._workers.append(t)
             t.add_done_callback(self._respawn_worker)
         for _ in range(
             normal - len([t for t in self._workers if t.get_name() == "op-queue"])
         ):
-            t = asyncio.create_task(self._worker_loop(), name="op-queue")
+            t = asyncio.create_task(self._worker_loop(self._q), name="op-queue")
             self._workers.append(t)
             t.add_done_callback(self._respawn_worker)
 
     async def shutdown(self, timeout: float = 1.0) -> None:
         """Stop the worker pool -- bounded, and cheap in the common case.
 
-        Two traps this deliberately avoids, both of which cost real time:
-
-        * ``await asyncio.sleep(timeout)`` as the grace period.  It never
-          early-exits, so every teardown paid the full grace even when the
-          workers were already dead microseconds later (measured: exactly
-          1.0 s per shutdown, which turned a 77 s suite into 326 s and broke
-          timing assertions in tests/contract).
-        * ``await asyncio.wait_for(w, ...)`` as the drain.  On CPython <= 3.11
-          the timeout path is ``_cancel_and_wait`` -> ``w.cancel()`` followed
-          by ``await waiter``, i.e. it waits for the worker to *finish* after
-          cancelling it.  A worker that absorbs the cancellation never
-          finishes, so wait_for is not a bound at all.  (3.12+ reimplemented
-          wait_for on top of ``timeouts.timeout`` and lost this hole, which is
-          why the hang reproduced in CI on 3.10 but not locally on 3.13.)
-
-        ``asyncio.wait`` returns as soon as the workers are done and still
-        honours the deadline, so a deadline plus re-cancel is a real bound.
+        The bound itself lives in ``core.task_cancel.cancel_tasks`` (shared with
+        ``RuntimeKernel.cancel_all``): deadline + ``asyncio.wait`` + re-cancel.
+        Neither ``asyncio.sleep(timeout)`` (never early-exits) nor
+        ``asyncio.wait_for`` (not a bound on CPython <= 3.11) is a real bound --
+        see that module's docstring for the measurements and the CI-vs-local
+        reproduction.
         """
         self._shutting_down = True
         workers = list(self._workers)
         self._workers = []
         if not workers:
             return
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-
-        # Round 1: a worker parked in queue.get() dies here.  A worker that is
-        # mid-handler only *absorbs* the flag (it is consumed the next time the
-        # handler suspends), so survivors need another round.
+        await cancel_tasks(workers, timeout=timeout, label="queue")
         for w in workers:
-            w.cancel()
-        await asyncio.wait(workers, timeout=min(timeout, _CANCEL_SLICE))
-
-        # Round 2..n: re-cancel whatever is still alive until the deadline.
-        for w in workers:
-            while not w.done():
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    logger.warning(
-                        f"[queue] worker {w.get_name()} survived cancellation; "
-                        f"abandoning it after {timeout}s"
-                    )
-                    break
-                w.cancel()
-                await asyncio.wait({w}, timeout=min(remaining, _CANCEL_SLICE))
             if w.done() and not w.cancelled():
                 exc = w.exception()
                 if exc is not None:
@@ -130,11 +97,14 @@ class ExecutionMixin:
 
     # ---------- Execution loop ----------
 
-    async def _worker_loop_hi(self) -> None:
+    async def _worker_loop(self, q: asyncio.Queue, high: bool = False) -> None:
+        """Single consumption loop shared by both pools (the former
+        _worker_loop_hi duplicate differed only in queue + priority). Task
+        names stay "op-queue-hi"/"op-queue" for _respawn_worker/start()."""
         while True:
-            op = await self._q_hi.get()
+            op = await q.get()
             if self._shutting_down:
-                self._q_hi.task_done()
+                q.task_done()
                 return
             if op.task_id in self._paused:  # pause hold: wait for resume (ledger records paused)
                 if op.cancel or op.task_id in self._cancelled:
@@ -145,42 +115,47 @@ class ExecutionMixin:
                     self._paused.pop(op.task_id, None)
                     self._cancelled.discard(op.task_id)
                     self._ops_by_id.pop(op.task_id, None)
-                    self._push({"type": "cancelled", "task_id": op.task_id, "kind": op.kind, "target": op.target, "ts": time.time()})
-                    self._record(op, "cancelled")
-                    await self._ledger_state(op, "cancelled")
+                    await self._transition(
+                        op, "cancelled", record="cancelled", ledger="cancelled"
+                    )
                     continue
                 self._paused[op.task_id] = op
+                # Ledger written BEFORE the broadcast, and this paused event
+                # carries no target and no _recent record -- unlike the
+                # OpPausedError transition in _execute (kept as-is).
                 await self._ledger_state(op, "paused")
                 self._push({"type": "paused", "task_id": op.task_id, "kind": op.kind, "ts": time.time()})
                 continue
             self._pending.discard(op.task_id)
-            await self._execute(op, high=True)
+            await self._execute(op, high=high)
 
-    async def _worker_loop(self) -> None:
-        while True:
-            op = await self._q.get()
-            if self._shutting_down:
-                self._q.task_done()
-                return
-            if op.task_id in self._paused:  # pause hold: wait for resume (ledger records paused)
-                if op.cancel or op.task_id in self._cancelled:
-                    # Interrupted between pause_task() and this dequeue: the
-                    # queued-pause path relies on the worker to finalize the
-                    # ledger; _execute is skipped here, so write "cancelled"
-                    # now (re-writing "paused" would resurrect a dead task).
-                    self._paused.pop(op.task_id, None)
-                    self._cancelled.discard(op.task_id)
-                    self._ops_by_id.pop(op.task_id, None)
-                    self._push({"type": "cancelled", "task_id": op.task_id, "kind": op.kind, "target": op.target, "ts": time.time()})
-                    self._record(op, "cancelled")
-                    await self._ledger_state(op, "cancelled")
-                    continue
-                self._paused[op.task_id] = op
-                await self._ledger_state(op, "paused")
-                self._push({"type": "paused", "task_id": op.task_id, "kind": op.kind, "ts": time.time()})
-                continue
-            self._pending.discard(op.task_id)
-            await self._execute(op, high=False)
+    async def _transition(
+        self,
+        op: Op,
+        event_type: str,
+        *,
+        target: bool = True,
+        record: str | None = None,
+        ledger: str | None = None,
+        error: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """One state transition: SSE push + optional _recent record + optional
+        ledger write, in that order. ``target=False`` matches the historical
+        no-target event shapes (OpCancelError/OpPausedError/retry/failed);
+        per-branch extras go through ``extra`` so payloads stay byte-identical.
+        """
+        event = {"type": event_type, "task_id": op.task_id, "kind": op.kind}
+        if target:
+            event["target"] = op.target
+        if extra:
+            event.update(extra)
+        event["ts"] = time.time()
+        self._push(event)
+        if record is not None:
+            self._record(op, record, error)
+        if ledger is not None:
+            await self._ledger_state(op, ledger, error)
 
     async def _execute(self, op: Op, high: bool) -> None:
         """Execute a single op (shared by both worker pools; rate limiting is
@@ -213,28 +188,11 @@ class ExecutionMixin:
             else:
                 await self._limiter.acquire(account=getattr(op, "account", None))
             if op.cancel:  # cancelled while waiting on the rate limiter -> skip
-                self._push(
-                    {
-                        "type": "cancelled",
-                        "task_id": op.task_id,
-                        "kind": op.kind,
-                        "target": op.target,
-                        "ts": time.time(),
-                    }
+                await self._transition(
+                    op, "cancelled", record="cancelled", ledger="cancelled"
                 )
-                self._record(op, "cancelled")
-                await self._ledger_state(op, "cancelled")
                 return
-            self._push(
-                {
-                    "type": "started",
-                    "task_id": op.task_id,
-                    "kind": op.kind,
-                    "target": op.target,
-                    "ts": time.time(),
-                }
-            )
-            await self._ledger_state(op, "running")
+            await self._transition(op, "started", ledger="running")
             await self._run_handler(op)
             if op.cancel:
                 # Cancelled while running and the handler finished without
@@ -243,53 +201,31 @@ class ExecutionMixin:
                 # request was explicit, so converge the ledger to cancelled
                 # instead of reporting "done"/"ok" next to an "interrupted"
                 # response (H2: a checkpoint-less kind used to report done).
-                self._push(
-                    {
-                        "type": "cancelled",
-                        "task_id": op.task_id,
-                        "kind": op.kind,
-                        "target": op.target,
-                        "ts": time.time(),
-                    }
+                await self._transition(
+                    op, "cancelled", record="cancelled", ledger="cancelled"
                 )
-                self._record(op, "cancelled")
-                await self._ledger_state(op, "cancelled")
             else:
-                self._push(
-                    {
-                        "type": "done",
-                        "task_id": op.task_id,
-                        "kind": op.kind,
-                        "target": op.target,
-                        "ts": time.time(),
-                    }
-                )
-                self._record(op, "ok")
-                await self._ledger_state(op, "done")
+                await self._transition(op, "done", record="ok", ledger="done")
         except OpCancelError:
-            self._push(
-                {
-                    "type": "cancelled",
-                    "task_id": op.task_id,
-                    "kind": op.kind,
-                    "ts": time.time(),
-                }
+            await self._transition(
+                op,
+                "cancelled",
+                target=False,
+                record="cancelled",
+                ledger="cancelled",
             )
-            self._record(op, "cancelled")
-            await self._ledger_state(op, "cancelled")
         except OpPausedError:
             # Cooperative pause: hold until resumed (on resume the handler is
-            # re-entered from the start, i.e. the task runs again)
-            self._push(
-                {
-                    "type": "paused",
-                    "task_id": op.task_id,
-                    "kind": op.kind,
-                    "ts": time.time(),
-                }
-            )
-            self._record(op, "paused")
-            await self._ledger_state(op, "paused")
+            # re-entered from the start, i.e. the task runs again).
+            #
+            # Register the hold BEFORE the ledger "paused" write. That write is
+            # what makes the pause observable to resume_task's caller (the page
+            # and tests poll the ledger); if _paused[id] were set only after it,
+            # a resume landing inside the window would miss the
+            # `task_id in self._paused` branch and fall through to the "running,
+            # not yet at a checkpoint" path -- which merely clears op.pause and
+            # never requeues, parking the task in "paused" forever. This mirrors
+            # the ordering the queued-pause hold already uses in _worker_loop.
             self._paused[op.task_id] = op  # preserves retry count/error; re-entered on resume
             # M2: resume re-enters the handler from its first line, so arm the
             # replay guard here. op.retries must stay untouched: it only counts
@@ -299,6 +235,9 @@ class ExecutionMixin:
             # volume segment skip) redo their side effects after pause -> resume.
             op.replayed = True
             keep_index = True
+            await self._transition(
+                op, "paused", target=False, record="paused", ledger="paused"
+            )
             return
         except asyncio.CancelledError:
             raise
@@ -325,17 +264,14 @@ class ExecutionMixin:
                     f"[op-queue] {op.kind}/{op.task_id} failed ({e}), "
                     f"retry {op.retries}/{self._max_retries} after {backoff}s"
                 )
-                self._push(
-                    {
-                        "type": "retry",
-                        "task_id": op.task_id,
-                        "kind": op.kind,
-                        "retries": op.retries,
-                        "backoff": backoff,
-                        "ts": time.time(),
-                    }
+                await self._transition(
+                    op,
+                    "retry",
+                    target=False,
+                    ledger="retry",
+                    error=str(e),
+                    extra={"retries": op.retries, "backoff": backoff},
                 )
-                await self._ledger_state(op, "retry", str(e))
                 # Release resources BEFORE backoff sleep so other workers
                 # can acquire them during the cooldown period
                 if bulk:
@@ -359,17 +295,15 @@ class ExecutionMixin:
                 logger.error(
                     f"[op-queue] {op.kind}/{op.task_id} failed permanently: {e}"
                 )
-                self._push(
-                    {
-                        "type": "failed",
-                        "task_id": op.task_id,
-                        "kind": op.kind,
-                        "error": str(e),
-                        "ts": time.time(),
-                    }
+                await self._transition(
+                    op,
+                    "failed",
+                    target=False,
+                    record="failed",
+                    ledger="failed",
+                    error=str(e),
+                    extra={"error": str(e)},
                 )
-                self._record(op, "failed", str(e))
-                await self._ledger_state(op, "failed", str(e))
         finally:
             if bulk and not released:
                 self._bulk.release()
@@ -391,17 +325,9 @@ class ExecutionMixin:
         if op.task_id not in self._ops_by_id:
             return
         self._ops_by_id.pop(op.task_id, None)
-        self._push(
-            {
-                "type": "cancelled",
-                "task_id": op.task_id,
-                "kind": op.kind,
-                "target": op.target,
-                "ts": time.time(),
-            }
+        await self._transition(
+            op, "cancelled", record="cancelled", ledger="cancelled"
         )
-        self._record(op, "cancelled")
-        await self._ledger_state(op, "cancelled")
 
     def _record(self, op: Op, state: str, error: str | None = None) -> None:
         self._recent.appendleft(

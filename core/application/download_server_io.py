@@ -25,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 
+from core.application.download_cache import maybe_sweep
 from core.application.download_proxy import _content_disposition
 from core.log import logger
 
@@ -225,12 +226,21 @@ def materialize_to_cache(svc, info: dict) -> Path:
     """
     cache = cache_path(svc, info)
     if _cache_is_complete(cache, info):
+        logger.debug(f"[dlserver] cache hit: {cache.name}")
         return cache
+    # Housekeeping on the miss path: the cache root used to grow until the
+    # next plugin reload (shutdown()'s rmtree was the only cleanup). Never
+    # let it break the download itself.
+    try:
+        maybe_sweep(svc)
+    except Exception as e:  # housekeeping must never break a download
+        logger.debug(f"[dlserver] cache sweep failed: {e}")
     with _cache_lock(svc, str(cache)):
         # Double check: a concurrent opener may have filled the cache while
         # this thread waited for the lock, in which case it already did the
         # work and reclaimed its own recon_* source.
         if _cache_is_complete(cache, info):
+            logger.debug(f"[dlserver] cache hit: {cache.name}")
             return cache
         src, _ = svc._run_in_loop(svc._download_info(info["group"], info["id"]))
         sp = Path(src)
@@ -244,7 +254,7 @@ def materialize_to_cache(svc, info: dict) -> Path:
                 # per failed copy (L6).
                 cleanup_recon(sp)
         else:
-            _stream_url_into_cache(svc, src, cache)
+            _stream_url_into_cache(svc, src, cache, info)
     return cache
 
 
@@ -273,31 +283,30 @@ def _copy_into_cache(sp: Path, cache: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _stream_url_into_cache(svc, src: str, cache: Path) -> None:
-    """Cloud direct link (from the cloud API) streamed to the cache file;
-    validate + refuse redirects like every other outbound fetch (SSRF)."""
-    import httpx as _hx
+def _stream_url_into_cache(svc, src: str, cache: Path, info: dict) -> None:
+    """Cloud direct link (from the cloud API) streamed to the cache file.
 
-    def _fetch() -> None:
-        from adapters.external.base import assert_fetch_url_allowed
+    Delegates to the plugin-wide secure_fetch implementation (sync twin --
+    this runs on an SFTP connection thread): per-hop SSRF re-validation
+    replaces the old single pre-check that refused redirects outright, and
+    the body is capped near the expected resource size instead of unbounded.
+    """
+    from adapters.external.secure_fetch import FetchPolicy, fetch_to_file_sync
 
-        assert_fetch_url_allowed(src, allow_private=False)
-        tmp = cache.with_name(cache.name + f".{uuid.uuid4().hex[:8]}.part")
-        try:
-            with _hx.stream(
-                "GET", src, follow_redirects=False, timeout=180.0
-            ) as resp:
-                if resp.is_redirect:
-                    raise ValueError("download server: redirect blocked")
-                resp.raise_for_status()
-                with tmp.open("wb") as out:
-                    for chunk in resp.iter_bytes(chunk_size=_STREAM_CHUNK):
-                        out.write(chunk)
-            os.replace(tmp, cache)
-        finally:
-            tmp.unlink(missing_ok=True)
-
-    svc._run_in_loop(asyncio.to_thread(_fetch))
+    expected = int(info.get("size") or 0)
+    # +1 MiB slack: tolerate small metadata drift without breaking a
+    # legitimate download; unknown size falls back to the QQ group file
+    # ceiling (~10 GB).
+    max_bytes = expected + (1 << 20) if expected > 0 else 10 * 1024**3
+    svc._run_in_loop(
+        asyncio.to_thread(
+            fetch_to_file_sync,
+            src,
+            cache,
+            FetchPolicy(max_bytes=max_bytes, timeout=180.0, allow_private=False),
+            site="download_server",
+        )
+    )
 
 
 # ---------- SFTP (paramiko virtual filesystem) ----------

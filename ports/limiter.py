@@ -32,7 +32,7 @@ class NullLimiter:
     ) -> None:
         return None
 
-    def keys(self) -> list:
+    def keys(self) -> list[str]:
         """State query surface aligned with KeyedLimiter (no accounts = empty list)."""
         return []
 

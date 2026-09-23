@@ -10,7 +10,6 @@ import uuid
 import time
 from pathlib import Path
 
-import httpx
 
 from core.domain.enums import OneBotApiError, OneBotErrorKind, ResourceType
 from core.domain.resource import Resource
@@ -149,59 +148,22 @@ class VideoMixin:
         if dest.parent != base or dest.name != f"{safe_key.group(0)}.mp4":
             raise ValueError("invalid video preview destination")
 
-        # BUG-21 / SSRF hardening: every hop is re-validated and DNS-pinned
-        # against loopback/private/reserved ranges (same mechanism as the
-        # transfer pipeline); manual redirect loop so a 302 cannot bypass
-        # the per-hop checks.
-        timeout = self.fetch_timeout
-        # Atomic publish: two concurrent previews for the same video write
-        # unique temp files, then one rename wins — interleaved writes into
-        # the shared cache name would leave a corrupt mp4 that the
-        # "already cached" check would reuse forever.
-        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
-        try:
-            async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
-                for hop in range(6):  # 1 direct request + up to 5 redirects
-                    pinned_url, original_host = await asyncio.to_thread(
-                        self._resolve_fetch_url, url
-                    )
-                    headers = {}
-                    if original_host:
-                        headers["Host"] = original_host
-                    async with client.stream("GET", pinned_url, headers=headers) as resp:
-                        if resp.is_redirect and resp.has_redirect_location:
-                            if hop == 5:
-                                raise ValueError("_download_video: redirects exceeded (5)")
-                            from urllib.parse import urljoin
+        # BUG-21 / SSRF hardening: per-hop re-validation + DNS pinning,
+        # mid-stream size cap and atomic .part publish all live in the
+        # plugin-wide secure_fetch single implementation.
+        from adapters.external.secure_fetch import FetchPolicy, fetch_to_file
 
-                            url = urljoin(url, resp.headers["location"])
-                            continue
-                        resp.raise_for_status()
-                        total = 0
-                        with tmp.open("wb") as f:
-                            async for chunk in resp.aiter_bytes():
-                                total += len(chunk)
-                                if total > VIDEO_PREVIEW_MAX_BYTES:
-                                    raise ValueError("视频超过预览大小上限（300MB）")
-                                f.write(chunk)
-                        break
-            tmp.replace(dest)
-        finally:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
+        await fetch_to_file(
+            url,
+            dest,
+            FetchPolicy(
+                max_bytes=VIDEO_PREVIEW_MAX_BYTES,
+                timeout=self.fetch_timeout,
+                allow_private=False,
+            ),
+            site="_download_video",
+        )
         return dest
-
-    @staticmethod
-    def _resolve_fetch_url(url: str) -> tuple[str, str | None]:
-        """SSRF validation + DNS pinning (http pins the IP; https keeps the
-        hostname for TLS certificate binding — see resolve_and_pin_ip).
-        Blocking; invoke via to_thread."""
-        from adapters.external.base import resolve_and_pin_ip
-
-        try:
-            return resolve_and_pin_ip(url, allow_private=False)
-        except Exception as e:
-            raise ValueError(f"_download_video: url rejected: {e}") from e
 
     async def _run_ffmpeg(self, args: list[str], timeout: int = 600) -> None:
         """Run an ffmpeg subprocess via to_thread (non-blocking); raises a

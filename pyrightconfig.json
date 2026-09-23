@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "typeCheckingMode": "basic",
+  "include": ["adapters", "ports"],
+  "exclude": ["**/__pycache__", "data", "dist", "node_modules", "out", "tests"],
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "pythonVersion": "3.10",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ]
+}

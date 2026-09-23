@@ -7,7 +7,6 @@ Index maintenance is handled by the store layer (SQLite FTS5); see SearchKV.
 
 from __future__ import annotations
 
-
 from ports.meta_store import MetaStorePort
 
 

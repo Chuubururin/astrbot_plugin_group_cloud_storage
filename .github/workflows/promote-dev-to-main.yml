@@ -100,10 +100,11 @@ jobs:
             # gh pr checks 对任何 pending 检查都返回非零——包括 promote 自身
             # （本循环就跑在 promote job 里，它始终 pending，按整体退出码判断
             # 会永远等下去）。所以不看退出码，只按检查名逐行判断：只认
-            # ci.yml 的四个必过检查，promote 行与后续轮次的 stale 行忽略。
+            # ci.yml 的五个必过检查（含 typecheck/pyright），promote 行与后续
+            # 轮次的 stale 行忽略。
             out="$(gh pr checks "$number" 2>&1 || true)"
             echo "$out"
-            relevant="$(echo "$out" | grep -E '^(lint|python-tests|frontend-tests|contract-checks)\s' || true)"
+            relevant="$(echo "$out" | grep -E '^(lint|python-tests|frontend-tests|contract-checks|typecheck)\s' || true)"
             latest="$(echo "$relevant" | awk -F'\t' '!seen[$1]++' || true)"
             failed="$(echo "$latest" | grep -E '\bfail\b' || true)"
             pending="$(echo "$latest" | grep -E '\bpending\b' || true)"
@@ -112,8 +113,8 @@ jobs:
               echo "::error::PR #$number 存在失败检查：$failed"
               exit 1
             fi
-            if [[ "$all_pass" == "4" && -z "$pending" ]]; then
-              echo "四个必过检查全部通过"
+            if [[ "$all_pass" == "5" && -z "$pending" ]]; then
+              echo "五个必过检查全部通过"
               exit 0
             fi
             if (( $(date +%s) > deadline )); then

@@ -32,7 +32,6 @@ from core.application.bridge import BridgeService
 from core.application.netdisk import NetdiskService
 from core.application.download_server import DownloadServerService
 from core.application.database import DatabaseAdminService
-from core.application.gateway import StorageGateway
 from adapters.external.openlist import OpenListClient
 
 
@@ -140,14 +139,6 @@ def build_components(
         config=cfg,
         download_info=ops.download_info,
     )
-    gateway = StorageGateway(
-        cloud=api,
-        local=store,
-        ingest=ingest,
-        transfer=transfer,
-        dlserver=dlserver,
-        fileops=ops,
-    )
 
     # OpenList bridge: only build if enabled.
     #
@@ -221,7 +212,6 @@ def build_components(
         ingest=ingest,
         transfer=transfer,
         dlserver=dlserver,
-        gateway=gateway,
         bridge=bridge,
         netdisk=netdisk,
         task_control=task_control,
@@ -256,7 +246,6 @@ def build_components(
         "transfer": transfer,
         "ingest": ingest,
         "dlserver": dlserver,
-        "gateway": gateway,
         "bridge": bridge,
         "openlist_client": openlist_client,
         "task_control": task_control,

@@ -8,7 +8,7 @@ import sqlite3
 
 from core.log import logger
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 MIGRATIONS: dict[int, list[str]] = {
     # Initial five tables (resources/snapshots/sync_logs/groups/schema_version)
@@ -387,6 +387,19 @@ MIGRATIONS: dict[int, list[str]] = {
         "  WHERE rn = 1);",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_res_logical "
         "ON resources(group_id, type, logical_key) WHERE status != 'deleted';",
+    ],
+    # v17-25 pre-created a set of tables whose code path never shipped:
+    # scan_claims (claim_scan/release_scan_claim had zero callers),
+    # fts_dirty_queue/fts_state (the FTS is trigger-synchronous; no async
+    # worker or set_fts_mode was ever implemented) and outbox_events
+    # (SSE pushes are in-memory; the persistent ledger is op_ledger).
+    # Drop them so sqlite_master only describes the schema in use --
+    # anti-resurrection is pinned by tests/unit/test_schema_v30_dead_tables.py.
+    30: [
+        "DROP TABLE IF EXISTS scan_claims;",
+        "DROP TABLE IF EXISTS fts_dirty_queue;",
+        "DROP TABLE IF EXISTS fts_state;",
+        "DROP TABLE IF EXISTS outbox_events;",
     ],
 }
 
