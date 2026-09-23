@@ -4,17 +4,13 @@
  * The frame budget is charged in weighted scheduling units, so the unit counts
  * and the real DOM-mutation counts are reported separately:
  *
- * | metric                        | meaning                                    |
- * |-------------------------------|--------------------------------------------|
- * | maxFrameWrites                | *weighted scheduling units* in the worst    |
- * |                               | frame (one unit rebuilds one row; a         |
- * |                               | reparent move costs MOVE_UNITS, not one)    |
- * | lastMoves / maxMoves          | moves the LIS plan asked for                |
- * | mutations / maxFrameMutations | real DOM mutations actually performed       |
- * | lastMutations                 | real writes the last settled render did     |
- * | lastRewrittenRows             | rows created or replaced                    |
- * | lastFramesUsed                | how many frames that render spanned         |
- * | violations                    | frames whose weighted units passed the cap  |
+ * - `maxFrameWrites` - weighted scheduling units in the worst frame
+ * - `lastMoves` / `maxMoves` - moves the LIS plan asked for
+ * - `mutations` / `maxFrameMutations` - real DOM mutations performed
+ * - `lastMutations` - real writes the last settled render did
+ * - `lastRewrittenRows` - rows created or replaced
+ * - `lastFramesUsed` - frames that render spanned
+ * - `violations` - frames whose weighted units passed the cap
  *
  * `mutations` counts only calls that touch the container (remove, replaceWith,
  * insertBefore, appendChild). A create op builds a detached row and is not a
