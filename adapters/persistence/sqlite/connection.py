@@ -18,6 +18,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from core.domain.enums import StoreUnavailable
+
 
 class ConnectionManager:
     """Pool of persistent WAL connections; exclusive checkout per call."""
@@ -51,7 +53,7 @@ class ConnectionManager:
 
     def _acquire(self) -> sqlite3.Connection:
         if self._closed:
-            raise RuntimeError("connection manager is closed")
+            raise StoreUnavailable("database is being swapped; retry shortly")
         try:
             return self._pool.get_nowait()
         except queue.Empty:

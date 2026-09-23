@@ -15,6 +15,7 @@ import tempfile
 import time
 from typing import TYPE_CHECKING, Any
 
+from core.domain.enums import StoreUnavailable
 from core.log import logger
 
 from .connection import ConnectionManager
@@ -265,16 +266,20 @@ else:
                 await self.close()
                 # Quiesce before os.replace: the swap unlinks the inode a call
                 # that is still running holds, so its write would commit there
-                # and vanish without an error.
-                await self._state.conn.drain()
+                # and vanish without an error. A drain() timeout means such a
+                # straggler exists, so the swap must not proceed.
+                if not await self._state.conn.drain():
+                    raise StoreUnavailable(
+                        "rebuild aborted: database calls still in flight, retry shortly"
+                    )
                 # sqlite3 + filesystem work is blocking; keep it off the event
                 # loop, like ConnectionManager.execute() and IntegrityMixin.
                 await asyncio.to_thread(_rebuild_database, self._db_path)
             finally:
                 # Rebuild the manager on the failure path too: close() above
                 # retired the old one, so without this every later store call
-                # would raise "connection manager is closed" forever. Same
-                # contract as IntegrityMixin.restore().
+                # would raise StoreUnavailable forever. Same contract as
+                # IntegrityMixin.restore().
                 self._state.conn = ConnectionManager(self._db_path)
 
         async def close(self) -> None:

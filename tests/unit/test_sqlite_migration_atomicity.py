@@ -29,7 +29,7 @@ from adapters.persistence.sqlite import store as _store_mod  # noqa: E402
 # 通过模块属性实时取值：test_architecture 会 importlib.reload(migrations)，
 # 此时 import 时绑定的别名会指向被替换掉的旧对象，patch 将静默失效。
 from adapters.persistence.sqlite import migrations as _migrations  # noqa: E402
-from core.domain.enums import ResourceType  # noqa: E402
+from core.domain.enums import ResourceType, StoreUnavailable  # noqa: E402
 from core.domain.resource import Resource  # noqa: E402
 from core.domain.sync import ResourceQuery  # noqa: E402
 
@@ -433,4 +433,121 @@ async def test_restore_waits_for_in_flight_calls_before_overwriting(tmp_path, mo
     )
     page = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
     assert sorted(r.name for r in page.items) == ["f99.zip"]
+    await store.close()
+
+
+# ---------- 主张 5：quiesce 有界，等不到就拒绝换库 ----------
+#
+# drain() 的 5s 上界是 best-effort（与 OpQueue.shutdown() 同形）：卡住的在途调用
+# 可以活得比上界久。此时换库正好会造成上面两条主张要避免的事故——重建把写提交到
+# 已 unlink 的 inode（静默丢失），恢复把旧世界的一行混进刚恢复好的库。所以超时
+# 必须是"拒绝换"，而不是"照换"。
+
+
+def _parked_probe(events: list[str], gate: threading.Event):
+    """真正停泊的在途调用：gate 放开前不结束，用来让有界 drain() 确实超时。"""
+
+    def _call(conn):
+        events.append("call_start")
+        gate.wait(5)
+        events.append("call_end")
+        return conn.execute("SELECT 1").fetchone()[0]
+
+    return _call
+
+
+@pytest.fixture
+def short_drain(monkeypatch):
+    """把换库前的 drain 上界压到 0.1s，否则本文件要为超时等满 5s。"""
+    from adapters.persistence.sqlite.connection import ConnectionManager
+
+    real = ConnectionManager.drain
+
+    async def _drain(self, timeout: float = 5.0) -> bool:
+        return await real(self, 0.1)
+
+    monkeypatch.setattr(ConnectionManager, "drain", _drain)
+
+
+async def _straggler(store, events, gate):
+    task = asyncio.create_task(store._conn.execute(_parked_probe(events, gate)))
+    await asyncio.sleep(0.05)
+    assert events == ["call_start"], f"在途调用未停泊：{events}"
+    return task
+
+
+@pytest.mark.asyncio
+async def test_restore_refuses_to_overwrite_when_calls_remain(tmp_path, short_drain):
+    db = tmp_path / "meta.db"
+    store = SqliteMetaStore(db)
+    await store.init()
+    await store.upsert_resources([_res(1)])
+
+    src_path = tmp_path / "src.db"
+    src = SqliteMetaStore(src_path)
+    await src.init()
+    await src.upsert_resources([_res(99)])
+    await src.close()
+
+    gate = threading.Event()
+    events: list[str] = []
+    straggler = await _straggler(store, events, gate)
+
+    with pytest.raises(StoreUnavailable):
+        await store.restore(src_path)
+
+    gate.set()
+    await straggler
+    # 覆盖没有发生（恢复来的是 f99），且拒绝之后 store 仍可用。
+    page = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
+    assert [r.name for r in page.items] == ["f1.zip"]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_refuses_to_swap_when_calls_remain(tmp_path, short_drain, monkeypatch):
+    db = tmp_path / "meta.db"
+    store = SqliteMetaStore(db)
+    await store.init()
+    await store.upsert_resources([_res(1)])
+
+    def _must_not_run(db_path):
+        raise AssertionError("在途调用还在时就换了库 —— 它的写会提交到已 unlink 的 inode")
+
+    monkeypatch.setattr(_store_mod, "_rebuild_database", _must_not_run)
+
+    gate = threading.Event()
+    events: list[str] = []
+    straggler = await _straggler(store, events, gate)
+
+    with pytest.raises(StoreUnavailable):
+        await store.reset_and_rebuild()
+
+    gate.set()
+    await straggler
+    page = await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
+    assert [r.name for r in page.items] == ["f1.zip"]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_checkouts_are_refused_during_the_swap_window(tmp_path):
+    """窗口内到达的新调用拿到 StoreUnavailable，不是裸 RuntimeError。
+
+    换库必须先 close 掉连接池，这中间落到旧 manager 上的调用无法服务；它属于
+    "稍后再试"，web 边界据此回 503（见 tests/contract/test_webapi_error_mapping.py）。
+    """
+    db = tmp_path / "meta.db"
+    store = SqliteMetaStore(db)
+    await store.init()
+
+    closed = store._conn
+    await closed.close()
+    with pytest.raises(StoreUnavailable):
+        await closed.execute(lambda conn: conn.execute("SELECT 1").fetchone())
+
+    with pytest.raises(StoreUnavailable):
+        await store.query_resources(ResourceQuery(group_id="g1", page_size=10))
+    # 重建 manager 后恢复可用（换库路径的 finally 保证同一件事）。
+    store._state.conn = type(closed)(db)
     await store.close()

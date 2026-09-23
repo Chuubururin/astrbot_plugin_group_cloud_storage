@@ -70,6 +70,17 @@ class OneBotApiError(Exception):
         super().__init__(f"[{kind.value}] {action}: {message}")
 
 
+class StoreUnavailable(RuntimeError):
+    """The SQLite store is being swapped (restore / rebuild) and refuses work.
+
+    Raised inside the close -> file-swap -> reopen window, and when in-flight
+    calls refuse to finish in time so swapping would lose them. Both are
+    transient: the web edge answers 503 and queued work retries with backoff.
+    Subclasses RuntimeError so existing `except RuntimeError` boundaries keep
+    treating it as a failure rather than a user-input error.
+    """
+
+
 class BridgeTaskState(str, Enum):
     """Bridge task state (archive_map.state).
 

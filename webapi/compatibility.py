@@ -14,6 +14,7 @@ from astrbot.api.web import error_response
 from commands.handlers import Services
 from core.api_validate import ApiValidationError
 from core.api_validate import json_body, pick, qi
+from core.domain.enums import StoreUnavailable
 from .routes import PLUGIN_NAME  # noqa: F401  (re-export; the single definition lives in routes.py)
 
 
@@ -59,6 +60,11 @@ class Bound:
             return error_response(str(exc) or "forbidden", status_code=403)
         except FileNotFoundError as exc:
             return error_response(str(exc) or "not found", status_code=404)
+        except StoreUnavailable as exc:
+            # Transient by contract (restore/rebuild window, or a swap refused
+            # because calls were still in flight), so the client should retry
+            # rather than treat this as a server fault.
+            return error_response(str(exc), status_code=503)
         except Exception as exc:
             logger.warning(f"[webapi] unhandled: {exc}", exc_info=True)
             return error_response("internal server error", status_code=500)

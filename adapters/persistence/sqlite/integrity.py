@@ -12,6 +12,8 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
+from core.domain.enums import StoreUnavailable
+
 from .connection import ConnectionManager
 from .state import StorePart
 
@@ -54,11 +56,17 @@ class IntegrityMixin(StorePart):
         # restore, then swap in a fresh manager (a closed manager refuses
         # new checkouts) -- on failure too, so the store stays usable.
         await self._conn.close()
-        # Quiesce before overwriting the live file: a call still holding a
-        # connection from the retired pool could commit on top of the
-        # restored database and leave a mixed state.
-        await self._conn.drain()
         try:
+            # Quiesce before overwriting the live file: a call still holding a
+            # connection from the retired pool could commit on top of the
+            # restored database and leave a mixed state. drain() is bounded, so
+            # a False result means a straggler exists - swapping then would be
+            # the exact corruption this guard exists to prevent, so refuse and
+            # let the caller retry.
+            if not await self._conn.drain():
+                raise StoreUnavailable(
+                    "restore aborted: database calls still in flight, retry shortly"
+                )
             await asyncio.to_thread(_copy)
         finally:
             self._state.conn = ConnectionManager(self._db_path)
