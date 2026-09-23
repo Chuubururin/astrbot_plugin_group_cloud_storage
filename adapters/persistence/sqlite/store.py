@@ -221,14 +221,36 @@ else:
                         raise
 
             await self._conn.exec(_do)
-            # Refresh planner statistics once per startup. Without sqlite_stat1
-            # the planner estimates from index cardinality alone and picks
-            # idx_archive_map_state (two distinct values) over the primary key's
-            # resource_id prefix for the correlated EXISTS in the store_status
-            # queries, which turns them quadratic. PRAGMA optimize only runs
-            # ANALYZE when SQLite judges the stats stale, so a steady-state
-            # startup pays nothing.
-            await self._conn.exec(lambda conn: conn.execute("PRAGMA optimize"))
+
+            def _optimize(conn):
+                # Refresh planner statistics. With no sqlite_stat1 the planner
+                # estimates from index cardinality alone and picks
+                # idx_archive_map_state (two distinct values) over the primary
+                # key's resource_id prefix for the correlated EXISTS in the
+                # store_status queries, which turns them quadratic (268 ms vs
+                # 0.1 ms on 200k rows).
+                #
+                # Guarded by "does archive_map have statistics" rather than
+                # PRAGMA optimize's staleness heuristics: those are decided per
+                # connection and per SQLite version, and a skipped analysis is
+                # invisible. ANALYZE writes nothing for an empty table, so a
+                # fresh install keeps re-running it (instant) until archive_map
+                # has rows. The numbers then go stale as the table grows, but
+                # they encode averages - two distinct states versus one row per
+                # resource_id - which is what keeps the plan on the right side.
+                analyzed = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1' LIMIT 1"
+                ).fetchone() and conn.execute(
+                    "SELECT 1 FROM sqlite_stat1 WHERE tbl = 'archive_map' LIMIT 1"
+                ).fetchone()
+                if not analyzed:
+                    conn.execute("ANALYZE")
+                    # ConnectionManager._run rolls back anything still open when
+                    # the connection returns to the pool, which would silently
+                    # discard the analysis.
+                    conn.commit()
+
+            await self._conn.exec(_optimize)
             logger.info(
                 f"[group_cloud_storage] meta.db ready (schema v{SCHEMA_VERSION}) at {self._db_path}"
             )
