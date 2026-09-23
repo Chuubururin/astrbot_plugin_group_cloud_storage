@@ -1,13 +1,13 @@
 /**
- * Unit tests: keyed-diff frame budget (FE-16).
+ * Unit tests: keyed-diff frame budget + minimal reorder (FE-16).
  *
- * L10: the single batched fragment insert was charged its row count, so any
- * append or reorder of a list longer than MAX_ROWS_PER_FRAME exceeded the
- * budget on its own and hit the run-anyway fallback: every such frame counted
- * a `violations` and printed a console warning, turning the gate metric into
- * constant noise. A fragment insert is one DOM write and is now charged 1,
- * with its row count reported separately as maxBulkRows. Frame pacing and the
- * runSeq supersede semantics must stay exactly as they were.
+ * L10: the frame budget is enforced against *measured* DOM writes. It used to
+ * charge the whole-list fragment append its row count (so normal renders kept
+ * tripping the gate), then swung to charging it 1 unconditionally (so a
+ * reorder hid 100 DOM moves behind a single unit). Reorders now go through the
+ * LIS minimal-move pass: each move is one honest write, small reorders cost a
+ * couple of units, and even a full reversal is chunked instead of overrunning
+ * a frame. The runSeq supersede semantics must stay exactly as they were.
  *
  * Run: node --test pages/storage-ng/testing/unit/dom-diff-budget.test.mjs
  */
@@ -34,6 +34,19 @@ function el(tag = 'tr') {
       this.children.push(c);
       c.parentNode = this;
       c.isConnected = true;
+    },
+    insertBefore(n, ref) {
+      if (n.parentNode) {
+        const prev = n.parentNode.children.indexOf(n);
+        if (prev > -1) n.parentNode.children.splice(prev, 1);
+      }
+      const at = ref === null || ref === undefined
+        ? this.children.length : this.children.indexOf(ref);
+      if (at === -1) throw new Error('insertBefore: reference is not a child');
+      this.children.splice(at, 0, n);
+      n.parentNode = this;
+      n.isConnected = true;
+      return n;
     },
     remove() {
       this.isConnected = false;
@@ -78,31 +91,67 @@ test('L10: appending to a long list is one batched write, not the row count', as
   const before = getDiffStats();
   applyKeyedDiff(tbody, many, render, (x) => x.id);
   await drain();
-  applyKeyedDiff(tbody, [...many, { id: 'extra', name: 'b' }], render, (x) => x.id);
+  const res = applyKeyedDiff(tbody, [...many, { id: 'extra', name: 'b' }], render, (x) => x.id);
   await drain();
   const after = getDiffStats();
   assert.deepEqual(keys(tbody), [...many.map((m) => m.id), 'extra']);
+  assert.equal(res.moves, 1,
+    `appending one row must cost one DOM move, not one per row (got ${res.moves})`);
   assert.equal(after.violations, before.violations,
     `a normal append must not be reported as a budget violation (${after.violations} > ${before.violations})`);
   assert.ok(after.maxFrameWrites <= MAX_ROWS_PER_FRAME,
     `maxFrameWrites ${after.maxFrameWrites} must stay within ${MAX_ROWS_PER_FRAME}`);
-  assert.ok(after.maxBulkRows > MAX_ROWS_PER_FRAME,
-    'the bulk insert size must still be observable');
+  assert.ok(after.maxMoves >= 1, 'the DOM move count must be observable');
 });
 
-test('L10: reordering a long list is one batched write', async () => {
+test('L10: reordering a long list is chunked and stays within budget', async () => {
   const tbody = el('tbody');
   const many = list(MAX_ROWS_PER_FRAME + 10);
   applyKeyedDiff(tbody, many, render, (x) => x.id);
   await drain();
   const before = getDiffStats();
   const reversed = [...many].reverse();
-  applyKeyedDiff(tbody, reversed, render, (x) => x.id);
+  const res = applyKeyedDiff(tbody, reversed, render, (x) => x.id);
   await drain();
   const after = getDiffStats();
   assert.deepEqual(keys(tbody), reversed.map((m) => m.id), 'the reorder must still land in want order');
   assert.equal(after.violations, before.violations,
-    `a pure reorder must not be reported as a budget violation (${after.violations} > ${before.violations})`);
+    `moves must be chunked across frames, not overrun one frame (${after.violations} > ${before.violations})`);
+  assert.ok(after.maxFrameWrites <= MAX_ROWS_PER_FRAME,
+    `maxFrameWrites ${after.maxFrameWrites} must stay within ${MAX_ROWS_PER_FRAME}`);
+  // A full reversal has an increasing run of length 1, so N-1 moves is the
+  // provable minimum; anything larger means the LIS pass regressed.
+  assert.equal(res.moves, many.length - 1,
+    `a reversal must plan the minimum move set (N-1 = ${many.length - 1}, got ${res.moves})`);
+});
+
+test('LIS: moving one row to the tail costs one move, not N', async () => {
+  const tbody = el('tbody');
+  const rows = list(5);
+  applyKeyedDiff(tbody, rows, render, (x) => x.id);
+  await drain();
+  // Old full-reappend pass: 5 moves. Minimal: 1 (only r0 leaves its slot).
+  const moved = [...rows.slice(1), rows[0]];
+  const res = applyKeyedDiff(tbody, moved, render, (x) => x.id);
+  await drain();
+  assert.deepEqual(keys(tbody), moved.map((m) => m.id));
+  assert.equal(res.moves, 1,
+    `shifting one row past an ordered run must move only that row (got ${res.moves})`);
+});
+
+test('LIS: an unchanged order with data edits plans zero moves', async () => {
+  const tbody = el('tbody');
+  const rows = list(4);
+  applyKeyedDiff(tbody, rows, render, (x) => x.id);
+  await drain();
+  const edited = rows.map((r, i) => ({ ...r, name: i === 0 ? 'changed' : 'a' }));
+  const res = applyKeyedDiff(tbody, edited, render, (x) => x.id);
+  await drain();
+  assert.equal(res.moves, 0, 'in-place replacement needs no move');
+  // rewrittenRows only accumulates while the frame ops run, so the live value
+  // is the stats snapshot rather than the synchronous return.
+  assert.equal(getDiffStats().lastRewrittenRows, 1);
+  assert.deepEqual(keys(tbody), rows.map((r) => r.id));
 });
 
 test('L10: per-row chunking across frames is unchanged', async () => {

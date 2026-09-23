@@ -1,14 +1,16 @@
 /**
  * DOM diff - keyed row reconciliation .
  *
- * Lists render through applyKeyedDiff: existing <tr> nodes are reused by
- * row key, changed ones are replaced, stale ones removed, and order is
- * fixed with DOM moves - never a full innerHTML rewrite. All mutations
- * are rAF-batched, and each frame stops before the *measured* DOM write
- * count would pass MAX_ROWS_PER_FRAME (enforced against real writes, not op
- * count; the one batched fragment insert counts as a single write and its row
- * count is reported separately as bulkRows). Statistics feed the E2E probes.
+ * Lists render through applyKeyedDiff: existing <tr> nodes are reused by row
+ * key, changed ones are replaced, stale ones removed, and order is fixed with
+ * the *minimal* set of DOM moves (longest increasing subsequence) - never a
+ * full innerHTML rewrite, and never a full-list re-append. All mutations are
+ * rAF-batched, and each frame stops before the *measured* DOM write count
+ * would pass MAX_ROWS_PER_FRAME (enforced against real writes, not op count).
+ * Statistics feed the E2E probes.
  *
+ * Change detection is a per-row render signature when the caller supplies
+ * `signatureFn`, and a whole-DTO field compare otherwise.
  * @module utils/dom-diff
  */
 
@@ -20,7 +22,8 @@ const diffStats = {
   lastRewrittenRows: 0,
   maxFrameWrites: 0,
   lastFramesUsed: 1,
-  maxBulkRows: 0,
+  lastMoves: 0,
+  maxMoves: 0,
   violations: 0,
 };
 
@@ -34,10 +37,11 @@ export function getDiffStats() {
 }
 
 /**
- * Value equality for one field. Scalars compare by identity; arrays/objects
- * compare by JSON projection, because JSON.parse produces a fresh reference
- * on every poll - identity-only comparison would mark every nested field
- * (tags/meta/payload) as changed and rewrite the whole list every refresh.
+ * Value equality for one field: scalars by identity, arrays/objects by JSON
+ * projection (JSON.parse yields a fresh reference per poll, so identity alone
+ * would mark every nested field changed). This is the *fallback* comparator -
+ * it compares the whole DTO, so fields the row never renders still force a
+ * replacement. Callers that know what they render pass `signatureFn`.
  */
 function sameValue(a, b) {
   if (a === b) return true;
@@ -56,15 +60,44 @@ function hasChanged(oldItem, newItem) {
 }
 
 /**
+ * Longest increasing subsequence over the `c` (current DOM index) of a
+ * want-order scan; returns indices into `seq` of one optimal stable run.
+ * Rows in it already sit in final relative order, so N - LIS is the provable
+ * minimum number of DOM moves. Patience sorting: O(N log N).
+ */
+function stableRun(seq) {
+  const tails = [];
+  const prev = new Array(seq.length).fill(-1);
+  for (let i = 0; i < seq.length; i++) {
+    const c = seq[i].c;
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (seq[tails[mid]].c < c) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
+  }
+  const run = [];
+  if (!tails.length) return run;
+  for (let k = tails[tails.length - 1]; k !== -1; k = prev[k]) run.push(k);
+  return run;
+}
+
+/**
  * Apply a keyed diff to a container.
  *
  * @param {HTMLElement} container - tbody (rows carry dataset.key)
  * @param {Array} newItems - row data of the new listing
  * @param {function} renderFn - (item) => HTMLElement (must set dataset.key)
  * @param {string|function} keyFn - key field name or key extractor
- * @returns {{rewrittenRows: number}} rows created/replaced by this render
+ * @param {function} [signatureFn] - (item) => string projection of the fields
+ *   renderFn reads; replaces the whole-DTO compare with a string identity check
+ * @returns {{rewrittenRows: number, moves: number}} rows rewritten / moves planned
  */
-export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
+export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id', signatureFn = null) {
   const keyOf = typeof keyFn === 'function' ? keyFn : (item) => String(item[keyFn]);
 
   const byKey = new Map();
@@ -94,15 +127,22 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
     if (!wantSet.has(key)) toRemove.push(el);
   }
 
+  // Change detection: a render-signature identity check when the caller
+  // declares what it renders, otherwise the whole-DTO field compare.
+  const sigOf = signatureFn ? (item) => String(signatureFn(item)) : null;
+
   let rewritten = 0;
   const plan = newItems.map((item, i) => {
     const key = wantKeys[i];
     const el = byKey.get(key);
-    if (!el) return { item, key, create: true };
-    if (el.__data !== item && hasChanged(el.__data || {}, item)) {
-      return { item, key, el, replace: true };
+    if (!el) return { item, key, create: true, sig: sigOf ? sigOf(item) : undefined };
+    if (el.__data !== item) {
+      const sig = sigOf ? sigOf(item) : undefined;
+      const dirty = sigOf ? el.__sig !== sig : hasChanged(el.__data || {}, item);
+      if (dirty) return { item, key, el, replace: true, sig };
+      return { item, key, el, sig };
     }
-    return { item, key, el };
+    return { item, key, el, sig: sigOf ? el.__sig : undefined };
   });
 
   const currentKeys = Array.from(container.children)
@@ -133,6 +173,7 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
         el = renderFn(step.item);
         el.dataset.key = step.key;
         el.__data = step.item;
+        el.__sig = step.sig;
         liveKeys.set(step.key, el);
         rewritten += 1;
         finalEls[i] = el;
@@ -148,6 +189,7 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
         const fresh = renderFn(step.item);
         fresh.dataset.key = step.key;
         fresh.__data = step.item;
+        fresh.__sig = step.sig;
         el.replaceWith(fresh);
         liveKeys.set(step.key, fresh);
         finalEls[i] = fresh;
@@ -156,27 +198,49 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
       } });
     } else {
       finalEls[i] = step.el;
-      // __data 必须与 DOM 写入同刻更新：在计划期就改写 __data，一旦本次
+      // __data/__sig 必须与 DOM 写入同刻更新：在计划期就改写，一旦本次
       // run 被更新的渲染取代（下面的 runSeq 守卫）就会留下「DOM 是旧值、
-      // __data 已是新值」的行，后续 hasChanged 判为无变化而长期停留旧数据。
-      ops.push({ cost: 0, run: () => { step.el.__data = step.item; return 0; } });
+      // 签名已是新值」的行，后续比较判为无变化而长期停留旧数据。
+      ops.push({ cost: 0, run: () => {
+        step.el.__data = step.item;
+        if (sigOf) step.el.__sig = step.sig;
+        return 0;
+      } });
     }
   }
 
+  // ---- reorder: minimal move set ------------------------------------------
+  // The previous pass re-appended every row, so moving one row near the top of
+  // a 100-row page cost 100 DOM moves. Here only the rows outside the stable
+  // run move, and each move is charged 1 write, so even a pathological reorder
+  // is honestly chunked across frames rather than overrunning one.
+  let plannedMoves = 0;
   if (orderChanged || toRemove.length > 0 || plan.some((p) => p.create)) {
-    // One batched fragment insert is a single DOM write, so it is charged 1
-    // to the frame budget. Charging the row count made every append/reorder
-    // of a list longer than one frame exceed the budget on its own, so
-    // `violations` warned on normal renders; the real row burst stays visible
-    // as the bulkRows metric instead. The op is always last, so the frame
-    // pacing and the runSeq supersede semantics are unchanged.
-    const moved = finalEls.length;
-    ops.push({ cost: 1, bulk: moved, run: () => {
-      const frag = document.createDocumentFragment();
-      for (const el of finalEls) frag.appendChild(el);
-      container.appendChild(frag);
-      return 1;
-    } });
+    const curIdx = new Map();
+    currentKeys.forEach((key, i) => { if (key != null) curIdx.set(key, i); });
+    // Scan in want order, carrying each present row's current DOM index.
+    const seq = [];
+    for (let i = 0; i < wantKeys.length; i++) {
+      const c = curIdx.get(wantKeys[i]);
+      if (c !== undefined) seq.push({ w: i, c });
+    }
+    const stable = new Set(stableRun(seq).map((k) => seq[k].w));
+    // Right-to-left: `ref` is the row that must immediately follow the one
+    // being placed, and it is already settled - either it was stable, or the
+    // previous op just moved it. That is what makes the plan safe to chunk.
+    let ref = null;
+    for (let i = finalEls.length - 1; i >= 0; i--) {
+      if (stable.has(i)) { ref = i; continue; }
+      const target = i;
+      const refIdx = ref;
+      ops.push({ cost: 1, run: () => {
+        container.insertBefore(
+          finalEls[target], refIdx === null ? null : finalEls[refIdx]);
+        return 1;
+      } });
+      plannedMoves += 1;
+      ref = target;
+    }
   }
 
   const state = runSeq.get(container) || { seq: 0 };
@@ -200,7 +264,6 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
       while (cursor < ops.length && writes + ops[cursor].cost <= MAX_ROWS_PER_FRAME) {
         const op = ops[cursor];
         writes += op.run(liveKeys);
-        if (op.bulk) diffStats.maxBulkRows = Math.max(diffStats.maxBulkRows, op.bulk);
         cursor += 1;
         ran += 1;
       }
@@ -208,9 +271,7 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
         // A single op alone costs more than a whole frame budget: it still
         // has to run or the list never settles, and that overrun is exactly
         // what the budget gate exists to report.
-        const op = ops[cursor];
-        writes += op.run(liveKeys);
-        if (op.bulk) diffStats.maxBulkRows = Math.max(diffStats.maxBulkRows, op.bulk);
+        writes += ops[cursor].run(liveKeys);
         cursor += 1;
       }
       frames += 1;
@@ -225,10 +286,14 @@ export function applyKeyedDiff(container, newItems, renderFn, keyFn = 'id') {
         diffStats.totalRenders += 1;
         diffStats.lastRewrittenRows = rewritten;
         diffStats.lastFramesUsed = Math.max(1, frames);
+        // Recorded only for a run that actually settled: a superseded render
+        // never performed its planned moves and must not report them.
+        diffStats.lastMoves = plannedMoves;
+        diffStats.maxMoves = Math.max(diffStats.maxMoves, plannedMoves);
       }
     };
     runChunk();
   });
 
-  return { rewrittenRows: rewritten };
+  return { rewrittenRows: rewritten, moves: plannedMoves };
 }

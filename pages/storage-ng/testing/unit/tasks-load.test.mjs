@@ -43,6 +43,19 @@ function el(tag = 'div') {
       c.parentNode = this;
       c.isConnected = true;
     },
+    insertBefore(n, ref) {
+      if (n.parentNode) {
+        const prev = n.parentNode.children.indexOf(n);
+        if (prev > -1) n.parentNode.children.splice(prev, 1);
+      }
+      const at = ref === null || ref === undefined
+        ? this.children.length : this.children.indexOf(ref);
+      if (at === -1) throw new Error('insertBefore: reference is not a child');
+      this.children.splice(at, 0, n);
+      n.parentNode = this;
+      n.isConnected = true;
+      return n;
+    },
     remove() {
       this.isConnected = false;
       if (this.parentNode) {

@@ -4,7 +4,8 @@
  *    render-budget were removed during the rewrite),
  *  - every JS module stays within the <=300-line budget,
  *  - no module imports any removed legacy path,
- *  - the 8-tab IA is declared in one place (components/tabs.js).
+ *  - the 8-tab IA is declared in one place (components/tabs.js),
+ *  - every keyed-diff render signature covers what its row builder reads.
  *
  * Run: node --test pages/storage-ng/testing/unit/
  */
@@ -116,4 +117,57 @@ test('structure: the 7-tab IA is declared in components/tabs.js', () => {
   }
   // debug tab was removed (2026-09-01)
   assert.ok(!tabs.includes("'debug'"), 'debug tab removed');
+});
+
+/** Fields read off a row DTO inside one function body (source-text scan). */
+function readFields(src, fnName, varName) {
+  const start = src.indexOf(`function ${fnName}(`);
+  assert.notEqual(start, -1, `function ${fnName} must exist`);
+  let depth = 0;
+  let i = src.indexOf('{', start);
+  const bodyStart = i;
+  for (; i < src.length; i += 1) {
+    if (src[i] === '{') depth += 1;
+    else if (src[i] === '}' && (depth -= 1) === 0) break;
+  }
+  const re = new RegExp(`\\b${varName}\\.([A-Za-z_][A-Za-z0-9_]*)`, 'g');
+  return new Set([...src.slice(bodyStart, i).matchAll(re)].map((m) => m[1]));
+}
+
+/**
+ * A render signature that forgets a field silently pins the row to stale data:
+ * the diff sees an unchanged signature and never rewrites the DOM. The
+ * "keep in sync" comments are not enough, so the invariant is asserted against
+ * the source: every field a row builder reads must appear in its signature.
+ */
+test('structure: row signatures cover every field their builders read', () => {
+  const read = (p) => readFileSync(path.join(root, p), 'utf-8');
+  const fileRows = read('features/file-rows.js');
+  const groupData = read('features/group-data.js');
+  const sigs = read('features/row-signatures.js');
+  const labels = read('views/task-labels.js');
+  const tasks = read('views/tasks.js');
+
+  // `id` / `group_id` / `task_id` carry row identity through keyFn, not the signature.
+  const checks = [
+    ['rowSignature', new Set([
+      ...readFields(fileRows, 'buildRow', 'item'),
+      ...readFields(fileRows, 'typeLabel', 'item'),
+    ]), readFields(sigs, 'rowSignature', 'item'), ['id']],
+    ['groupSignature', readFields(groupData, 'buildGroupRow', 'g'),
+      readFields(sigs, 'groupSignature', 'g'), ['group_id']],
+    ['taskSignature', new Set([
+      ...readFields(tasks, 'buildTaskRow', 't'),
+      ...readFields(tasks, 'actionCell', 't'),
+    ]), readFields(labels, 'taskSignature', 't'), ['task_id']],
+  ];
+
+  for (const [name, rendered, covered, keyFields] of checks) {
+    for (const field of rendered) {
+      if (keyFields.includes(field)) continue;
+      assert.ok(covered.has(field),
+        `${name} must project item.${field}: its builder reads it, so omitting `
+        + 'it lets the row keep stale DOM after the field changes');
+    }
+  }
 });

@@ -13,11 +13,11 @@
 import { getState, set, subscribe, nextSeq, isStale } from '../store.js';
 import { DEFAULT_PAGE_SIZE } from '../constants.js';
 import { getIcon } from '../icons.js';
-import { applyLocalFilterSort, netdiskTypeMap } from '../features/data-sources.js';
+import { applyLocalFilterSort, extTypeMap, netdiskTypeMap } from '../features/data-sources.js';
 import { attachMarquee } from '../features/marquee-select.js';
 import { renderBreadcrumb, renderTagCloud } from './breadcrumb.js';
 import {
-  extTypeMap, renderRows, updateCheckboxes, syncSelectAll,
+  renderRows, updateCheckboxes, syncSelectAll,
   updatePagination,
 } from '../features/file-rows.js';
 import { escapeHtml } from '../utils/helpers.js';

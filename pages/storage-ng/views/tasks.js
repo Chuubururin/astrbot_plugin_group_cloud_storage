@@ -15,7 +15,10 @@ import { applyKeyedDiff } from '../utils/dom-diff.js';
 import { confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
 import { DEFAULT_PAGE_SIZE } from '../constants.js';
-import { REVERSIBLE_KINDS, STATE_FILTERS, STATE_LABEL, STATE_CLASS, KIND_LABEL } from './task-labels.js';
+import {
+  REVERSIBLE_KINDS, STATE_FILTERS, STATE_LABEL, STATE_CLASS, KIND_LABEL,
+  taskSummary, taskSignature,
+} from './task-labels.js';
 
 /** 删除类云端操作不可逆（后端 task_control 撤销矩阵：删除类返回 undoable=false）。 */
 const IRREVERSIBLE_KINDS = new Set(['delete', 'essence_delete']);
@@ -105,29 +108,6 @@ async function loadTasks() {
   }
 }
 
-/** Build a human-readable detail summary from a task. */
-function taskSummary(t) {
-  const p = t.payload || {}, k = t.kind || '';
-  if (k === 'move_file' || k === 'replace_name') {
-    const move = k === 'move_file';
-    const from = move ? (p.from_folder || p.old_folder || '') : (p.old_name || p.name || '');
-    const to = move ? (p.to_folder || p.folder || '') : p.new_name;
-    if (from || to) return `${from || '?'} → ${to || '?'}${move && p.name ? ` (${p.name})` : ''}`;
-  }
-  if (k === 'delete') return (p.name || p.ids?.length) ? `${p.ids?.length || 1} 个文件` : '';
-  if (k === 'tags') return `标签: ${(p.tags || p.after?.tags || []).join(', ') || '-'}`;
-  if (k === 'file_scan' || k === 'diff_file_scan') {
-    const g = p.groups || [];
-    return g.length ? `${g.length} 个群` : '全群扫描';
-  }
-  if (k === 'essence_save') return p.title || '';
-  if (k === 'netdisk_index') return p.path || '';
-  return NAME_ONLY_KINDS.has(k) ? (p.name || p.url || '') : '';
-}
-
-/** 仅以 name/url 作为摘要的 kind。 */
-const NAME_ONLY_KINDS = new Set(['convert_volumes', 'video_upload', 'video_album', 'image_album', 'fetch']);
-
 /** Empty-state placeholder row; keyed 'empty' so a later diff releases it. */
 function buildEmptyRow() {
   const tr = document.createElement('tr');
@@ -148,7 +128,7 @@ function renderTasks(tasks, meta) {
   // 直写 innerHTML 不会作废上一帧的 create 计划，先非空后空时旧行会残留。
   const empty = tasks.length === 0;
   applyKeyedDiff(tbody, empty ? [{ task_id: 'empty' }] : tasks,
-    empty ? buildEmptyRow : buildTaskRow, (t) => String(t.task_id));
+    empty ? buildEmptyRow : buildTaskRow, (t) => String(t.task_id), taskSignature);
 }
 
 /** Build one ledger row (keyed diff reuses nodes, so listeners bind here). */

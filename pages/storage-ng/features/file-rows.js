@@ -16,6 +16,7 @@ import { API, apiPost } from '../api.js';
 import { getIcon } from '../icons.js';
 import { formatSize, formatTime, escapeHtml, copyToClipboard } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
+import { rowSignature } from './row-signatures.js';
 import { netdiskRename, netdiskRemovePaths } from './netdisk-ops.js';
 import { showGroupFolderCtx } from './group-folder-menu.js';
 import { openPreview } from './preview.js';
@@ -23,16 +24,6 @@ import { show as showContextMenu, showRaw } from '../components/context-menu.js'
 import { runCommand } from './commands.js';
 import { promptEx, confirmEx } from '../components/modal.js';
 import { toast } from '../components/toast.js';
-
-/** ext->type lookup map built from the cached classify table. */
-export function extTypeMap(table) {
-  if (!table || !table.ext_types) return null;
-  const map = new Map();
-  for (const [type, exts] of Object.entries(table.ext_types)) {
-    for (const e of exts || []) map.set(e, type);
-  }
-  return map;
-}
 
 /** Row key, namespaced so folder rows never collide with file ids. */
 export function rowKeyOf(source, item) {
@@ -259,7 +250,8 @@ function renderInto(tbody, source, rows) {
     tbody.innerHTML = '';
     return;
   }
-  applyKeyedDiff(tbody, rows, (item) => buildRow(source, item), (item) => rowKeyOf(source, item));
+  applyKeyedDiff(tbody, rows, (item) => buildRow(source, item),
+    (item) => rowKeyOf(source, item), rowSignature);
 }
 
 /** Reflect selection state onto rendered checkboxes without re-render. */

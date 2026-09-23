@@ -13,6 +13,7 @@ import { getState, set } from '../store.js';
 import { API, apiGet } from '../api.js';
 import { escapeHtml, formatSize, formatTime } from '../utils/helpers.js';
 import { applyKeyedDiff } from '../utils/dom-diff.js';
+import { groupSignature } from './row-signatures.js';
 import { navigate } from '../router.js';
 import { toast } from '../components/toast.js';
 import { showRaw } from '../components/context-menu.js';
@@ -137,7 +138,8 @@ function renderInto(tbody, groups, selectedGroups) {
     tbody.innerHTML = '';
     return;
   }
-  applyKeyedDiff(tbody, groups, (g) => buildGroupRow(g, selectedGroups), (g) => g.group_id);
+  applyKeyedDiff(tbody, groups, (g) => buildGroupRow(g, selectedGroups),
+    (g) => g.group_id, groupSignature);
 }
 
 /** Build one group row: click sets the file context and opens the files tab. */

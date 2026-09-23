@@ -215,6 +215,16 @@ export function netdiskTypeMap() {
   return map;
 }
 
+/** ext->type lookup map built from the cached classify table. */
+export function extTypeMap(table) {
+  if (!table || !table.ext_types) return null;
+  const map = new Map();
+  for (const [type, exts] of Object.entries(table.ext_types)) {
+    for (const e of exts || []) map.set(e, type);
+  }
+  return map;
+}
+
 /** Local type filter + sort for sources without server support (netdisk).
  * The class comes from the extension map only (see NETDISK_EXT_TYPES): the
  * bridge `type` is the 13-class value, a different vocabulary from the

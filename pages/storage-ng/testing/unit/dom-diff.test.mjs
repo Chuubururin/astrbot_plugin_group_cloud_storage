@@ -38,6 +38,21 @@ function el(tag = 'tr') {
       c.parentNode = this;
       c.isConnected = true;
     },
+    insertBefore(n, ref) {
+      // DOM semantics: the node leaves its old parent first, then lands
+      // immediately before `ref` (null appends). Throws on a foreign ref.
+      if (n.parentNode) {
+        const prev = n.parentNode.children.indexOf(n);
+        if (prev > -1) n.parentNode.children.splice(prev, 1);
+      }
+      const at = ref === null || ref === undefined
+        ? this.children.length : this.children.indexOf(ref);
+      if (at === -1) throw new Error('insertBefore: reference is not a child');
+      this.children.splice(at, 0, n);
+      n.parentNode = this;
+      n.isConnected = true;
+      return n;
+    },
     remove() {
       this.isConnected = false;
       if (this.parentNode) {
@@ -183,4 +198,51 @@ test('create ops during reorder land in want order, not at the tail', async () =
   ], render, (x) => x.id);
   await flushRAF();
   assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['1', '2', '3']);
+});
+
+test('signatureFn: unrendered fields no longer force a row rewrite', async () => {
+  // render only reads id/name. Without a signature the whole DTO is compared,
+  // so a server-side field the row never displays (meta/payload) rewrites the
+  // row on every poll. With one, identical output means an untouched node.
+  const sig = (x) => x.name;
+
+  const silent = el('tbody');
+  applyKeyedDiff(silent, [{ id: '1', name: 'a' }], render, (x) => x.id, sig);
+  await flushRAF();
+  const node = silent.children[0];
+  applyKeyedDiff(silent, [{ id: '1', name: 'a', meta: { rev: 2 } }], render, (x) => x.id, sig);
+  await flushRAF();
+  assert.equal(silent.children[0], node, 'row node must be reused, not replaced');
+  assert.equal(getDiffStats().lastRewrittenRows, 0, 'no row rewrite planned');
+
+  // Same change under the whole-DTO fallback: the row does get rewritten,
+  // which is the behaviour the signature path exists to avoid.
+  const noisy = el('tbody');
+  applyKeyedDiff(noisy, [{ id: '1', name: 'a' }], render, (x) => x.id);
+  await flushRAF();
+  const noisyNode = noisy.children[0];
+  applyKeyedDiff(noisy, [{ id: '1', name: 'a', meta: { rev: 2 } }], render, (x) => x.id);
+  await flushRAF();
+  assert.notEqual(noisy.children[0], noisyNode, 'fallback still compares the whole DTO');
+});
+
+test('signatureFn: a rendered field change still rewrites the row in place', async () => {
+  const tbody = el('tbody');
+  const sig = (x) => x.name;
+  applyKeyedDiff(tbody, [
+    { id: '1', name: 'a' }, { id: '2', name: 'b' },
+  ], render, (x) => x.id, sig);
+  await flushRAF();
+  const untouched = tbody.children[0];
+  applyKeyedDiff(tbody, [
+    { id: '1', name: 'a' }, { id: '2', name: 'B' },
+  ], render, (x) => x.id, sig);
+  await flushRAF();
+  assert.equal(tbody.children[0], untouched, 'unchanged row stays put');
+  assert.notEqual(tbody.children[1], undefined);
+  assert.equal(tbody.children[1].dataset.name, 'B');
+  assert.equal(getDiffStats().lastRewrittenRows, 1);
+  // A replaced row must carry its signature, or the next render compares
+  // against undefined and rewrites forever.
+  assert.ok(tbody.children[1].__sig === 'B', `row carries __sig, got ${tbody.children[1].__sig}`);
 });

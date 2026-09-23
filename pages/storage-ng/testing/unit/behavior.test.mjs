@@ -31,6 +31,21 @@ function el(tag) {
       c.parentNode = this;
       c.isConnected = true;
     },
+    insertBefore(n, ref) {
+      // DOM semantics: the node leaves its old parent first, then lands
+      // immediately before `ref` (null appends).
+      if (n.parentNode) {
+        const prev = n.parentNode.children.indexOf(n);
+        if (prev > -1) n.parentNode.children.splice(prev, 1);
+      }
+      const at = ref === null || ref === undefined
+        ? this.children.length : this.children.indexOf(ref);
+      if (at === -1) throw new Error('insertBefore: reference is not a child');
+      this.children.splice(at, 0, n);
+      n.parentNode = this;
+      n.isConnected = true;
+      return n;
+    },
     remove() {
       this.isConnected = false;
       if (this.parentNode) {
@@ -122,6 +137,13 @@ function freshPanes() {
   paneB.querySelector = () => null;
 }
 
+/** Row keys currently in the tbody.
+ * A DocumentFragment is never a node in the tree, so keyed diff rows are
+ * direct children of the tbody - not nested under an intermediate element. */
+function rowKeys(tbody) {
+  return tbody.children.map((c) => c.dataset.key);
+}
+
 test('N-08: renderRows adds ../ row when inside a folder (group source)', async () => {
   freshPanes();
   store.set('folder', '文档');
@@ -130,8 +152,7 @@ test('N-08: renderRows adds ../ row when inside a folder (group source)', async 
   const src = { id: 'group', rowKey: (f) => String(f.id) };
   rowsMod.renderRows(makeContainer(), src, [{ id: 1, name: 'a.pdf' }], [{ id: 9, name: '文档' }]);
   await flushRAF();
-  const rows = paneA.children[0]?.children || [];
-  assert.deepEqual(rows.map((c) => c.dataset.key), ['dir:..', 'dir:9', '1']);
+  assert.deepEqual(rowKeys(paneA), ['dir:..', 'dir:9', '1']);
 });
 
 test('N-08: no ../ row at root (folder empty)', async () => {
@@ -142,8 +163,7 @@ test('N-08: no ../ row at root (folder empty)', async () => {
   const src = { id: 'group', rowKey: (f) => String(f.id) };
   rowsMod.renderRows(makeContainer(), src, [{ id: 1, name: 'a.pdf' }], []);
   await flushRAF();
-  const rows = paneA.children[0]?.children || [];
-  assert.deepEqual(rows.map((c) => c.dataset.key), ['1']);
+  assert.deepEqual(rowKeys(paneA), ['1']);
 });
 
 test('N-08: rowKeyOf prefixes up row as dir:.. without collision', () => {

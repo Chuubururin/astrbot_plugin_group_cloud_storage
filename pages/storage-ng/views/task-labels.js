@@ -1,6 +1,7 @@
 /**
  * Display label tables shared across views (task kind/state names, badge
- * classes, 13-class type names, storage states, bridge states). Kind keys
+ * classes, 13-class type names, storage states, bridge states), plus the task
+ * ledger's summary text and its keyed-diff render signature. Kind keys
  * must cover every string the backend submits through queue.submit() or
  * dispatches in op_dispatch; a missing key falls back to the raw kind.
  *
@@ -132,3 +133,40 @@ export const BRIDGE_CAPABILITY_LABELS = {
   [BRIDGE_CAPABILITIES.OK]: '正常',
   [BRIDGE_CAPABILITIES.BROKEN]: '异常',
 };
+
+/** 仅以 name/url 作为摘要的 kind。 */
+const NAME_ONLY_KINDS = new Set(['convert_volumes', 'video_upload', 'video_album', 'image_album', 'fetch']);
+
+/** Build a human-readable detail summary from a task. */
+export function taskSummary(t) {
+  const p = t.payload || {}, k = t.kind || '';
+  if (k === 'move_file' || k === 'replace_name') {
+    const move = k === 'move_file';
+    const from = move ? (p.from_folder || p.old_folder || '') : (p.old_name || p.name || '');
+    const to = move ? (p.to_folder || p.folder || '') : p.new_name;
+    if (from || to) return `${from || '?'} → ${to || '?'}${move && p.name ? ` (${p.name})` : ''}`;
+  }
+  if (k === 'delete') return (p.name || p.ids?.length) ? `${p.ids?.length || 1} 个文件` : '';
+  if (k === 'tags') return `标签: ${(p.tags || p.after?.tags || []).join(', ') || '-'}`;
+  if (k === 'file_scan' || k === 'diff_file_scan') {
+    const g = p.groups || [];
+    return g.length ? `${g.length} 个群` : '全群扫描';
+  }
+  if (k === 'essence_save') return p.title || '';
+  if (k === 'netdisk_index') return p.path || '';
+  return NAME_ONLY_KINDS.has(k) ? (p.name || p.url || '') : '';
+}
+
+/**
+ * Projection of exactly the fields the task ledger row renders.
+ *
+ * taskSummary already collapses every payload variant into the string the cell
+ * shows, so the row no longer needs a deep compare of `payload` - the largest
+ * source of false-positive row rewrites in this table.
+ * Keep in sync with views/tasks.js buildTaskRow / actionCell.
+ * @param {Object} t
+ * @returns {string}
+ */
+export function taskSignature(t) {
+  return [t.kind, t.target, t.state, t.error, t.created_at, taskSummary(t)].join('\u0000');
+}
