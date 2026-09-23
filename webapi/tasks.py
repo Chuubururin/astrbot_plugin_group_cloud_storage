@@ -108,9 +108,16 @@ async def api_tasks_ops(s: Services) -> dict:
 async def api_tasks_resume_pending(s: Services) -> dict:
     """Re-submit breakpoint-resumable pending tasks (whitelist-based).
 
-    Finds tasks in op_ledger with state=pending and kind in the whitelist,
-    then re-enqueues each for recovery. Whitelist: convert_volumes,
-    video_upload, netdisk_index (kept in sync with ledger_reconcile).
+    Finds tasks in op_ledger with state=pending and kind in the whitelist
+    (convert_volumes, video_upload, netdisk_index), then re-enqueues each for
+    recovery. The filter is applied in SQL: the ledger routinely holds
+    hundreds of pending file_scan rows (one scan per hot-reload), and paging
+    through them just to drop them was pure waste.
+
+    Recovery goes through queue.claim(), not queue.submit(): submit mints a
+    new task_id and the ledger upserts on task_id, so the original pending row
+    was orphaned -- it stayed pending and the next click picked it up again,
+    growing the resumable set for the life of the process.
 
     Resumability pre-check (Bug-13, live 2026-09-11): a stale "pending" row
     can reference inputs that no longer exist (converted resource, deleted
@@ -120,27 +127,28 @@ async def api_tasks_resume_pending(s: Services) -> dict:
     Pre-check each kind's inputs and fail the row instead of re-submitting.
     """
     await _ensure_ready(s)
-    _BREAKPOINT_KINDS = {"convert_volumes", "video_upload", "netdisk_index"}
-    # SQL-level kind filtering: avoids paginating through hundreds of
-    # file_scan rows just to find the breakpoint ones.
+    # Single source: the same tuple ledger_reconcile uses to decide which kinds
+    # a restart leaves resumable (adapters/persistence/sqlite/outbox.py).
+    from adapters.persistence.sqlite.outbox import LEDGER_BREAKPOINT_KINDS
+
+    kinds = sorted(LEDGER_BREAKPOINT_KINDS)
     breakpoint_rows: list[dict] = []
     offset = 0
     while True:
         page = await s.task_control.list_tasks(
-            state="pending", kinds=sorted(_BREAKPOINT_KINDS), limit=100, offset=offset
+            state="pending", kinds=kinds, limit=100, offset=offset
         )
         if not page:
             break
-        breakpoint_rows.extend(
-            row for row in page if row.get("kind") in _BREAKPOINT_KINDS
-        )
+        breakpoint_rows.extend(page)
         if len(page) < 100:
             break
         offset += 100
     if not breakpoint_rows:
-        return json_response({"resumed": 0, "total_pending": 0,
-                              "note": "无待恢复任务"})
+        return json_response({"resumed": 0, "already_queued": 0,
+                              "breakpoint_pending": 0, "note": "无待恢复任务"})
     resumed = 0
+    already_queued = 0
     failed_preflight = 0
     for row in breakpoint_rows:
         kind = row.get("kind", "")
@@ -167,15 +175,26 @@ async def api_tasks_resume_pending(s: Services) -> dict:
             )
             continue
         try:
-            await s.queue.claim(task_id, kind, target=target, payload=payload)
-            resumed += 1
+            if await s.queue.claim(task_id, kind, target=target, payload=payload) is None:
+                # Already queued or running in this process: counting it as
+                # resumed would tell the user work was submitted that was not.
+                already_queued += 1
+            else:
+                resumed += 1
         except Exception as e:
             logger.warning(f"[tasks-resume] claim {task_id} ({kind}) failed: {e}")
-    return json_response({
+    out = {
         "resumed": resumed,
+        "already_queued": already_queued,
         "failed_preflight": failed_preflight,
-        "total_pending": len(breakpoint_rows),
-    })
+        "breakpoint_pending": len(breakpoint_rows),
+    }
+    if not (resumed or already_queued or failed_preflight):
+        # Every claim raised: without a note the frontend falls back to
+        # "无待恢复任务", which would be a lie -- the rows exist and are still
+        # pending, they just could not be adopted.
+        out["note"] = f"{len(breakpoint_rows)} 个断点行认领失败，详见服务端日志"
+    return json_response(out)
 
 
 async def _resume_precheck(

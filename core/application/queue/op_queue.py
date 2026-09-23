@@ -119,12 +119,31 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
 
     async def claim(
         self, task_id: str, kind: str, target: str = "", payload: dict | None = None,
-    ) -> str:
-        """Adopt an existing ledger row (pending → running) instead of
-        creating a new one.  Used by resume_pending to avoid orphaning the
-        original pending row (submit() always creates a new task_id + new
-        pending write, leaving the original row stranded).
+    ) -> str | None:
+        """Adopt an existing pending ledger row instead of minting a new id.
+
+        submit() always creates a fresh task_id and the ledger upserts on
+        task_id, so re-submitting a breakpoint row orphaned it: the original
+        row stayed pending forever and the next resume click picked it up
+        again. Claiming keeps the row's identity, so its terminal write lands
+        on the row the user clicked.
+
+        Returns None when the queue already owns the id (queued, rate-limit
+        wait, running, or pause hold) -- claiming a live row would put a second
+        Op under one identity: two sets of cloud writes for one task, and the
+        first terminal write pops the index.
+
+        Only rows still in "pending" may be claimed: the ledger's terminal-state
+        guard silently drops every write of a re-claimed done/failed/cancelled
+        row, so such a task would run unreported.
+
+        No ledger write happens here on purpose: the row is already "pending",
+        and claiming is not a state transition. The worker writes "running"
+        when it dequeues the op, so a claim that never reaches a worker cannot
+        leave a pre-marked-running zombie behind (the Bug-13 failure mode).
         """
+        if task_id in self._ops_by_id:
+            return None
         await self.start()
         op = Op(
             task_id=task_id,
@@ -134,10 +153,6 @@ class OpQueue(TaskControlMixin, ExecutionMixin, SseEventsMixin):
         )
         self._pending.add(op.task_id)
         self._ops_by_id[op.task_id] = op
-        # The ledger row already exists in "pending" state (written by a
-        # prior submit or reconcile).  Skip the pending write and go
-        # straight to "running" so the old row is not orphaned.
-        await self._ledger_state(op, "running")
         if kind in self._high_priority:
             await self._q_hi.put(op)
         else:

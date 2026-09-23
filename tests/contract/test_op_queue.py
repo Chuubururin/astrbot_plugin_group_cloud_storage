@@ -473,3 +473,69 @@ async def test_pause_running_then_immediate_resume_not_lost():
     st = await q.status()
     assert st["recent"][0]["state"] == "ok"
     await q.shutdown()
+
+
+# ---------- 断点恢复认领（claim，item 8） ----------
+
+class _LedgerSpy:
+    """Records every ledger state the queue writes."""
+
+    def __init__(self) -> None:
+        self.states: list[tuple[str, str]] = []
+
+    async def on_state(self, task_id, kind, target, payload, state, error=None):
+        self.states.append((task_id, state))
+
+    async def on_op(self, task_id, action, before=None, after=None):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_claim_adopts_the_row_id_and_writes_no_ledger_state():
+    """认领复用原 task_id，且认领本身不是状态转移。
+
+    submit() 总是 mint 新 id，而台账按 task_id upsert：旧版每点一次断点恢复
+    就把原 pending 行丢成孤儿（进程存续期内可恢复集合单调增长）。claim() 保留
+    行自身的身份，让终态写回落到用户点击的那一行。预写 "running" 则正是 Bug-13
+    的僵尸形态——从未被 worker 消费的认领会留下一条永远运行中的记录。"""
+    gate = asyncio.Event()
+    led = _LedgerSpy()
+
+    async def run(op: Op) -> None:
+        await gate.wait()
+
+    q = OpQueue(run, interval=0.0, slots=4, ledger=led)
+    await q.start()
+    await q.submit("move_file")            # 高优 worker 1 阻塞
+    await q.submit("move_file")            # 高优 worker 2 阻塞
+    await asyncio.sleep(0.05)
+    tid = await q.claim("bp-row-1", "convert_volumes", "g1", {"resource_id": "g1:file:77"})
+    assert tid == "bp-row-1"                       # 原身份，未 mint 新 id
+    assert tid in q._pending and tid in q._ops_by_id  # 排队中，未被消费
+    assert q._ops_by_id[tid].payload == {"resource_id": "g1:file:77"}
+    assert [t for t, _ in led.states if t == "bp-row-1"] == []  # 认领零台账写
+    gate.set()
+    await _drain(q, 3)
+    assert [s for t, s in led.states if t == "bp-row-1"] == ["running", "done"]
+    await q.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_claim_refuses_an_id_the_queue_still_owns():
+    """队列已持有该 id 时认领返回 None：不再让一个身份挂两套云端写入。"""
+    gate = asyncio.Event()
+    led = _LedgerSpy()
+
+    async def run(op: Op) -> None:
+        await gate.wait()
+
+    q = OpQueue(run, interval=0.0, slots=4, ledger=led)
+    await q.start()
+    live = await q.submit("convert_volumes", "g1", {"steps": 5})
+    # 拒绝路径无 await，worker 无从插队：前后快照必须逐条相等
+    before = list(led.states)
+    assert await q.claim(live, "convert_volumes", "g1", {}) is None
+    assert led.states == before
+    gate.set()
+    await _drain(q, 1)
+    await q.shutdown()

@@ -102,8 +102,25 @@ class _FakeTaskControl:
         self._resume_pending_result = {"resumed": 0}
 
     async def list_tasks(self, **kw):
+        """Mirror adapters/persistence/sqlite/outbox.py::ledger_query, which the
+        real TaskControlService forwards to. The resume-pending handler pushed
+        its kind whitelist down into SQL, so a fake that ignored `kinds` would
+        make the "move_file is never claimed" assertion test the fake."""
         self.calls.append(("list_tasks", kw))
-        return self._tasks
+        rows = self._tasks
+        ids = kw.get("task_ids")
+        if ids:
+            rows = [r for r in rows if str(r.get("task_id")) in {str(i) for i in ids}]
+        for key in ("state", "target"):
+            if kw.get(key):
+                rows = [r for r in rows if r.get(key) == kw[key]]
+        kinds, kind = kw.get("kinds"), kw.get("kind")
+        if kinds:
+            rows = [r for r in rows if r.get("kind") in list(kinds)]
+        elif kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        offset, limit = int(kw.get("offset") or 0), int(kw.get("limit") or 100)
+        return [dict(r) for r in rows[offset:offset + limit]]
 
     async def queue_status(self):
         return self._queue_status
@@ -138,6 +155,10 @@ class _FakeQueue:
     def __init__(self):
         self.submitted: list[tuple[str, dict]] = []
         self.claimed: list[tuple[str, dict]] = []
+        # Ids the queue already owns: claim refuses these, exactly like the
+        # real _ops_by_id liveness index.
+        self.live: set[str] = set()
+        self.refused: list[str] = []
         self._submit_id = "task-001"
 
     async def submit(self, kind, target="", payload=None):
@@ -145,6 +166,10 @@ class _FakeQueue:
         return self._submit_id
 
     async def claim(self, task_id, kind, target="", payload=None):
+        if task_id in self.live:
+            self.refused.append(task_id)
+            return None
+        self.live.add(task_id)
         self.claimed.append((task_id, kind, {"target": target, "payload": payload}))
         return task_id
 
@@ -170,6 +195,13 @@ def _make_services(**overrides):
     for k, v in overrides.items():
         setattr(svc, k, v)
     return svc
+
+
+def _pending_row(task_id, kind, payload="{}", target="g1"):
+    """An op_ledger row as ledger_query hands it to the resume handler
+    (state=pending is what that handler filters on)."""
+    return {"task_id": task_id, "kind": kind, "target": target,
+            "payload": payload, "state": "pending"}
 
 
 def _patch_json_body(data):
@@ -403,13 +435,10 @@ class TestApiResumePending:
         # 可恢复预检通过的资源（convert_volumes 需要存在且非组合形态）
         svc.store._resources = {77: {"name": "big.zip", "meta": {}}}
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
-             "payload": '{"resource_id": "g1:file:77"}'},
-            {"task_id": "t2", "kind": "video_upload", "target": "g1",
-             "payload": '{"path": "/tmp/fake_staged.mp4"}'},
-            {"task_id": "t3", "kind": "netdisk_index", "target": "g1",
-             "payload": '{"path": "/media"}'},
-            {"task_id": "t4", "kind": "move_file", "target": "g1", "payload": "{}"},
+            _pending_row("t1", "convert_volumes", '{"resource_id": "g1:file:77"}'),
+            _pending_row("t2", "video_upload", '{"path": "/tmp/fake_staged.mp4"}'),
+            _pending_row("t3", "netdisk_index", '{"path": "/media"}'),
+            _pending_row("t4", "move_file", "{}"),
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         monkeypatch.setattr(
@@ -420,17 +449,19 @@ class TestApiResumePending:
         # move_file should be skipped (not in whitelist)
         claimed_kinds = [kind for _, kind, _ in svc.queue.claimed]
         assert "move_file" not in claimed_kinds
+        assert result["breakpoint_pending"] == 3
 
     @pytest.mark.asyncio
     async def test_resume_pending_invalid_json_payload(self, monkeypatch):
         svc = _make_services()
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "netdisk_index", "target": "g1", "payload": "not-json"},
+            _pending_row("t1", "netdisk_index", "not-json"),
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         result = await api_tasks_resume_pending(svc)
         # not-json -> payload {} -> precheck: missing path -> failed_preflight
         assert result["resumed"] == 0
+        assert result["already_queued"] == 0
         assert result["failed_preflight"] == 1
 
     @pytest.mark.asyncio
@@ -439,8 +470,8 @@ class TestApiResumePending:
         svc = _make_services()
         svc.store._resources = {}  # resource missing (numeric + rid lookups miss)
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
-             "payload": '{"resource_id": "g1:file:10092", "id": 10092}'},
+            _pending_row("t1", "convert_volumes",
+                         '{"resource_id": "g1:file:10092", "id": 10092}'),
         ]
         states: list[tuple] = []
 
@@ -469,8 +500,7 @@ class TestApiResumePending:
                   "meta": {"composition": encode_composition("volumes", 3, "binary", "abc")}}
         svc.store._by_rid = {"g1:file:uuid-x": detail}
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
-             "payload": '{"resource_id": "g1:file:uuid-x"}'},
+            _pending_row("t1", "convert_volumes", '{"resource_id": "g1:file:uuid-x"}'),
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         result = await api_tasks_resume_pending(svc)
@@ -484,8 +514,8 @@ class TestApiResumePending:
         svc = _make_services()
         svc.store._resources = {10092: {"name": "big.zip", "meta": {}}}
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "convert_volumes", "target": "g1",
-             "payload": '{"resource_id": "g1:file:10092", "id": 10092}'},
+            _pending_row("t1", "convert_volumes",
+                         '{"resource_id": "g1:file:10092", "id": 10092}'),
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         result = await api_tasks_resume_pending(svc)
@@ -498,8 +528,8 @@ class TestApiResumePending:
         """Bug-13: 暂存文件已丢失的 video_upload 不再重提。"""
         svc = _make_services()
         svc.task_control._tasks = [
-            {"task_id": "t1", "kind": "video_upload", "target": "g1",
-             "payload": '{"path": "/tmp/definitely_missing_zz.mp4"}'},
+            _pending_row("t1", "video_upload",
+                         '{"path": "/tmp/definitely_missing_zz.mp4"}'),
         ]
         monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
         monkeypatch.setattr("os.path.isfile", lambda p: False)
@@ -508,7 +538,85 @@ class TestApiResumePending:
         assert result["failed_preflight"] == 1
         assert svc.queue.claimed == []
 
+    @pytest.mark.asyncio
+    async def test_resume_pending_twice_reuses_the_same_rows(self, monkeypatch):
+        """Item 8: 断点恢复必须幂等。
 
+        submit() mints a fresh task_id and the ledger upserts on task_id, so
+        every click used to leave the row it just "recovered" pending forever:
+        the resumable set grew by one per click for the life of the process
+        (ledger_reconcile only runs at startup), and the next click re-ran a
+        task already in flight under a second identity. claim() adopts the
+        original row and refuses ids the queue still owns."""
+        svc = _make_services()
+        svc.store._resources = {77: {"name": "big.zip", "meta": {}}}
+        svc.task_control._tasks = [
+            _pending_row("t1", "convert_volumes", '{"resource_id": "g1:file:77"}'),
+            _pending_row("t2", "netdisk_index", '{"path": "/media"}'),
+        ]
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+
+        first = await api_tasks_resume_pending(svc)
+        assert first["resumed"] == 2
+        assert first["already_queued"] == 0
+        assert [tid for tid, _, _ in svc.queue.claimed] == ["t1", "t2"]
+
+        second = await api_tasks_resume_pending(svc)
+        assert second["resumed"] == 0
+        assert second["already_queued"] == 2
+        assert second["breakpoint_pending"] == 2
+        # No second identity per row: t1/t2 were refused, not re-adopted.
+        assert [tid for tid, _, _ in svc.queue.claimed] == ["t1", "t2"]
+        assert svc.queue.refused == ["t1", "t2"]
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_partial_live_set_counts_each_row_once(self, monkeypatch):
+        """One task already in flight must not suppress the others, and must
+        not be reported as resumed (the toast would promise work that was
+        never submitted)."""
+        svc = _make_services()
+        svc.task_control._tasks = [
+            _pending_row("t1", "netdisk_index", '{"path": "/a"}'),
+            _pending_row("t2", "netdisk_index", '{"path": "/b"}'),
+        ]
+        svc.queue.live.add("t1")  # the queue owns t1: queued, running, or paused
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 1
+        assert result["already_queued"] == 1
+        assert [tid for tid, _, _ in svc.queue.claimed] == ["t2"]
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_accepts_parsed_payload_dict(self, monkeypatch):
+        """生产形态：ledger_query 已把 payload json.loads 成 dict。
+
+        其余用例喂的是 JSON 字符串，只有这条走真实适配器给出的 dict 分支。"""
+        svc = _make_services()
+        row = _pending_row("t1", "netdisk_index", {"path": "/media"})
+        svc.task_control._tasks = [row]
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 1
+        assert svc.queue.claimed == [("t1", "netdisk_index",
+                                      {"target": "g1", "payload": {"path": "/media"}})]
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_claim_error_still_reports_the_rows(self, monkeypatch):
+        """claim 抛错的行仍是 pending：响应必须带 note，否则前端兜底报"无待恢复任务"。"""
+        svc = _make_services()
+        svc.task_control._tasks = [
+            _pending_row("t1", "netdisk_index", {"path": "/media"}),
+        ]
+
+        async def _boom(task_id, kind, target="", payload=None):
+            raise RuntimeError("queue closed")
+
+        svc.queue.claim = _boom
+        monkeypatch.setattr(webapi.webapi, "json_body", _patch_json_body({}))
+        result = await api_tasks_resume_pending(svc)
+        assert result["resumed"] == 0
+        assert result["breakpoint_pending"] == 1
+        assert "认领失败" in result["note"]
 # ---------------------------------------------------------------------------
 # D-4: api_sync_withering (凋零差分手动触发)
 # ---------------------------------------------------------------------------
@@ -582,8 +690,8 @@ class TestApiSyncStatus:
     async def test_sync_status_with_recent_scan(self, monkeypatch):
         svc = _make_services()
         svc.task_control._tasks = [
-            {"task_id": "scan1", "state": "done", "created_at": "2026-09-01",
-             "updated_at": "2026-09-01", "error": None}
+            {"task_id": "scan1", "kind": "diff_file_scan", "state": "done",
+             "created_at": "2026-09-01", "updated_at": "2026-09-01", "error": None}
         ]
         result = await api_sync_status(svc)
         assert result["last_diff_scan"]["task_id"] == "scan1"
@@ -594,3 +702,4 @@ class TestApiSyncStatus:
         svc.config["auto_scan_interval_hours"] = 0
         result = await api_sync_status(svc)
         assert result["auto_scan_enabled"] is False
+

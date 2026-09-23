@@ -219,8 +219,12 @@ async function runWithering() {
 async function resumePending() {
   try {
     const r = await apiPost(API.TASKS_RESUME_PENDING, {});
+    const preflight = r.failed_preflight ? `，${r.failed_preflight} 个预检失败已落失败态` : '';
     if (r.resumed > 0) {
-      toast(`已重提 ${r.resumed} 个断点任务${r.failed_preflight ? `，${r.failed_preflight} 个预检失败已落失败态` : ''}`, 'success');
+      toast(`已重提 ${r.resumed} 个断点任务${r.already_queued ? `，${r.already_queued} 个在队未重复提交` : ''}${preflight}`, 'success');
+    } else if (r.already_queued > 0) {
+      // 在队的行按原身份认领、不再重复提交，也不能报成"已重提"
+      toast(`${r.already_queued} 个断点任务仍在队列中，未重复提交${preflight}`, 'info');
     } else if (r.failed_preflight > 0) {
       toast(`${r.failed_preflight} 个断点任务预检失败（输入已不存在），已落失败态`, 'warn');
     } else {

@@ -17,6 +17,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---- minimal DOM stub (functional children: the diff really mutates it) ----
 function el(tag = 'div') {
@@ -191,4 +194,26 @@ test('L12: the empty state goes through the keyed diff', async () => {
   await tick(); await tick();
   assert.deepEqual(tbody.children.map((c) => c.dataset.key), ['t3'],
     'the empty placeholder must be released once data arrives');
+});
+
+/**
+ * R4: 断点恢复的提示必须区分"重提了几个"与"在队未重复提交"。
+ *
+ * resume-pending 现在按 ledger 行的原身份认领（queue.claim），在队的行返回
+ * already_queued 而不是 resumed。旧提示只看 resumed，会把"什么都没提交"报成
+ * "无待恢复任务"，用户以为断点已经丢了（或以为按钮坏了）。这条源码契约钉住
+ * 分支顺序：already_queued 必须先于 note 兜底命中。
+ */
+test('R4: the resume toast never reports 无待恢复任务 while rows are queued', () => {
+  const src = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'views', 'tasks.js'),
+    'utf8');
+  const fn = src.slice(src.indexOf('async function resumePending()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+
+  assert.ok(body.includes('r.already_queued > 0'), 'resumePending must branch on already_queued');
+  assert.ok(
+    body.indexOf('r.already_queued > 0') < body.indexOf("'无待恢复任务'"),
+    'the already-queued branch must be tested before the 无待恢复任务 fallback');
+  assert.ok(body.includes('已重提'), 'resumed rows are still reported as re-submitted');
 });

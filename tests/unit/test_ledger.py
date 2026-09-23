@@ -125,6 +125,40 @@ async def test_ledger_upsert_and_query(store):
 
 
 @pytest.mark.asyncio
+async def test_ledger_query_kinds_filter(store):
+    """kinds 白名单在 SQL 侧生效：断点恢复不再被无关 pending 行挤出窗口。
+
+    The resume handler used to page every pending row and drop the
+    non-whitelisted ones in Python, so a few hundred pending file_scan rows
+    turned one click into several dozen pages -- and could hide the resumable
+    rows past the window entirely.
+    """
+    from adapters.persistence.sqlite.outbox import LEDGER_BREAKPOINT_KINDS
+
+    for i in range(200):
+        await store.ledger_upsert(f"scan{i}", "diff_file_scan", "g1", None, "pending")
+    await store.ledger_upsert("cv1", "convert_volumes", "g1", {"id": 1}, "pending")
+    await store.ledger_upsert("nd1", "netdisk_index", "g1", {"path": "/a"}, "pending")
+    await store.ledger_upsert("mv1", "move_file", "g1", None, "pending")
+    # 终态行即使 kind 命中也不回（断点恢复只看 pending）
+    await store.ledger_upsert("cv2", "convert_volumes", "g1", None, "done")
+
+    kinds = sorted(LEDGER_BREAKPOINT_KINDS)
+    got = await store.ledger_query(state="pending", kinds=kinds, limit=100)
+    assert {r["task_id"] for r in got} == {"cv1", "nd1"}
+    # 窗口不再被无关 kind 挤爆：一页 100 条就取尽
+    assert len(got) < 100
+
+    # kinds 优先于 kind（同时给出时不叠加、不冲突；此查询不带 state，终态也在内）
+    assert {r["task_id"] for r in await store.ledger_query(
+        kind="move_file", kinds=kinds)} == {"cv1", "nd1", "cv2"}
+    # 空 kinds 走 falsy 分支：等价于不过滤
+    unfiltered = await store.ledger_query(kinds=[], limit=500)
+    assert len(unfiltered) == 204  # 200 无关 pending + 2 可恢复 + 1 move_file + 1 终态
+    assert {"mv1", "cv2"} <= {r["task_id"] for r in unfiltered}
+
+
+@pytest.mark.asyncio
 async def test_ledger_query_task_ids_filter(store):
     """task_ids 精确过滤：接力链按已知 id 轮询，不受无过滤分页窗口影响。"""
     for i in range(5):

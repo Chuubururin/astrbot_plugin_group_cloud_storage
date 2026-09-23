@@ -345,3 +345,15 @@ async def test_undo_running_task_still_interrupts(env):
     r = await env.tc.undo(task_id=t1)
     assert r["ok"] is True and r["action"] == "interrupted"
     await _wait_state(env.store, t1, "cancelled", timeout=5.0)
+
+@pytest.mark.asyncio
+async def test_claim_finishes_on_the_original_ledger_row(env):
+    """断点认领写回原行：台账只剩一行，终态落在用户点击的那个 id 上。
+
+    端到端（真 SQLite + 真 OpQueue）钉住 item 8 的另一半：claim 只复用身份、
+    不 mint 新行，也不在认领瞬间改写台账——running/done 全由 worker 落笔。"""
+    await env.store.ledger_upsert("bp1", "convert_volumes", "g1", {"id": 1}, "pending")
+    assert await env.queue.claim("bp1", "convert_volumes", "g1", {"id": 1}) == "bp1"
+    row = await _wait_state(env.store, "bp1", "done")
+    assert row["payload"]["id"] == 1  # 原 payload 保留（handler 会加检查点计数 _n）
+    assert [r["task_id"] for r in await env.store.ledger_query()] == ["bp1"]
