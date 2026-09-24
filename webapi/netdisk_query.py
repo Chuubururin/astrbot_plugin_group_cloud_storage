@@ -73,6 +73,7 @@ async def api_bridge_config_get(s: Services) -> dict:
             "bridge_max_size": cfg.get("bridge_max_size", "0"),
             "download_server_enabled": cfg.get("download_server_enabled", False),
             "download_server_host": cfg.get("download_server_host", "127.0.0.1"),
+            "download_public_host": cfg.get("download_public_host", ""),
             "download_http_port": cfg.get("download_http_port", 6186),
         }
     )

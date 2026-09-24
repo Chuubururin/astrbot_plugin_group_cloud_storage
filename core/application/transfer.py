@@ -63,13 +63,16 @@ def download_endpoint_origins(config) -> set[tuple[str, int]]:
     if not bool(cfg.get("download_server_enabled", False)):
         return set()
     host = str(cfg.get("download_server_host", "127.0.0.1") or "127.0.0.1")
+    # 直链里发布的是 download_public_host；绑与发不同时，取件请求打到的是后者，
+    # 两个地址都必须进信任集，否则自家转存会被自己的 SSRF 闸门拦下。
+    public = str(cfg.get("download_public_host", "") or "").strip()
     ports = {
         int(cfg.get("download_http_port", 0) or 0),
         int(cfg.get("download_sftp_port", 0) or 0),
         int(cfg.get("download_smb_port", 0) or 0),
     }
     ports.discard(0)
-    hosts = {host}
+    hosts = {h for h in (host, public) if h}
     # A wildcard bind also serves on loopback.
     if host in ("0.0.0.0", "::"):
         hosts |= {"127.0.0.1", "::1", "localhost"}

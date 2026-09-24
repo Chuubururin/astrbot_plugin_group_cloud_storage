@@ -34,6 +34,9 @@ DEFAULTS: dict = {
     "fetch_allow_private_address": False,
     "download_server_enabled": False,
     "download_server_host": "127.0.0.1",
+    # 发布地址（生成直链 / SMB UNC / SFTP 信息里的主机）。留空 = 沿用绑定地址；
+    # 只有在"绑 127.0.0.1 但要发给别人 192.168.x.x"这类部署下才需要设。
+    "download_public_host": "",
     "download_http_port": 6186,
     "download_sftp_port": 0,
     "download_smb_port": 0,

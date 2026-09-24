@@ -100,6 +100,7 @@ _RELOAD_REQUIRED_KEYS = frozenset({
     # allow_private; the token also authenticates every http/sftp/smb address
     "download_server_enabled",
     "download_server_host",
+    "download_public_host",
     "download_http_port",
     "download_sftp_port",
     "download_smb_port",

@@ -49,6 +49,7 @@ async def api_bridge_config_save(s: Services) -> dict:
         "bridge_max_size",
         "download_server_enabled",
         "download_server_host",
+        "download_public_host",
         "download_http_port",
     }
 

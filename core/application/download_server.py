@@ -54,6 +54,10 @@ from ports.meta_store import MetaStorePort
 _ROW_CACHE_TTL = 5.0
 _LOOKUP_PAGE = 50
 
+# Bind-everywhere addresses. Valid to listen on, meaningless to publish: a link
+# built from one resolves on the client to the client's own machine.
+_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
+
 
 def _safe_header_name(value: str) -> str:
     """Strip CR/LF from a header-bound string (filename/URL): no header injection."""
@@ -92,6 +96,9 @@ class DownloadServerService:
         cfg = config if isinstance(config, PluginConfig) else PluginConfig(config or {})
         self.enabled = bool(cfg.get("download_server_enabled", False))
         self.host = str(cfg.get("download_server_host", "127.0.0.1") or "127.0.0.1")
+        # What links, SMB UNC and SFTP info advertise. Empty falls back to the
+        # bind host so a single-address deployment keeps one knob.
+        self.public_host = str(cfg.get("download_public_host", "") or "").strip() or self.host
         self.http_port = int(cfg.get("download_http_port", 0) or 0)
         self.sftp_port = int(cfg.get("download_sftp_port", 0) or 0)
         self.smb_port = int(cfg.get("download_smb_port", 0) or 0)
@@ -147,7 +154,7 @@ class DownloadServerService:
     # ---------- Addresses ----------
 
     def http_base(self) -> str:
-        return f"http://{self.host}:{self.http_port}"
+        return f"http://{self.public_host}:{self.http_port}"
 
     def download_url(self, group_id: str, id: int) -> str:
         return (
@@ -204,7 +211,7 @@ class DownloadServerService:
         return {
             "share": self.smb_share(),
             "path": safe,
-            "unc": f"\\\\{self.host}\\{self.smb_share()}\\{safe}",
+            "unc": f"\\\\{self.public_host}\\{self.smb_share()}\\{safe}",
         }
 
     async def ensure_local(self, group_id: str, id: int, name: str) -> Path | None:
@@ -248,7 +255,7 @@ class DownloadServerService:
 
     def sftp_info(self) -> dict:
         return {
-            "host": self.host,
+            "host": self.public_host,
             "port": self.sftp_port,
             "user": self._sftp_auth[0],
             "password": self._sftp_auth[1],
@@ -299,6 +306,18 @@ class DownloadServerService:
                 "[dlserver] download_server_enabled=true but download_token is "
                 "empty — download service disabled (fail-closed). "
                 "Set download_token in plugin config to enable."
+            )
+            self.enabled = False
+            return
+        # A wildcard is a bind address, not something a client can dial: a link
+        # built from it (`http://0.0.0.0:6186`) resolves to the client's own
+        # host. Fail closed the way an empty token does rather than hand out
+        # links that are broken for everyone.
+        if self.public_host in _WILDCARD_HOSTS:
+            logger.warning(
+                f"[dlserver] download_public_host is a wildcard ({self.public_host}) "
+                "— download service disabled (fail-closed). Bind on 0.0.0.0 is fine; "
+                "set download_public_host to the address clients should reach."
             )
             self.enabled = False
             return

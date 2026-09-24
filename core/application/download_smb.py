@@ -97,7 +97,7 @@ def start_smb_server(svc) -> None:
     svc._smb_thread = threading.Thread(target=_serve, daemon=True)
     svc._smb_thread.start()
     logger.info(
-        f"[dlserver] smb share \\\\{svc.host}\\{svc.smb_share()} on :{svc.smb_port}"
+        f"[dlserver] smb share \\\\{svc.public_host}\\{svc.smb_share()} on :{svc.smb_port}"
     )
 
 
