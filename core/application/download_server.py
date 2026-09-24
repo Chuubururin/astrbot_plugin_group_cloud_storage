@@ -98,7 +98,18 @@ class DownloadServerService:
         self.host = str(cfg.get("download_server_host", "127.0.0.1") or "127.0.0.1")
         # What links, SMB UNC and SFTP info advertise. Empty falls back to the
         # bind host so a single-address deployment keeps one knob.
-        self.public_host = str(cfg.get("download_public_host", "") or "").strip() or self.host
+        published = str(cfg.get("download_public_host", "") or "").strip()
+        self.wildcard_publish = published in _WILDCARD_HOSTS
+        if published and not self.wildcard_publish:
+            self.public_host = published
+        elif self.host in _WILDCARD_HOSTS:
+            # Binding everywhere publishes no usable address; a wildcard typed
+            # into download_public_host is handled as a config error instead.
+            # Loopback keeps the local use that a wildcard bind has always
+            # served, and the warning says what to set for remote clients.
+            self.public_host = "127.0.0.1"
+        else:
+            self.public_host = self.host
         self.http_port = int(cfg.get("download_http_port", 0) or 0)
         self.sftp_port = int(cfg.get("download_sftp_port", 0) or 0)
         self.smb_port = int(cfg.get("download_smb_port", 0) or 0)
@@ -311,16 +322,21 @@ class DownloadServerService:
             return
         # A wildcard is a bind address, not something a client can dial: a link
         # built from it (`http://0.0.0.0:6186`) resolves to the client's own
-        # host. Fail closed the way an empty token does rather than hand out
-        # links that are broken for everyone.
-        if self.public_host in _WILDCARD_HOSTS:
+        # host. Typing one into download_public_host is a config error we
+        # cannot guess past, so fail closed the way an empty token does.
+        if self.wildcard_publish:
             logger.warning(
-                f"[dlserver] download_public_host is a wildcard ({self.public_host}) "
+                f"[dlserver] download_public_host={self.public_host!r} is a wildcard "
                 "— download service disabled (fail-closed). Bind on 0.0.0.0 is fine; "
                 "set download_public_host to the address clients should reach."
             )
             self.enabled = False
             return
+        if self.host in _WILDCARD_HOSTS:
+            logger.info(
+                "[dlserver] binding a wildcard address; links advertise 127.0.0.1. "
+                "Set download_public_host for LAN / OpenList-container clients."
+            )
         if self.http_port > 0:
             self._http_server = await asyncio.start_server(
                 self._handle_http, self.host, self.http_port

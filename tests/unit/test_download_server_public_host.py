@@ -70,13 +70,27 @@ async def test_http_binds_the_listen_host_not_the_public_one(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "[::]"])
-async def test_wildcard_publish_address_fails_closed(monkeypatch, wildcard):
-    """发布地址是通配值时不启动，而不是发一条对谁都不可用的链接。"""
+async def test_explicit_wildcard_publish_address_fails_closed(monkeypatch, wildcard):
+    """把通配地址显式填进 download_public_host：意图是对外发布，我们无法替它猜
+    一个地址，只能不启动，而不是发一条对谁都不可用的链接。"""
     binds = _capture_binds(monkeypatch)
     svc = _svc(download_server_host="127.0.0.1", download_public_host=wildcard)
     await svc.start()
     assert svc.enabled is False
     assert binds == [], "通配发布地址下不该有任何绑定"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "[::]"])
+async def test_wildcard_bind_without_a_publish_host_keeps_working(monkeypatch, wildcard):
+    """旧配置（只把 download_server_host 填成通配、没有新键）不得被上面那条误伤：
+    那是本机自用一直能用的部署。发布面回落到回环并提示如何放行外部客户端。"""
+    binds = _capture_binds(monkeypatch)
+    svc = _svc(download_server_host=wildcard)
+    await svc.start()
+    assert svc.enabled is True
+    assert binds == [(wildcard, 6186)], "绑的仍是配置里的通配地址"
+    assert svc.http_base() == "http://127.0.0.1:6186"
 
 
 @pytest.mark.asyncio
