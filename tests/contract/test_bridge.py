@@ -548,6 +548,52 @@ async def test_cancel_retry_failure_semantics(env, monkeypatch):
     assert row["state"] == state_before
 
 
+# ---------- 轮询失败日志节流（OpenList 故障期间不再每 tick 刷一条 warning） ----------
+
+
+@pytest.mark.asyncio
+async def test_poll_error_log_is_throttled(env, monkeypatch):
+    """OpenList 故障 + 有活跃任务时，旧实现每个 tick 记一条 warning（默认
+    10s 间隔 ≈ 6 条/分钟）。新契约：首条 + 每 _POLL_ERROR_LOG_EVERY 条一次，
+    恢复后自动清零。"""
+    from core.application.bridge import polling as bridge_polling
+
+    ns = env
+    ns.bridge._interval = 0.01
+    tid = await ns.bridge.submit_out("g1", ns.rid)
+    await drain_op(ns.queue, tid)
+
+    async def _down(*a, **kw):
+        raise OpenListApiError("connection refused")
+
+    monkeypatch.setattr(ns.client, "tasks_undone", _down)
+    monkeypatch.setattr(ns.client, "tasks_done", _down)
+    calls: list[str] = []
+
+    def _fake_warning(msg, *a, **kw):
+        calls.append(str(msg))
+
+    monkeypatch.setattr(bridge_polling.logger, "warning", _fake_warning)
+
+    task = asyncio.create_task(ns.bridge._poll_loop())
+    try:
+        await asyncio.sleep(0.15)  # ~15 ticks at 0.01s
+    finally:
+        ns.bridge._stopping = True
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    ns.bridge._stopping = False
+
+    assert len(calls) >= 1, "first failure must be logged"
+    assert len(calls) <= 4, f"log not throttled: {len(calls)} warnings in ~15 ticks"
+    assert "1 consecutive" in calls[0]
+    # 后续条目带连续计数（6、12……），便于从日志推断故障时长
+    assert "consecutive" in calls[-1]
+
+
 # ---------- copy 后 size 校验（2026-09-12 真机坏链：OpenList 同挂载 copy 静默截断） ----------
 
 

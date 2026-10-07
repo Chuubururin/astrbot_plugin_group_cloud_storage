@@ -11,6 +11,8 @@ import asyncio
 import time
 from typing import AsyncIterator
 
+from core.log import logger
+
 
 class SseEventsMixin:
     """Event publishing and subscription (publish/subscribe for handlers and
@@ -28,7 +30,12 @@ class SseEventsMixin:
             try:
                 q.put_nowait(ev)
             except asyncio.QueueFull:
-                pass
+                # Slow consumer: the event is dropped (stream semantics).
+                # Silent drops left no trace when a UI stuck mid-progress
+                # needed diagnosing — keep a debug breadcrumb.
+                logger.debug(
+                    f"[op-queue] sse queue full, dropping {ev.get('type')} event"
+                )
 
     async def subscribe(self) -> AsyncIterator[dict]:
         """Subscribe to the event stream (the consumer must close it on exit)."""

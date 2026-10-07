@@ -139,6 +139,7 @@ async def serve_local_file(
             f"Content-Length: {length}\r\n"
             + (f"Content-Range: bytes {start}-{end}/{total}\r\n" if code == 206 else "")
             + f"Content-Disposition: {_content_disposition(name)}\r\n"
+            + "Cache-Control: no-store\r\n"
             "Connection: close\r\n\r\n"
         ).encode("latin-1")
         writer.write(head)
@@ -378,7 +379,12 @@ def build_sftp_interface(svc):
 
                 try:
                     return svc._run_in_loop(_groups())
-                except Exception:
+                except Exception as e:
+                    # An empty listing is indistinguishable from "no groups"
+                    # for the SFTP client; log so an internal failure (loop
+                    # not ready / DB timeout) does not masquerade as an empty
+                    # directory with zero signal.
+                    logger.warning(f"[dlserver] sftp list groups failed: {e}")
                     return []
             if parts[0] == "staged" and len(parts) == 1:
                 entries = []
@@ -413,7 +419,10 @@ def build_sftp_interface(svc):
 
                 try:
                     return svc._run_in_loop(_files())
-                except Exception:
+                except Exception as e:
+                    logger.warning(
+                        f"[dlserver] sftp list files failed for {parts[0]!r}: {e}"
+                    )
                     return []
             return []
 

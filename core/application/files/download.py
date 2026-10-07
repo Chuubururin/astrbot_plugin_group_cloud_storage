@@ -66,20 +66,34 @@ class DownloadMixin:
         f = cands[0]
         return str(f.file_id), int(f.busid or 0)
 
-    async def direct_link(self, group_id: str, id: int) -> tuple[str, str]:
+    async def direct_link(
+        self, group_id: str, id: int, *, gate=None
+    ) -> tuple[str, str]:
         """Resolve one resource's live direct link (single file only; volumes
         have no single link). Like the web layer's stale-id lookup, falls back
         to a global id search when the (group, id) pair misses. Returns
         (url, name); raises ValueError when the resource is missing or is a
         volume resource; upstream errors propagate to the caller.
 
+        ``gate`` is an optional async callable ``(group_id) -> None`` raising
+        on a closed group; when the global fallback lands on a group other
+        than the requested one, the fallback must pass the same open-gate the
+        requested group passed — otherwise a stale id leaks files of
+        unmanaged/offline/dissolved groups. Gate failures are reported as
+        "not found" so the resource's existence is not revealed.
+
         OneBot calls are scoped to the resource's group owning account, so a
         web-triggered link resolves through exactly one account (the same
         routing rule queue ops follow).
         """
-        detail = await self.store.get_resource_detail(
-            group_id, id
-        ) or await self.store.get_resource_any(id)
+        detail = await self.store.get_resource_detail(group_id, id)
+        if not detail:
+            detail = await self.store.get_resource_any(id)
+            if detail and gate is not None:
+                try:
+                    await gate(str(detail.get("group_id") or ""))
+                except Exception:
+                    detail = None
         if not detail:
             raise ValueError(f"resource {id} not found")
         if (detail.get("meta") or {}).get("volumes"):
@@ -208,7 +222,10 @@ class DownloadMixin:
                 (detail.get("meta") or {}).get("total_seconds"),
             )
         compression = (detail.get("meta") or {}).get("compression")
-        out = self.tmp_dir / f"recon_{uuid.uuid4().hex[:10]}_{name}"
+        # Path(...).name: the DB name is an external string — defense in
+        # depth against separator/illegal-char injection into the scratch
+        # path (same discipline as inner_name/original below).
+        out = self.tmp_dir / f"recon_{uuid.uuid4().hex[:10]}_{Path(name).name}"
         extract_dir = self.tmp_dir / f"unzip_{uuid.uuid4().hex[:10]}"
         extract_dir.mkdir(parents=True, exist_ok=True)
         ok = False
@@ -358,11 +375,13 @@ class DownloadMixin:
         import subprocess
         import shutil as _sh
 
+        from core.application.composition.reassembler import concat_escape
+
         if not _sh.which("ffmpeg"):
             raise ValueError("ffmpeg not available for video reassemble")
         seg_dir = self.tmp_dir / f"vidrecon_{uuid.uuid4().hex[:10]}"
         seg_dir.mkdir(parents=True, exist_ok=True)
-        out = self.tmp_dir / f"recon_{uuid.uuid4().hex[:10]}_{name}"
+        out = self.tmp_dir / f"recon_{uuid.uuid4().hex[:10]}_{Path(name).name}"
         try:
             list_file = seg_dir / "concat.txt"
             with list_file.open("w", encoding="utf-8") as lf:
@@ -387,7 +406,7 @@ class DownloadMixin:
                         sha = await asyncio.to_thread(sha256_file, seg)
                         if sha != v.sha256:
                             raise ValueError(f"volume {v.seq} sha256 mismatch")
-                    lf.write(f"file '{seg.as_posix()}'\n")
+                    lf.write(f"file {concat_escape(seg)}\n")
 
             def _concat():
                 proc = subprocess.run(

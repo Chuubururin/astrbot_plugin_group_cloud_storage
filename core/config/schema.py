@@ -6,8 +6,28 @@ never blocks execution.
 
 from __future__ import annotations
 
+import ipaddress
+import re
+
 from ..units import parse_size
-from .defaults import DEFAULTS
+from .defaults import DEFAULTS, _to_bool
+
+# "host:port" typed into download_server_host (the port keys exist for that):
+# a trailing ":digits" that is not part of a valid IP literal (bare IPv6
+# addresses like ::1 or 2001:db8::1 are legitimate and unflagged).
+_HOST_PORT_RE = re.compile(r":\d+$")
+
+
+def _suspect_host(host: str) -> bool:
+    if any(c.isspace() for c in host):
+        return True
+    if ":" not in host or not _HOST_PORT_RE.search(host):
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return True  # not a bare IP literal -> it really is host:port
+    return False
 
 
 def validate_config(data: dict) -> list[tuple[str, str]]:
@@ -33,6 +53,30 @@ def validate_config(data: dict) -> list[tuple[str, str]]:
                 "下载服务将以无认证模式运行（不安全）。"
                 "已启用 fail-closed 保护：服务实际不会启动。"
                 "请设置 download_token 后重载。",
+            )
+        )
+    # Semantic: bridge enabled without a base URL -> the whole OpenList
+    # subset (netdisk/bridge/离线下载) silently degrades to "not configured"
+    if _to_bool(data.get("openlist_enabled", False)) and not str(
+        data.get("openlist_base_url", "") or ""
+    ).strip():
+        warnings.append(
+            (
+                "openlist_base_url",
+                "openlist_enabled=true 但 openlist_base_url 为空——"
+                "网盘/桥接/离线下载子集将不可用。",
+            )
+        )
+    # Semantic: the bind host feeds download_url()/http_base() verbatim, so
+    # whitespace or a host:port value produces broken download addresses
+    # ("http://h:6186:6186/..."). Advisory only; bare IPv6 literals pass.
+    host = str(data.get("download_server_host", "") or "")
+    if host and _suspect_host(host):
+        warnings.append(
+            (
+                "download_server_host",
+                f"格式可疑：{host!r}——应为 IP 或主机名，端口请用 "
+                "download_http_port / download_sftp_port 配置。",
             )
         )
     # Semantic: database admin token empty → admin endpoints stay closed

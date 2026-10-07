@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -220,6 +221,8 @@ async def test_endpoint_redirects_to_the_proxied_cdn_link_when_no_local_file(
     assert b"Location: http://127.0.0.1:" in resp, resp
     assert b"/download?proxy=" in resp, resp
     assert b"Content-Length: 0" in resp
+    # Location 携带一次性 token：中间代理不得缓存重放这条 302
+    assert b"Cache-Control: no-store" in resp, resp
 
 
 async def test_endpoint_302_target_actually_serves_the_real_filename(
@@ -474,6 +477,74 @@ async def test_endpoint_serves_a_staged_artifact(http_server, tmp_path):
     # token 已被 pop 语义：staged 是只读一次还是可重复？按实现记录当前行为
     again = await _request(port, f"/download?token={TOKEN}&staged=tok123")
     assert _head(again) in ("HTTP/1.1 200 OK", "HTTP/1.1 404 Not Found")
+
+
+# ---------- 9: 按资源签名链接（token 不再进 URL） ----------
+
+
+def _path_of(url: str) -> str:
+    """http_base 里的端口是 start() 守卫用的假端口(1)，请求只要 path+query。"""
+    return url[url.index("/download"):]
+
+
+async def test_signed_link_serves_and_hides_master_token(http_server, tmp_path):
+    """download_url() 发行的链接必须：不含主 token、能真实取回内容。
+
+    变异检验：把 _request_authorized 的 sig 分支摘掉 -> 本用例 401 变红。
+    """
+    src = tmp_path / "recon_e2e_signed.bin"
+    src.write_bytes(b"signedbody")
+
+    async def _download_info(group, rid):
+        return (src.as_posix(), "signed.bin")
+
+    port, svc = await http_server(download_info=_download_info)
+    url = svc.download_url("g1", 1)
+    assert TOKEN not in url, "主 token 泄漏进群聊链接"
+    assert "sig=" in url and "exp=" in url
+
+    resp = await _request(port, _path_of(url))
+    assert _head(resp) == "HTTP/1.1 200 OK"
+    assert resp.endswith(b"signedbody")
+
+
+async def test_signed_link_tamper_and_expiry_rejected(http_server, tmp_path):
+    src = tmp_path / "recon_e2e_tamper.bin"
+    src.write_bytes(b"abcd")
+
+    async def _download_info(group, rid):
+        return (src.as_posix(), "tamper.bin")
+
+    port, svc = await http_server(download_info=_download_info)
+    target = _path_of(svc.download_url("g1", 1))
+
+    # 签名覆盖资源三元组：换群/换 id 都得 401
+    assert _head(await _request(port, target.replace("group=g1", "group=g2"))) \
+        == "HTTP/1.1 401 Unauthorized"
+    assert _head(await _request(port, target.replace("id=1", "id=2"))) \
+        == "HTTP/1.1 401 Unauthorized"
+    # 破坏签名十六进制
+    assert _head(await _request(port, target.replace("sig=", "sig=0"))) \
+        == "HTTP/1.1 401 Unauthorized"
+    # 过期链接：用同一密钥手签一个过去的 exp
+    exp = int(time.time()) - 10
+    expired = f"/download?group=g1&id=1&exp={exp}&sig={svc._link_sig('g|g1|1', exp)}"
+    assert _head(await _request(port, expired)) == "HTTP/1.1 401 Unauthorized"
+
+
+async def test_signed_proxy_and_staged_links_hide_master_token(http_server, tmp_path):
+    port, svc = await http_server()
+    proxy_url = svc.register_proxy("https://1.2.3.4/f.bin", "f.bin")
+    assert TOKEN not in proxy_url and "sig=" in proxy_url
+
+    staged_file = tmp_path / "s.txt"
+    staged_file.write_text("hi", encoding="utf-8")
+    info = svc.register_staged(staged_file, "s.txt")
+    assert TOKEN not in info["http_url"] and "sig=" in info["http_url"]
+
+    resp = await _request(port, _path_of(info["http_url"]))
+    assert _head(resp) == "HTTP/1.1 200 OK"
+    assert resp.endswith(b"hi")
 
 
 # ---------- 清理 ----------

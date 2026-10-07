@@ -12,6 +12,7 @@ Content-Disposition carrying the real name.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from pathlib import Path
@@ -19,6 +20,10 @@ from pathlib import Path
 from core.log import logger
 
 _STREAM_CHUNK = 1 << 16
+
+# C0 control chars + DEL: CR/LF are the header-injection vector, the rest
+# would end up as stray control bytes in the raw response head.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 # A client that connects and stops reading (TCP zero window) must not pin
 # this coroutine -- and the open upstream response -- forever (L6). Mirrors
@@ -44,6 +49,7 @@ class ProxyRegistry:
         token: str,
         *,
         allow_private: bool = False,
+        signer=None,
     ) -> str:
         self._gc()
         t = uuid.uuid4().hex[:10]
@@ -53,13 +59,23 @@ class ProxyRegistry:
             "ts": time.time(),
             "allow_private": allow_private,
         }
+        if signer is not None:
+            # Signed link form: the master token must not ride in URLs that
+            # leave this host (302 Location, OpenList offline sources).
+            return f"{http_base}/download?proxy={t}&{signer(t)}"
         return f"{http_base}/download?proxy={t}&token={token}"
 
     def pop(self, t: str) -> dict | None:
         entry = self._entries.get(t)
-        if entry is not None:
-            # Single-use: the token can't be replayed after the first hit.
-            self._entries.pop(t, None)
+        if entry is None:
+            return None
+        # Single-use: the token can't be replayed after the first hit.
+        self._entries.pop(t, None)
+        # _gc() only runs on register(); a token can age out with no
+        # subsequent registration, so the TTL must also be enforced at
+        # read time or an hour-old token stays redeemable forever.
+        if time.time() - entry["ts"] > _TTL_SECONDS:
+            return None
         return entry
 
     def _gc(self) -> None:
@@ -68,9 +84,15 @@ class ProxyRegistry:
             self._entries.pop(k, None)
 
 
-def _header_safe(name: str) -> str:
-    """Strip CR/LF from filenames to prevent HTTP header injection."""
-    return name.replace("\r", "").replace("\n", "")
+def _header_safe(value: str) -> str:
+    """Strip C0 control chars (incl. CR/LF) and DEL from a header-bound
+    string: no header injection, no stray control bytes in the raw head.
+
+    Single source of truth for every header-bound filename/URL in the
+    download service (download_server.py used to keep its own CR/LF-only
+    copy).
+    """
+    return _CTRL_RE.sub("", value)
 
 
 def ascii_fallback(name: str) -> str:
@@ -81,20 +103,28 @@ def ascii_fallback(name: str) -> str:
     omit it. Non-ASCII characters become "_"; the extension is preserved so
     the saved file still has a type. Never returns an empty string.
     """
-    import re as _re
-
-    cleaned = _re.sub(r"[^\x20-\x7e]", "_", _header_safe(name))
+    cleaned = re.sub(r"[^\x20-\x7e]", "_", _header_safe(name))
     cleaned = cleaned.replace("\\", "_").replace("/", "_").replace('"', "_").strip()
     return cleaned or "download"
 
 
 def _content_disposition(name: str) -> str:
-    """Full RFC6266 Content-Disposition value: ASCII fallback + encoded real name."""
+    """Full RFC6266 Content-Disposition value: ASCII fallback + encoded real name.
+
+    Single builder for every download response (webapi/resources_mutation.py
+    used to keep its own inline copy). ``name`` is header-safe by the time it
+    gets here only if callers ran _header_safe; the builder itself re-runs it
+    so a future call site can't regress the contract.
+    """
     from urllib.parse import quote as _quote
 
+    name = _header_safe(name or "download")
     return (
         f"attachment; filename=\"{ascii_fallback(name)}\"; "
-        f"filename*=UTF-8''{_quote(name)}"
+        # safe="": RFC5987 attr-char has no "/" and quote() leaves it
+        # unencoded by default, so a filename with a slash produced a
+        # non-spec-compliant filename* value.
+        f"filename*=UTF-8''{_quote(name, safe='')}"
     )
 
 
@@ -128,6 +158,7 @@ async def serve_staged(writer: asyncio.StreamWriter, entry: dict, reply) -> None
         "Content-Type: text/plain; charset=utf-8\r\n"
         f"Content-Length: {total}\r\n"
         f"Content-Disposition: {_content_disposition(name)}\r\n"
+        "Cache-Control: no-store\r\n"
         "Connection: close\r\n\r\n"
     ).encode("latin-1")
     writer.write(head)
@@ -202,6 +233,7 @@ async def serve_proxy(
                     "HTTP/1.1 200 OK\r\n"
                     f"Content-Type: {ctype}\r\n"
                     f"Content-Disposition: {_content_disposition(name)}\r\n"
+                    "Cache-Control: no-store\r\n"
                     "Connection: close\r\n\r\n"
                 ).encode("latin-1")
                 writer.write(head)
@@ -213,7 +245,16 @@ async def serve_proxy(
                 await resp.aclose()
                 return
     except Exception as e:
-        logger.warning(f"[dlserver] proxy fetch failed: {e}")
+        # Host+path only: the query carries per-CDN auth signatures that
+        # must not land in the log.
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        logger.warning(
+            f"[dlserver] proxy fetch failed for {parts.scheme}://{parts.netloc}"
+            f"{parts.path}: {e}",
+            exc_info=True,
+        )
         try:
             await reply(writer, 502, b"proxy fetch failed")
         except Exception:

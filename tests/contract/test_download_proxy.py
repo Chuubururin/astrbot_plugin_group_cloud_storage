@@ -103,3 +103,26 @@ async def test_serve_proxy_blocks_private_redirect(monkeypatch):
     await dpx.serve_proxy(sink, {"url": _DIRECT, "name": "probe.png"}, _reply)
     assert b"HTTP/1.1 502" in sink.data
     assert client.requested == [_DIRECT]
+
+
+# ---------- ProxyRegistry TTL 在读取时强制（_gc 只在 register 时跑） ----------
+
+
+def test_proxy_registry_expired_token_is_not_redeemable():
+    """A token that aged past _TTL_SECONDS must not be redeemable.
+
+    _gc() only runs on register(): with no subsequent registration an
+    hour-old token used to stay redeemable forever, because pop() never
+    checked the TTL itself.
+    """
+    reg = dpx.ProxyRegistry()
+    url = reg.register("https://1.2.3.4/f.bin", "f.bin", "http://h:1", "tok")
+    token = url.split("proxy=", 1)[1].split("&", 1)[0]
+    assert reg.pop(token) is not None  # fresh token redeems once
+
+    url2 = reg.register("https://1.2.3.4/g.bin", "g.bin", "http://h:1", "tok")
+    token2 = url2.split("proxy=", 1)[1].split("&", 1)[0]
+    reg._entries[token2]["ts"] -= dpx._TTL_SECONDS + 1
+    assert reg.pop(token2) is None
+    # 已过期 token 被消费：不能重试第二次
+    assert token2 not in reg._entries

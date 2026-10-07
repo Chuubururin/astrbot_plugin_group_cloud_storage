@@ -83,6 +83,20 @@ def _is_restricted_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
         mapped = ip.ipv4_mapped
         if mapped is not None and _is_restricted_ip(mapped):
             return True
+        # Tunnel forms embed an IPv4 the naive view misses: 6to4 (2002::/16)
+        # and Teredo (2001:0000::/32, whose tuple carries BOTH peer and
+        # server IPv4s), plus the deprecated IPv4-compatible ::/96 prefix.
+        six = getattr(ip, "sixtofour", None)
+        if six is not None and _is_restricted_ip(six):
+            return True
+        ter = getattr(ip, "teredo", None)
+        if ter is not None and any(
+            _is_restricted_ip(v) for v in tuple(ter)[:2]
+        ):
+            return True
+        if ip.packed[:12] == b"\x00" * 12 and ip.packed[12:] != b"\x00" * 4:
+            if _is_restricted_ip(ipaddress.IPv4Address(ip.packed[12:])):
+                return True
     return False
 
 
@@ -349,6 +363,13 @@ def resolve_and_pin_ip(
     Raises ExternalApiError if any resolved address is restricted.
     """
     parsed = urlparse(url)
+    # Per-hop scheme allow-list: a redirect target like gopher:// must not
+    # ride through validation just because the client happens not to speak
+    # the scheme today.
+    if parsed.scheme not in ("http", "https"):
+        raise ExternalApiError(
+            "openlist", f"URL scheme not allowed: {parsed.scheme or '(empty)'}"
+        )
     hostname = parsed.hostname
     if not hostname:
         raise ExternalApiError("openlist", f"URL has no hostname: {url}")

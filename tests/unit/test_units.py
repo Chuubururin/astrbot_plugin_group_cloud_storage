@@ -204,3 +204,25 @@ class TestConfigStringUnits:
     def test_schema_accepts_good_units(self):
         warnings = dict(validate_config({"fetch_max_size": "2GB"}))
         assert "fetch_max_size" not in warnings
+
+    def test_schema_warns_bridge_enabled_without_base_url(self):
+        warnings = dict(validate_config({"openlist_enabled": True}))
+        assert "openlist_base_url" in warnings
+        # base_url 已配置（或桥接未启用）时不再告警
+        assert "openlist_base_url" not in dict(
+            validate_config({"openlist_enabled": True, "openlist_base_url": "http://ol:5244"})
+        )
+        assert "openlist_base_url" not in dict(validate_config({"openlist_enabled": False}))
+
+    def test_schema_warns_on_host_port_in_host_key(self):
+        # host:port 填进了 host 键 → 生成的下载地址会是 "http://h:6186:6186/..."
+        warnings = dict(validate_config({"download_server_host": "192.168.1.5:6186"}))
+        assert "download_server_host" in warnings
+        assert "download_server_host" in dict(
+            validate_config({"download_server_host": "my host\tx"})
+        )
+        # 合法值不告警：纯 IPv4、主机名、裸 IPv6 字面量
+        for ok in ("127.0.0.1", "astrbot", "::1", "2001:db8::1"):
+            assert "download_server_host" not in dict(
+                validate_config({"download_server_host": ok})
+            ), ok

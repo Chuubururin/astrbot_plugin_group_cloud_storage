@@ -63,6 +63,26 @@ async def _group_open_error(s: Services, group: str) -> dict | None:
     return None
 
 
+def _open_gate_for(s: Services):
+    """Exception-form of the open-gate for core-layer callbacks.
+
+    ``FileOpsService.direct_link``'s global stale-id fallback can land on a
+    different group than the one the handler gated; the core layer takes an
+    async ``(group_id) -> None`` callable that raises on a closed group (the
+    caller converts it to a 404-style "not found" to avoid leaking the
+    resource's existence).
+    """
+
+    async def _gate(group: str) -> None:
+        if not group:
+            raise ValueError("group not managed")
+        await s.scan.assert_group_openable(
+            group, s.config.get("managed_groups", [])
+        )
+
+    return _gate
+
+
 @asynccontextmanager
 async def _account_scope_for(s: Services, group: str):
     """account_scope of the group's owning account for direct s.api.* calls.

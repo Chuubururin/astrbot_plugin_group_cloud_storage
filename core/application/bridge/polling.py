@@ -20,6 +20,11 @@ from core.application.bridge import _now, _split_ext, _short_suffix
 SWEEP_TICK_SEC = 15.0
 SWEEP_MAX_LIFETIME_SEC = 3600.0
 
+# Poll-error log throttle: log the first ExternalApiError, then every Nth
+# consecutive one (an OpenList outage used to log a warning per tick —
+# ~6/min at a 10s interval — for as long as any task stayed active).
+_POLL_ERROR_LOG_EVERY = 6
+
 
 class PollingMixin:
     """Background polling and task-driven status checks."""
@@ -233,6 +238,7 @@ class PollingMixin:
     async def _poll_loop(self) -> None:
         """Poll loop: check undone/done lists, update ledger."""
         backoff: dict[str, int] = {}
+        poll_failures = 0
 
         while not self._stopping:
             rows = await self._store.list_archive_map(
@@ -256,6 +262,7 @@ class PollingMixin:
             try:
                 undone = {t.id: t for t in await self._client.tasks_undone()}
                 done = {t.id: t for t in await self._client.tasks_done()}
+                poll_failures = 0
 
                 for row in rows:
                     task = undone.get(row["task_id"]) or done.get(row["task_id"])
@@ -292,7 +299,14 @@ class PollingMixin:
                         await self._notify_group(row, state)
 
             except ExternalApiError as e:
-                logger.warning(f"[bridge] poll error: {e.message}")
+                # Throttled: see _POLL_ERROR_LOG_EVERY. poll_failures resets
+                # to 0 on the next successful tick, so recovery is silent.
+                poll_failures += 1
+                if poll_failures == 1 or poll_failures % _POLL_ERROR_LOG_EVERY == 0:
+                    logger.warning(
+                        f"[bridge] poll error ({poll_failures} consecutive): "
+                        f"{e.message}"
+                    )
 
     async def _queue_ledger_task(self) -> None:
         """Consume queue events for bridge_in ledger linkage .

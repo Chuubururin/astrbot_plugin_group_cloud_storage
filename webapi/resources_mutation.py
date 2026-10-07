@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response
 try:
@@ -16,7 +15,7 @@ except ImportError:
     _StarletteRequest = None
 from commands.handlers import Services
 from core.api_validate import ApiValidationError, json_body, pick, qi
-from .webapi_base import _param, _group_open_error, _account_scope_for
+from .webapi_base import _param, _group_open_error, _account_scope_for, _open_gate_for
 
 async def api_file_tags(s: Services) -> dict:
     """Overwrite resource tags (undo supported)."""
@@ -174,7 +173,7 @@ async def api_file_link(s: Services) -> dict:
     if fid <= 0:
         return error_response("id required", status_code=400)
     try:
-        url, name = await s.ops.direct_link(group, fid)
+        url, name = await s.ops.direct_link(group, fid, gate=_open_gate_for(s))
     except ValueError as e:
         # not-found -> 404, volume guard -> 400
         return error_response(str(e), status_code=404 if "not found" in str(e) else 400)
@@ -313,25 +312,24 @@ async def api_file_download(s: Services) -> dict | object:
         except Exception:
             d2 = None
         if d2:
+            # The fallback may land on a different group than the one the
+            # caller passed the gate for — re-run the open-gate on the
+            # resource's actual group before serving its bytes.
+            if err := await _group_open_error(s, str(d2["group_id"])):
+                return err
             target, name = await s.ops.download_info(
                 d2["group_id"], fid, allow_incomplete=allow_incomplete
             )
         else:
             return error_response(f"{e}（全局亦无 id={fid}）", status_code=404)
-    # RFC5987 filename (headers are latin-1 only; non-ASCII/special chars must be percent-encoded)
-    from urllib.parse import quote as _quote
+    # Shared RFC6266 builder (download_proxy): legacy `filename=` derived
+    # from the real name (non-ASCII -> "_", extension kept — the Issue #8
+    # contract; a hard-coded "download" used to drop both) plus the RFC5987
+    # `filename*=` carrying the real name.
+    from core.application.download_proxy import _content_disposition, ascii_fallback
 
-    safe_name = (name or "download").replace('"', "_")
-    # RFC6266 fallback: `filename=` must be ASCII-only, but it must still be a
-    # *usable* name. Hard-coding "download" (the old behaviour) dropped both
-    # the real stem and the extension, so any client that does not understand
-    # `filename*=` saved an extension-less "download" (Issue #8). Derive it
-    # from the real name: non-ASCII -> "_", keep the extension.
-    ascii_file = re.sub(r"[^\x20-\x7e]", "_", safe_name).replace("\\", "_")
-    ascii_file = ascii_file.replace("/", "_").strip() or "download"
-    disp = (
-        f"attachment; filename=\"{ascii_file}\"; filename*=UTF-8''{_quote(safe_name)}"
-    )
+    ascii_file = ascii_fallback(name)
+    disp = _content_disposition(name)
     from pathlib import Path as _Path
 
     # Volume reassembly: local temp file -> direct file response; single file: streamed URL proxy
@@ -589,7 +587,7 @@ async def api_files_links(s: Services) -> dict:
     links, errors = [], []
     async for fid, gid in _managed_items(s, items, errors):
         try:
-            url, name = await s.ops.direct_link(gid, fid)
+            url, name = await s.ops.direct_link(gid, fid, gate=_open_gate_for(s))
             links.append({"id": fid, "name": name, "url": url})
         except Exception as e:
             logger.warning(f"[webapi] direct_link id={fid}: {e}", exc_info=True)

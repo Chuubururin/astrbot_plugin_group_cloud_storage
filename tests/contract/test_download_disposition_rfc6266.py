@@ -189,6 +189,56 @@ def test_content_disposition_is_latin1_encodable():
     assert raw.isascii(), f"latin-1 ok but value is not ascii: {raw!r}"
 
 
+def test_content_disposition_encodes_slash_in_star_param():
+    """RFC5987 attr-char has no ``/``: ``quote(safe="")`` must encode it.
+
+    ``quote()`` leaves ``/`` unencoded by default, so a filename carrying a
+    slash produced a literal (non-spec-compliant) slash inside ``filename*``.
+    The legacy ``filename=`` already replaces it via ascii_fallback.
+    """
+    raw = dpx._content_disposition("a/b.png")
+    assert _star_param(raw) == "a%2Fb.png", raw
+    assert _ascii_param(raw) == "a_b.png", raw
+
+
+def test_content_disposition_empty_name_falls_back_everywhere():
+    """An empty name must not produce an empty ``filename*=`` either — some
+    clients then derive the name from the URL tail (the Issue #8 bug)."""
+    raw = dpx._content_disposition("")
+    assert _ascii_param(raw) == "download", raw
+    assert _star_param(raw) == "download", raw
+
+
+@pytest.mark.asyncio
+async def test_stream_heads_carry_no_store(tmp_path, monkeypatch):
+    """Authenticated single-use download responses must not be cacheable.
+
+    Every raw-socket head in the download service (staged / proxy /
+    local-file streams, and the 302 in download_server.py) carries
+    ``Cache-Control: no-store`` — an intermediary caching a 200 keyed to the
+    URL would serve group-private bytes to whoever reuses the URL shape.
+    """
+    src = tmp_path / "staged.bin"
+    src.write_bytes(b"PAYLOAD")
+    sink = _Sink()
+    await dpx.serve_staged(sink, {"path": str(src), "name": "f.bin"}, _reply)
+    assert "Cache-Control: no-store" in _head_only(sink.data)
+
+    src2 = tmp_path / "vol_part_aa.bin"
+    src2.write_bytes(b"0123456789")
+    sink2 = _Sink()
+    await dio.serve_local_file(sink2, src2, "f.bin", "")
+    assert "Cache-Control: no-store" in _head_only(sink2.data)
+
+    client = _FakeClient([_FakeResp(200, {"content-type": "text/plain"}, chunks=(b"x",))])
+    monkeypatch.setattr(dpx, "_open_client", lambda: client)
+    sink3 = _Sink()
+    await dpx.serve_proxy(
+        sink3, {"url": "https://1.2.3.4/f", "name": "f.bin"}, _reply
+    )
+    assert "Cache-Control: no-store" in _head_only(sink3.data)
+
+
 # ------------------------------------------ 2. the three streaming helpers
 
 
@@ -286,8 +336,14 @@ def test_resources_mutation_has_no_hardcoded_download_filename():
 
 
 def test_resources_mutation_derives_ascii_fallback_from_real_name():
-    """The replacement must be a real transformation of the name, not a
-    second constant — assert the regex-based derivation is in place."""
+    """The WebAPI path must delegate to the shared RFC6266 builder, not keep
+    its own copy: three builders had already drifted once (the inline one
+    predated the slash/quote hardening in download_proxy.ascii_fallback).
+    The derivation itself (regex-based, real-name -> ASCII) is pinned by the
+    helper-level tests above; here we pin the delegation."""
     src = Path(res.__file__).read_text(encoding="utf-8")
-    assert "ascii_file = re.sub(" in src, "ASCII fallback derivation missing"
-    assert "import re" in src, "re not imported"
+    assert "_content_disposition(" in src, "shared builder not used"
+    assert "ascii_fallback(" in src, "shared ASCII fallback not used"
+    assert "re.sub(" not in src, "inline derivation came back"
+    # 行级匹配：src 里的 "import resolve_and_pin_ip" 会子串误中 "import re"
+    assert "\nimport re\n" not in src, "local re import came back"

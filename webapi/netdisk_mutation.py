@@ -110,9 +110,29 @@ async def api_netdisk_upload_url(s: Services) -> dict:
     # SSRF protection: scheme whitelist http/https only; private-address access
     # is gated by openlist_allow_private_address (the OpenList server itself is
     # the final boundary)
-    tasks = await s.bridge.submit_offline_download([url], dst_dir)
+    try:
+        tasks = await s.bridge.submit_offline_download([url], dst_dir)
+    except Exception as e:
+        # This was the only write handler here that let the exception escape
+        # (surfacing as an opaque framework 500 with no reason in the panel).
+        # Mirror the sibling handlers: log with context, answer with the
+        # server-side message.
+        logger.warning(
+            f"[webapi] offline download submit failed (dir={dst_dir}): {e}",
+            exc_info=True,
+        )
+        return error_response(f"离线下载任务提交失败：{e}", status_code=502)
     if not tasks:
-        return error_response("openlist rejected download task", status_code=500)
+        # API answered 200 but listed no task: most often a policy/space
+        # rejection that OpenList swallowed. Say so instead of a bare 500.
+        logger.warning(
+            f"[webapi] offline download returned no task (url host "
+            f"{url.split('/', 3)[-1].split('?')[0]!r}, dir={dst_dir})"
+        )
+        return error_response(
+            "OpenList 未返回离线任务（可能被存储策略或空间限制拒绝）",
+            status_code=502,
+        )
     return json_response(
         {
             "ok": True,

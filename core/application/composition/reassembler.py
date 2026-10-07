@@ -19,6 +19,21 @@ from core.application.composition.integrity import verify_part, verify_total
 _MAX_REASSEMBLY_BYTES = 4 * 1024**3
 
 
+def concat_escape(path: str | Path) -> str:
+    """Quote a path for the ffmpeg concat demuxer manifest.
+
+    Segment file names originate from QQ group file names, which legally
+    contain ``'``; with ``-safe 0`` an unescaped quote allows manifest
+    injection (extra directives / arbitrary local file paths exfiltrated
+    into the output). ffmpeg quoting: close the string, emit an escaped
+    quote, reopen. The concat demuxer parses line by line, so raw
+    newlines inside a quoted string would end the directive even with
+    balanced quotes — they are flattened to ``_``.
+    """
+    s = str(Path(path).as_posix()).replace("\r", "_").replace("\n", "_")
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
 def reassemble_volumes(
     parts: list[dict], dest: str | Path, total_sha256: str | None = None
 ) -> str:
@@ -91,7 +106,7 @@ async def reassemble_video(seg_paths: list[str | Path], dest: str | Path) -> str
     list_file = dest.parent / f"{dest.stem}_concat.txt"
     with list_file.open("w", encoding="utf-8") as lf:
         for seg in seg_paths:
-            lf.write(f"file '{Path(seg).as_posix()}'\n")
+            lf.write(f"file {concat_escape(seg)}\n")
 
     def _concat():
         proc = subprocess.run(

@@ -34,6 +34,19 @@ def _clamp_name(name: str) -> str:
     return name[:_NAME_MAX] or "fetched"
 
 
+def _log_safe_url(url: str) -> str:
+    """Loggable form of an ingest URL.
+
+    ``submit_fetch`` accepts ``sftp://user:pass@host`` / ``smb://user:pass@``
+    — logging the raw URL puts credentials into INFO logs. Keep
+    scheme/host/port/path only (no userinfo, no query).
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}{parts.path}"
+
+
 class FetchMixin:
     async def submit_fetch(
         self,
@@ -105,7 +118,7 @@ class FetchMixin:
             size = await self._download(url, staged)
             if size <= 0:
                 raise ValueError("fetched empty content")
-            logger.info(f"[ingest] fetched {url} ({size} bytes)")
+            logger.info(f"[ingest] fetched {_log_safe_url(url)} ({size} bytes)")
 
             # Optional format conversion before any target branch.
             if convert_to and self.converter is not None and not to_essence:

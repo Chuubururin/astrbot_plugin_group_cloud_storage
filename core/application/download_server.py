@@ -6,9 +6,12 @@ Semantics (distinct from "egress = push to an external target"):
   external clients hit this host directly to pull cloud files. The address
   (host/port/token) comes from the plugin config
   (_conf_schema download_server_*)
-- HTTP: `GET /download?group&id&token` - single files 302-redirect to the
+- HTTP: `GET /download?group&id&exp&sig` - per-resource HMAC link (the
+  master download_token is no longer embedded in issued links; legacy
+  `?...&token=` links keep being accepted until the token is rotated).
+  Single files 302-redirect to the
   QQ CDN direct link (zero proxy load); volumes/videos are reassembled
-  locally and streamed back. `GET /download?staged=<token>&token` serves a
+  locally and streamed back. `GET /download?staged=<token>&exp&sig` serves a
   registered staged file (e.g. an essence text exported to a .txt)
 - SFTP: paramiko virtual filesystem (/<group_id>/<filename>); reads pull bytes
   from the cloud on demand and reuse the cache on later opens;
@@ -20,6 +23,7 @@ Semantics (distinct from "egress = push to an external target"):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import inspect
 import shutil
@@ -32,7 +36,12 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs, quote, urlparse
 
-from core.application.download_proxy import ProxyRegistry, serve_proxy, serve_staged
+from core.application.download_proxy import (
+    ProxyRegistry,
+    _header_safe,
+    serve_proxy,
+    serve_staged,
+)
 from core.application.download_server_io import (
     cleanup_recon,
     collect_resources,
@@ -58,10 +67,11 @@ _LOOKUP_PAGE = 50
 # built from one resolves on the client to the client's own machine.
 _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
 
-
-def _safe_header_name(value: str) -> str:
-    """Strip CR/LF from a header-bound string (filename/URL): no header injection."""
-    return value.replace("\r", "").replace("\n", "")
+# Signed download links are distributed into QQ group chats and handed to
+# OpenList as offline-download sources: generous enough that a link posted
+# in chat stays usable for weeks, bounded so a leaked link is not a
+# permanent master-token leak.
+_LINK_TTL_SECONDS = 30 * 86400
 
 
 def _close_socket(sock) -> None:
@@ -167,22 +177,84 @@ class DownloadServerService:
     def http_base(self) -> str:
         return f"http://{self.public_host}:{self.http_port}"
 
+    # ---------- Link signing ----------
+
+    def _link_sig(self, scope: str, exp: int) -> str:
+        return hmac.new(
+            self.token.encode("utf-8"),
+            f"{scope}|{exp}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _signed_link_qs(self, scope: str) -> str:
+        exp = int(time.time()) + _LINK_TTL_SECONDS
+        return f"exp={exp}&sig={self._link_sig(scope, exp)}"
+
+    @staticmethod
+    def _link_scope_of_q(q: dict) -> str | None:
+        """Reconstruct the signed scope from the request query (None if the
+        request does not address exactly one link kind)."""
+        group = q.get("group", [""])[0]
+        rid = q.get("id", [""])[0]
+        proxy = q.get("proxy", [""])[0]
+        staged = q.get("staged", [""])[0]
+        if group and rid.isdigit():
+            return f"g|{group}|{rid}"
+        if proxy:
+            return f"proxy|{proxy}"
+        if staged:
+            return f"staged|{staged}"
+        return None
+
+    def _request_authorized(self, q: dict) -> bool:
+        """Accept either the master token (legacy links issued before signed
+        URLs — they stay valid until the admin rotates download_token) or a
+        per-resource HMAC signature over ``<scope>|<exp>`` that has not
+        expired. Signed links are what new code hands out, so the master
+        token no longer rides in group-chat messages."""
+        if not self.token:
+            return False
+        tok = q.get("token", [""])[0]
+        if hmac.compare_digest(tok.encode("utf-8"), self.token.encode("utf-8")):
+            return True
+        exp_raw = q.get("exp", [""])[0]
+        sig = q.get("sig", [""])[0]
+        if not exp_raw.isdigit() or not sig:
+            return False
+        if int(exp_raw) < time.time():
+            return False
+        scope = self._link_scope_of_q(q)
+        if scope is None:
+            return False
+        return hmac.compare_digest(
+            sig.encode("utf-8"), self._link_sig(scope, int(exp_raw)).encode("utf-8")
+        )
+
     def download_url(self, group_id: str, id: int) -> str:
         return (
-            f"{self.http_base()}/download?group={group_id}&id={id}&token={self.token}"
+            f"{self.http_base()}/download?group={group_id}&id={id}"
+            f"&{self._signed_link_qs(f'g|{group_id}|{id}')}"
         )
 
     def register_proxy(self, url: str, name: str, *, allow_private: bool = False) -> str:
         """Register a remote URL under a fixed name; returns a proxied URL."""
         return self._proxy_registry.register(
-            url, name, self.http_base(), self.token, allow_private=allow_private
+            url,
+            name,
+            self.http_base(),
+            self.token,
+            allow_private=allow_private,
+            signer=lambda t: self._signed_link_qs(f"proxy|{t}"),
         )
 
     def register_staged(self, path: str | Path, name: str) -> dict:
         """Register a local file as a downloadable artifact; returns its
         http/ftp/smb address info (used by essence text distribution)."""
         p = Path(path)
-        token = uuid.uuid4().hex[:10]
+        # Full 128-bit token: staged artifacts sit behind the global
+        # download_token, but a 40-bit id is cheap to brute-force once any
+        # link leaks (upload tokens already use 32 hex).
+        token = uuid.uuid4().hex
         self._staged[token] = {"path": str(p), "name": name or p.name, "ts": time.time()}
         # Keep the registry bounded: drop entries older than 24h and unlink
         # orphaned temp files so they don't accumulate on disk.
@@ -194,7 +266,10 @@ class DownloadServerService:
                     Path(entry["path"]).unlink(missing_ok=True)
                 except OSError:
                     pass
-        http_url = f"{self.http_base()}/download?staged={token}&token={self.token}"
+        http_url = (
+            f"{self.http_base()}/download?staged={token}"
+            f"&{self._signed_link_qs(f'staged|{token}')}"
+        )
         info: dict = {"token": token, "http_url": http_url}
         if self.sftp_port > 0:
             info["sftp"] = {
@@ -417,9 +492,7 @@ class DownloadServerService:
             if parsed.path != "/download" or method != "GET":
                 await self._reply(writer, 404, b"not found")
                 return
-            if not self.token or not hmac.compare_digest(
-                q.get("token", [""])[0].encode("utf-8"), self.token.encode("utf-8")
-            ):
+            if not self._request_authorized(q):
                 await self._reply(writer, 401, b"unauthorized")
                 return
             group = q.get("group", [""])[0]
@@ -453,8 +526,8 @@ class DownloadServerService:
                 logger.debug(f"[dlserver] download info rejected: {e}")
                 await self._reply(writer, 404, b"resource not found")
                 return
-            name = _safe_header_name(name)
-            src = _safe_header_name(str(src))  # OneBot URL -> raw Location header
+            name = _header_safe(name)
+            src = _header_safe(str(src))  # OneBot URL -> raw Location header
             # src arrives already encoded for the reply head: any inline comment
             # placed between this statement and Path(src) is consumed as the
             # expression (L1) - use a block comment only when needed.
@@ -473,7 +546,10 @@ class DownloadServerService:
                 proxied = self.register_proxy(src, name, allow_private=self.allow_private)
                 body = (
                     f"HTTP/1.1 302 Found\r\nLocation: {proxied}\r\n"
-                    f"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    f"Content-Length: 0\r\n"
+                    # The Location carries a single-use token: no client or
+                    # intermediary may replay a cached redirect.
+                    f"Cache-Control: no-store\r\nConnection: close\r\n\r\n"
                 ).encode("latin-1")
                 writer.write(body)
                 await writer.drain()

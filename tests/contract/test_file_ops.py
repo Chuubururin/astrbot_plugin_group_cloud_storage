@@ -135,6 +135,40 @@ async def test_download_and_link_route_to_owning_account(env):
     assert "get_group_file_url:g2:f2:" in api.calls
 
 @pytest.mark.asyncio
+async def test_direct_link_global_fallback_respects_gate(env):
+    """stale-id 全局回退不得绕过群门禁：回退命中异群资源时，gate 拒绝
+    必须表现为 not-found（不泄漏资源存在性）；gate 放行才继续取链。"""
+    tmp_path, store, api, queue, ops = env
+    await store.upsert_groups([GroupInfo(group_id="g2", account_id="10001")])
+    res = Resource(group_id="g2", type=ResourceType.FILE, name="secret.txt",
+                   source_ref="f9", size=10, busid=109, created_at=1)
+    await store.upsert_resources([res])
+    page = await store.query_resources(ResourceQuery(group_id="g2", page_size=10))
+    rid = page.items[0].id
+
+    async def _deny(group):
+        raise ValueError("group not managed")
+
+    # 请求群 g1（不含该资源），回退命中 g2 —— gate 拒绝 => not found
+    with pytest.raises(ValueError, match="not found"):
+        await ops.direct_link("g1", rid, gate=_deny)
+    assert not any(c.startswith("get_group_file_url") and "f9" in c for c in api.calls)
+
+    # gate 放行 => 正常取链，且 gate 收到的是资源实际所在群
+    seen = []
+
+    async def _allow(group):
+        seen.append(group)
+
+    url, name = await ops.direct_link("g1", rid, gate=_allow)
+    assert url == "https://fake/download/f9" and name == "secret.txt"
+    assert seen == ["g2"]
+
+    # 不传 gate：保持既有回退行为（旧调用方语义不变）
+    url2, _ = await ops.direct_link("g1", rid)
+    assert url2 == "https://fake/download/f9"
+
+@pytest.mark.asyncio
 async def test_replace_name_flow(env, monkeypatch):
     """改名重传（v2.6 唯一改名路径）：下载原件→新名重传→删旧→索引替换。"""
     tmp_path, store, api, queue, ops = env
