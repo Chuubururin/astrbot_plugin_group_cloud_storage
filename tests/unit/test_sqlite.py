@@ -679,8 +679,10 @@ def _corrupt_meta(name: str, value: str = "{oops"):
     """
 
     def _do(conn):
-        for trg in ("resources_fts_ai", "resources_fts_ad", "resources_fts_au"):
-            conn.execute(f"DROP TRIGGER IF EXISTS {trg}")
+        # 触发器名是夹具常量：逐条字面量执行，不做动态 SQL 构造
+        conn.execute("DROP TRIGGER IF EXISTS resources_fts_ai")
+        conn.execute("DROP TRIGGER IF EXISTS resources_fts_ad")
+        conn.execute("DROP TRIGGER IF EXISTS resources_fts_au")
         conn.execute("UPDATE resources SET meta=? WHERE name=?", (value, name))
         conn.commit()
 

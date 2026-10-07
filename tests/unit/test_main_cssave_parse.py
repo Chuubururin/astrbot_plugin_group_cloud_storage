@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -24,22 +25,50 @@ sys.path.insert(0, str(ROOT))
 _MAIN_SRC = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
-def _load_parser():
-    """从 main.py 源码中提取 _parse_cssave_args 并编译执行。"""
+def _materialize(fn_name: str, namespace: dict, *, in_class: str | None = None):
+    """从 main.py 源码中提取目标函数并物化为可调用对象（不经 exec）。
+
+    main.py 不能在测试桩下直接 import（core.runtime.adapter 依赖宿主
+    astrbot.core 包，且 import 时会 evict sys.modules 中的插件模块，影响
+    其他用例），所以这里用 AST 取出真实函数体：compile 成代码对象后按名
+    取出子作用域，以 FunctionType 绑定给定 globals——测的仍是生产代码
+    本身，且不在测试进程里执行任意语句。
+    """
     tree = ast.parse(_MAIN_SRC, filename="main.py")
-    node = next(
-        (n for n in tree.body
-         if isinstance(n, ast.FunctionDef) and n.name == "_parse_cssave_args"),
-        None,
+    if in_class is None:
+        node = next(
+            (n for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name == fn_name),
+            None,
+        )
+    else:
+        cls = next(
+            (n for n in tree.body
+             if isinstance(n, ast.ClassDef) and n.name == in_class),
+            None,
+        )
+        node = None if cls is None else next(
+            (n for n in cls.body
+             if isinstance(n, ast.AsyncFunctionDef) and n.name == fn_name),
+            None,
+        )
+    assert node is not None, f"main.py 必须保留 {fn_name}"
+    node.decorator_list = []  # 剥掉 @filter 等 host 装饰器
+    future = ast.ImportFrom(
+        module="__future__", names=[ast.alias(name="annotations")], level=0
     )
-    assert node is not None, "main.py 必须保留模块级 _parse_cssave_args"
-    namespace: dict = {}
-    module = ast.Module(body=[node], type_ignores=[])
-    exec(compile(module, "main.py", "exec"), namespace)  # noqa: S102
-    return namespace["_parse_cssave_args"]
+    module = ast.fix_missing_locations(
+        ast.Module(body=[future, node], type_ignores=[])
+    )
+    code = compile(module, "main.py", "exec")
+    fn_code = next(
+        c for c in code.co_consts
+        if isinstance(c, types.CodeType) and c.co_name == fn_name
+    )
+    return types.FunctionType(fn_code, namespace)
 
 
-parse = _load_parser()
+parse = _materialize("_parse_cssave_args", {})
 BODY = "本周完成 A 和 B，下周做 C"
 
 
@@ -79,20 +108,6 @@ def _load_strip_command_params():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.strip_command_params
-
-
-def _load_cssave_handler_module():
-    """提取 Main.cssave（剥掉 @filter 装饰器）编译成模块。"""
-    tree = ast.parse(_MAIN_SRC, filename="main.py")
-    cls = next(n for n in tree.body
-               if isinstance(n, ast.ClassDef) and n.name == "Main")
-    fn = next(n for n in cls.body
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "cssave")
-    fn.decorator_list = []
-    future = ast.ImportFrom(
-        module="__future__", names=[ast.alias(name="annotations")], level=0
-    )
-    return ast.fix_missing_locations(ast.Module(body=[future, fn], type_ignores=[]))
 
 
 _strip_command_params = _load_strip_command_params()
@@ -145,8 +160,7 @@ async def test_cssave_handler_parses_by_behavior():
         "handle_cssave": _fake_handle_cssave,
         "AstrMessageEvent": object,
     }
-    exec(compile(_load_cssave_handler_module(), "main.py", "exec"), namespace)  # noqa: S102
-    cssave = namespace["cssave"]
+    cssave = _materialize("cssave", namespace, in_class="Main")
 
     for raw, want in (
         ("/cssave 周报 " + BODY, ("", "周报", BODY)),

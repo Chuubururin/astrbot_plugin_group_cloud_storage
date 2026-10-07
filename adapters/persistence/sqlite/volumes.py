@@ -16,6 +16,22 @@ _VOLUME_FIELD_WHITELIST = frozenset(
     {"source_ref", "busid", "sha256", "status", "part_name", "size"}
 )
 
+# UPSERT 语句在模块导入期组装一次：CASE 由 status_policy.volume_status_sql()
+# 从 VOLUME_UPSERT_TRANSITIONS 生成（H3：与 merge_volume_status() 同一策略
+# 表，resume 跳过靠它保住已完成分片的状态）。执行点只见常量——全部运行期
+# 值走 ? 占位绑定，语句本身无任何插值。
+_VOLUME_UPSERT_SQL = (
+    "INSERT INTO volumes "
+    "(parent_resource_id, seq, part_name, source_ref, "
+    "busid, size, sha256, status, upload_time, group_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(parent_resource_id, seq) DO UPDATE SET "
+    "part_name=excluded.part_name, "
+    "status=" + volume_status_sql() + ", "
+    "size=excluded.size, sha256=excluded.sha256, "
+    "group_id=COALESCE(excluded.group_id, group_id)"
+)
+
 
 class VolumesMixin(StorePart):
     """Volume management operations."""
@@ -29,19 +45,10 @@ class VolumesMixin(StorePart):
                 # H3: insert_volumes re-enters with status="pending" on every
                 # pipeline (re)entry, so a plain excluded.status demoted a
                 # finished part back to pending -- the resume skip then never
-                # matched and pause->resume re-uploaded EVERY part. The CASE is
-                # generated from VOLUME_UPSERT_TRANSITIONS (status_policy), the
-                # same table merge_volume_status() reads.
-                conn.executemany(f"""INSERT INTO volumes
-                         (parent_resource_id, seq, part_name, source_ref,
-                          busid, size, sha256, status, upload_time, group_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)
-                       ON CONFLICT(parent_resource_id, seq) DO UPDATE SET
-                         part_name=excluded.part_name,
-                         status={volume_status_sql()},
-                         size=excluded.size, sha256=excluded.sha256,
-                         group_id=COALESCE(excluded.group_id, group_id)
-                    """,
+                # matched and pause->resume re-uploaded EVERY part. The CASE
+                # lives in _VOLUME_UPSERT_SQL (see module head).
+                conn.executemany(
+                    _VOLUME_UPSERT_SQL,
                     [
                         (
                             v.parent_resource_id, v.seq, v.part_name, v.source_ref,
