@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adapters.persistence.sqlite import SqliteMetaStore  # noqa: E402
 from core.application.files import FileOpsService  # noqa: E402
 from core.application.files import consts  # noqa: E402
+from core.application.files.volume import _cut_dir_name  # noqa: E402
 from core.application.files.converter import ConverterService  # noqa: E402
 from core.application.queue import OpQueue  # noqa: E402
 from core.application.transfer import ProtocolAdapter, TransferService  # noqa: E402
@@ -223,7 +224,7 @@ async def test_volume_upload_failure_leaves_no_zip(env, monkeypatch):
     with pytest.raises(OneBotApiError):
         await ops._do_volume_upload(op, src, "big.bin", "vol1", None)
 
-    cut_dir = tmp_path / "tmp" / "vol_vol1"
+    cut_dir = tmp_path / "tmp" / _cut_dir_name("vol1")
     assert not cut_dir.exists(), sorted(p.name for p in cut_dir.glob("*"))
     # 分卷行仍然保留（重试以 DB 行为准，不依赖本地切片）
     vols = await store.list_volumes("g1:file:vol1")

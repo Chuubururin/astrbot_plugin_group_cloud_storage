@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import shutil
 import time
 import uuid
@@ -34,6 +35,26 @@ def _like_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+_FS_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _cut_dir_name(parent_id: str) -> str:
+    """Filesystem-safe scratch dir name for volume cutting.
+
+    ``parent_id`` can carry characters that are illegal in Windows
+    filenames (``"volgroup:<hex>"`` contains ``:`` -> WinError 267 on
+    every split, retried forever). The directory name is derived from
+    the id at three separate points per upload, so this is the single
+    source of truth. The sha1 suffix keeps ids that sanitize to the
+    same slug from colliding, and pins the name away from trailing
+    dots/spaces and reserved device names.
+    """
+    pid = str(parent_id)
+    slug = _FS_UNSAFE_RE.sub("_", pid)[:64]
+    digest = hashlib.sha1(pid.encode("utf-8")).hexdigest()[:10]
+    return f"vol_{slug}_{digest}"
+
+
 class VolumeMixin:
     if TYPE_CHECKING:
         _service: FileOpsService
@@ -55,7 +76,7 @@ class VolumeMixin:
         # Pass 1: split the raw source into slices (CPU-bound: offload to thread)
         def _split_source() -> tuple[list[tuple[int, Path, int, str]], str]:
             total_sha = hashlib.sha256()
-            cut_dir_local = self.tmp_dir / f"vol_{parent_id}"
+            cut_dir_local = self.tmp_dir / _cut_dir_name(parent_id)
             cut_dir_local.mkdir(parents=True, exist_ok=True)
             slices_local: list[tuple[int, Path, int, str]] = []
             with src.open("rb") as fh:
@@ -75,14 +96,14 @@ class VolumeMixin:
             slices, total_sha_hex = await asyncio.to_thread(_split_source)
         except Exception:
             # BUG-12: clean up partial .raw_* files if _split_source fails
-            cut_dir_cleanup = self.tmp_dir / f"vol_{parent_id}"
+            cut_dir_cleanup = self.tmp_dir / _cut_dir_name(parent_id)
             shutil.rmtree(cut_dir_cleanup, ignore_errors=True)
             raise
 
         # The volumes primary key matches resources: the full resource_id
         # (download/backfill queries by detail)
         parent_key = op.payload.get("parent_resource_id_full") or parent_id
-        cut_dir = self.tmp_dir / f"vol_{parent_id}"
+        cut_dir = self.tmp_dir / _cut_dir_name(parent_id)
         total_count = len(slices)
         stem = Path(name).stem or "file"
         volumes: list[VolumeInfo] = []

@@ -368,6 +368,10 @@ async def test_video_split_upload(env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_video_recon_concat(env, monkeypatch):
+    import shutil as _sh
+
+    if not _sh.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
     tmp_path, store, api, queue, ingest = env
     ops = FileOpsService(api, store, queue, ingest.sync,
                          tmp_dir=tmp_path / "tmp2")
