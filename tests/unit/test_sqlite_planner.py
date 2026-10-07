@@ -35,6 +35,16 @@ ROWS = 1000
 # The real filter fragment, so this pins the query the store actually runs.
 QUERY = f"SELECT resources.id FROM resources WHERE EXISTS ({ARCHIVE_MAP_OUT_DONE})"
 
+# 计划探针：execute 汇点必须是纯字面量（动态 SQL 门禁）。与 QUERY 的一致性
+# 由下面的 import 期断言保证——上游过滤片段一变，这里立刻红，钉死语义不变。
+QUERY_PLAN = (
+    "EXPLAIN QUERY PLAN SELECT resources.id FROM resources WHERE EXISTS ("
+    "SELECT 1 FROM archive_map am "
+    "WHERE am.resource_id = resources.id "
+    "AND am.direction = 'out' AND am.state = 'done')"
+)
+assert QUERY_PLAN == "EXPLAIN QUERY PLAN " + QUERY
+
 
 def _res(i: int) -> Resource:
     return Resource(
@@ -72,7 +82,7 @@ async def _archive_map_analyzed(store: SqliteMetaStore) -> bool:
 async def _archive_access(store: SqliteMetaStore) -> str:
     """The archive_map line of the query plan."""
     plan = await store._conn.exec(
-        lambda conn: [row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {QUERY}")]
+        lambda conn: [row[3] for row in conn.execute(QUERY_PLAN)]
     )
     for line in plan:
         if "archive_map" in line or "am " in line:
