@@ -339,6 +339,11 @@ def check(root: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    # 同 check_import_contracts：中文输出在 cp1252 管道上会崩，IO 钉成 UTF-8。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     root = Path(argv[1]).resolve() if len(argv) > 1 else ROOT
     bad = check(root)
     if bad:

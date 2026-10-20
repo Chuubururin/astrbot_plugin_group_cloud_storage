@@ -68,6 +68,7 @@ async def test_video_remux_mp4_to_mkv(tmp_path, conv):
          "-i", "testsrc=duration=1:size=160x120:rate=10",
          "-pix_fmt", "yuv420p", str(src)],
         capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="replace",
     )
     assert proc.returncode == 0
     out = await conv.convert(src, "mkv")
@@ -86,6 +87,7 @@ async def test_image_reencode_png_to_jpg(tmp_path, conv):
         ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64",
          "-frames:v", "1", "-c:v", "png", str(src)],
         capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="replace",
     )
     assert proc.returncode == 0, proc.stderr[-300:]
     out = await conv.convert(src, "jpg")
@@ -110,6 +112,7 @@ async def test_lossy_compress_image(tmp_path, conv):
         ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240",
          "-frames:v", "1", "-c:v", "png", str(src)],
         capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="replace",
     )
     assert proc.returncode == 0
     out = await conv.compress(src)

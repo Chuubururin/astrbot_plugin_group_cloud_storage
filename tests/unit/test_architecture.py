@@ -299,8 +299,16 @@ class TestImportContracts:
             [sys.executable, str(ROOT / "tools" / "check_import_contracts.py")],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(ROOT),
-            env={**os.environ, "PYTHONPATH": str(ROOT)},
+            # 工具输出中文：windows-latest 的管道编码是 cp1252，子进程
+            # print 即 UnicodeEncodeError——显式钉死子进程 IO 为 UTF-8。
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "PYTHONIOENCODING": "utf-8",
+            },
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -319,8 +327,14 @@ class TestDocDrift:
             [sys.executable, str(ROOT / "tools" / "check_doc_drift.py"), str(ROOT)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(ROOT),
-            env={**os.environ, "PYTHONPATH": str(ROOT)},
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "PYTHONIOENCODING": "utf-8",
+            },
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
 

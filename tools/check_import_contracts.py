@@ -78,6 +78,13 @@ def check_contract(cid: str, description: str, source_pkg: str, forbidden: tuple
 
 
 def main() -> int:
+    # 中文输出在 cp1252 管道/控制台（Windows CI、旧代码页本机）上 print 即
+    # UnicodeEncodeError：IO 统一钉成 UTF-8，消费方（测试断言、CI 日志）也按
+    # UTF-8 读。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     all_violations: list[str] = []
     for cid, (desc, src, forbidden) in CONTRACTS.items():
         all_violations.extend(check_contract(cid, desc, src, forbidden))
